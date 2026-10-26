@@ -12,7 +12,7 @@ members = [
 edition = "2024"
 rust-version = "1.90"
 authors = ["Stefan Bartl"]
-repository = "https://github.com/StefanBartl/takt"
+repository = "https://github.com/WKDSteve/takt"
 
 [workspace.dependencies]
 takt-core = { path = "crates/takt-core", version = "0.0.1" }
