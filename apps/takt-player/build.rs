@@ -21,14 +21,10 @@ struct NativeLib {
     cfg: &'static str,
 }
 
+// Order matters: the linker takes the first search path that holds a library.
+// FFmpeg goes first so that a system FFmpeg next to libmpv (e.g. /usr/lib)
+// cannot shadow the build FFMPEG_DIR points at.
 const NATIVE_LIBS: [NativeLib; 2] = [
-    // The mpv-dev archives keep everything flat in one directory.
-    NativeLib {
-        var: "TAKT_LIBMPV_DIR",
-        lib_subdir: "",
-        link_name: "mpv",
-        cfg: "takt_libmpv",
-    },
     // Same variable and layout (`include/`, `lib/`) as ffmpeg-sys-next, so a
     // later FFmpeg binding reads the same setting.
     NativeLib {
@@ -36,6 +32,13 @@ const NATIVE_LIBS: [NativeLib; 2] = [
         lib_subdir: "lib",
         link_name: "avutil",
         cfg: "takt_ffmpeg",
+    },
+    // The mpv-dev archives keep everything flat in one directory.
+    NativeLib {
+        var: "TAKT_LIBMPV_DIR",
+        lib_subdir: "",
+        link_name: "mpv",
+        cfg: "takt_libmpv",
     },
 ];
 

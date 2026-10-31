@@ -28,8 +28,8 @@ Takt baut ohne jede Systembibliothek: Ohne libmpv und FFmpeg läuft `takt-player
 
 | Variable | Zeigt auf | Wirkung |
 |---|---|---|
-| `TAKT_LIBMPV_DIR` | absoluter Pfad zum Ordner mit der Importbibliothek (`mpv.lib`, `libmpv.so`, `libmpv.dylib`) | Suchpfad für den Linker, cfg `takt_libmpv` |
-| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (`avutil.lib` bzw. `libavutil.so`) | Suchpfad `lib/` für den Linker, cfg `takt_ffmpeg` |
+| `TAKT_LIBMPV_DIR` | absoluter Pfad zum Ordner mit der Importbibliothek (`mpv.lib`, `libmpv.dll.a`, `libmpv.so`, `libmpv.dylib`) | Suchpfad für den Linker, cfg `takt_libmpv` |
+| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (`avutil.lib`, `libavutil.dll.a`, `libavutil.so`, `libavutil.dylib`) | Suchpfad `lib/` für den Linker (vor dem libmpv-Ordner, damit eine System-FFmpeg dort ihn nicht überschattet), cfg `takt_ffmpeg` |
 
 `FFMPEG_DIR` ist bewusst derselbe Name und dasselbe Layout wie bei `ffmpeg-sys-next`, damit eine spätere FFmpeg-Anbindung dieselbe Einstellung liest. Der Name ist allgemein: Ist er auf dem Rechner schon für ein anderes Projekt gesetzt (etwa auf einen GPL-Build), läuft der takt-Smoke-Test damit und scheitert.
 
@@ -37,13 +37,19 @@ Ist eine Variable gesetzt, aber kein absoluter Pfad oder fehlt die Importbibliot
 
 Bequem für Terminal und Editor zugleich: die Variablen in `~/.cargo/config.toml` unter `[env]` setzen; dann bauen beide mit denselben Werten und kompilieren nicht abwechselnd neu.
 
-Zur Laufzeit muss das Betriebssystem die Bibliotheken finden: unter Windows liegen die DLLs im `PATH` oder neben der `.exe`, unter Linux im Bibliothekspfad des Systems.
+Zur Laufzeit muss das Betriebssystem die Bibliotheken finden: unter Windows liegen die DLLs im `PATH` oder neben der `.exe`, unter Linux im Bibliothekspfad des Systems oder, für Archive außerhalb davon, in `LD_LIBRARY_PATH`.
 
 ---
 
 ## Windows
 
-Voraussetzungen: Rust mit der Standard-Toolchain `x86_64-pc-windows-msvc` (samt Visual-Studio-Build-Tools), 7-Zip und LLVM mit `llvm-readobj` und `llvm-dlltool`, am einfachsten `scoop install 7zip llvm` (der Installer von 7-zip.org trägt `7z` nicht in den `PATH` ein). Ohne LLVM geht es in einer Developer-PowerShell mit `dumpbin /exports libmpv-2.dll` für die Exportliste und `lib /def:mpv.def /machine:x64 /out:mpv.lib`.
+Voraussetzungen: Rust mit der Standard-Toolchain `x86_64-pc-windows-msvc` (samt Visual-Studio-Build-Tools), 7-Zip und LLVM mit `llvm-readobj` und `llvm-dlltool`, am einfachsten `scoop install 7zip llvm` (der Installer von 7-zip.org trägt `7z` nicht in den `PATH` ein). Ohne LLVM geht es in einer Developer-PowerShell; dann lauten die beiden Zeilen für Exportliste und Importbibliothek:
+
+```powershell
+$exports = dumpbin /exports libmpv-2.dll |
+    Select-String '\s(mpv_\S+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+lib /def:mpv.def /machine:x64 /out:mpv.lib
+```
 
 ### libmpv
 
@@ -91,16 +97,14 @@ cargo test -p takt-player --test native_link
 
 Erwartet: `libmpv::client_api_is_version_2` und `ffmpeg::build_is_lgpl` laufen grün. Ohne die beiden Variablen läuft derselbe Befehl mit null Tests, so wie in der CI.
 
-Dauerhaft gehören **drei** Einstellungen dazu: die beiden Variablen und die beiden DLL-Ordner im `PATH`. Fehlt der `PATH`-Teil, bricht jedes `cargo test --workspace` mit `STATUS_DLL_NOT_FOUND` (`0xc0000135`) ab. `PATH` nicht mit `setx` setzen (kürzt auf 1024 Zeichen), sondern in den Systemeinstellungen oder so:
+Dauerhaft gehören **drei** Einstellungen dazu: die beiden Variablen und die beiden DLL-Ordner im `PATH`. Fehlt der `PATH`-Teil, bricht jedes `cargo test --workspace` mit `STATUS_DLL_NOT_FOUND` (`0xc0000135`) ab. Die beiden Variablen:
 
 ```powershell
 [Environment]::SetEnvironmentVariable('TAKT_LIBMPV_DIR', 'E:\deps\mpv-dev', 'User')
 [Environment]::SetEnvironmentVariable('FFMPEG_DIR', 'E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0', 'User')
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-[Environment]::SetEnvironmentVariable('Path', "$userPath;E:\deps\mpv-dev;E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0\bin", 'User')
 ```
 
-Danach Terminal bzw. Editor neu starten.
+Die beiden `PATH`-Einträge von Hand in den Systemeinstellungen („Umgebungsvariablen bearbeiten“, Benutzer-`Path`) eintragen, möglichst weit oben, damit keine andere `libmpv-2.dll` oder `avutil-*.dll` weiter vorn gewinnt. Nicht per Skript: `setx` kürzt auf 1024 Zeichen, und `[Environment]::SetEnvironmentVariable('Path', …)` friert Einträge wie `%USERPROFILE%\…` als feste Pfade ein. Danach Terminal bzw. Editor neu starten.
 
 ---
 
@@ -116,11 +120,15 @@ sudo apt install libmpv-dev pkg-config
 ```
 
 ```bash
-export TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)"
+# Schlägt pkg-config fehl, bricht die Zeile ab, statt eine leere Variable zu
+# setzen (leer heißt für build.rs „nicht gesetzt“, also stumm null Tests).
+TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)" && export TAKT_LIBMPV_DIR
 cargo test -p takt-player --test native_link
 ```
 
-`FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und setzt `FFMPEG_DIR` auf dessen Wurzel; dann liegen allerdings zwei FFmpeg-Versionen im Prozess.
+Erwartet: genau ein Test, `libmpv::client_api_is_version_2`, grün.
+
+`FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und setzt `FFMPEG_DIR` auf dessen Wurzel und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib"`; dann liegen allerdings zwei FFmpeg-Versionen im Prozess.
 
 Noch nicht auf echter Hardware geprüft (siehe Plattform-Tabelle im README).
 
