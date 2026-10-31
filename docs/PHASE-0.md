@@ -107,26 +107,9 @@ Erst nach Schritt 4 beginnt die vierwöchige Alltagsnutzung, die Gate 0 entschei
 
 ## libmpv beschaffen
 
-Auf dem Entwicklungsrechner fehlt libmpv noch, ebenso `pkg-config`. Das ist der erste echte Cross-Platform-Build-Fall des Projekts und wird deshalb dokumentiert statt umgangen.
+Erledigt am 2026-10-31, beschrieben in [BUILD.md](BUILD.md): vorgebaute Archive für libmpv (shinchiro) und FFmpeg (BtbN, LGPL), auf Windows eine selbst erzeugte `mpv.lib`, eingebunden über die Umgebungsvariablen `TAKT_LIBMPV_DIR` und `FFMPEG_DIR` und geprüft durch den Smoke-Test `apps/takt-player/tests/native_link.rs`. Ohne die Variablen bleibt alles beim Alten: der Player läuft über `NullBackend`, die CI braucht keine Systembibliothek.
 
-**Linux** (Arch, Ubuntu) — unproblematisch:
-
-```bash
-sudo pacman -S mpv pkgconf
-```
-
-**Windows** — hier liegt der Aufwand. Drei Wege, in dieser Reihenfolge zu erproben:
-
-```bash
-# 1. vcpkg: liefert Header und Importbibliothek in einem Schritt
-vcpkg install mpv:x64-windows
-```
-
-Fällt das aus, bleiben die vorgebauten `libmpv`-Archive von SourceForge (`mpv-dev-x86_64`), aus denen `mpv-2.dll`, `libmpv.dll.a` und die Header manuell neben das Binary gelegt werden. Der dritte Weg ist `zig cc` als Toolchain für die C-Abhängigkeiten — der eigentliche Grund, warum Zig im Konzept als Build-Werkzeug steht.
-
-**Wichtig für die Lizenz:** libmpv **dynamisch** linken. Bei statischem Linken greift die Relinking-Pflicht der LGPL. Rust linkt standardmäßig statisch, das muss also bewusst konfiguriert werden. Und: kein libmpv-Build mit `--enable-gpl`, solange man die Option offenhalten will, Teile permissiv zu halten.
-
-Bis das steht, ist der Player über `NullBackend` voll lauffähig — genau dafür existiert das Backend.
+Zwei Abweichungen von der ursprünglichen Planung: vcpkg ist nicht der erste Weg, sondern die Ausweichlösung (baut alles aus dem Quelltext), und die vorgebaute libmpv ist ein GPL-Build. Für den GPL-3-Player ist das verträglich, widerspricht aber der Regel „kein libmpv-Build mit GPL“. Die Entscheidung dazu steht offen (BUILD.md, Abschnitt „Lizenz der vorgebauten libmpv“).
 
 ---
 
