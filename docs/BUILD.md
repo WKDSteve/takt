@@ -28,8 +28,8 @@ Takt baut ohne jede Systembibliothek: Ohne libmpv und FFmpeg läuft `takt-player
 
 | Variable | Zeigt auf | Wirkung |
 |---|---|---|
-| `TAKT_LIBMPV_DIR` | absoluter Pfad zum Ordner mit der Importbibliothek (`mpv.lib`, `libmpv.dll.a`, `libmpv.so`, `libmpv.dylib`) | Suchpfad für den Linker, cfg `takt_libmpv` |
-| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (`avutil.lib`, `libavutil.dll.a`, `libavutil.so`, `libavutil.dylib`) | Suchpfad `lib/` für den Linker (vor dem libmpv-Ordner, damit eine System-FFmpeg dort ihn nicht überschattet), cfg `takt_ffmpeg` |
+| `TAKT_LIBMPV_DIR` | absoluter Pfad zum Ordner mit der Importbibliothek (MSVC `mpv.lib`; windows-gnu `libmpv.dll.a` oder `mpv.lib`; Linux `libmpv.so`; macOS `libmpv.dylib`) | Suchpfad für den Linker, cfg `takt_libmpv` |
+| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (MSVC `avutil.lib`; windows-gnu `libavutil.dll.a` oder `avutil.lib`; Linux `libavutil.so`; macOS `libavutil.dylib`) | Suchpfad `lib/` für den Linker (vor dem libmpv-Ordner, damit eine System-FFmpeg dort ihn nicht überschattet), cfg `takt_ffmpeg` |
 
 `FFMPEG_DIR` ist bewusst derselbe Name und dasselbe Layout wie bei `ffmpeg-sys-next`, damit eine spätere FFmpeg-Anbindung dieselbe Einstellung liest. Der Name ist allgemein: Ist er auf dem Rechner schon für ein anderes Projekt gesetzt (etwa auf einen GPL-Build), läuft der takt-Smoke-Test damit und scheitert.
 
@@ -43,13 +43,7 @@ Zur Laufzeit muss das Betriebssystem die Bibliotheken finden: unter Windows lieg
 
 ## Windows
 
-Voraussetzungen: Rust mit der Standard-Toolchain `x86_64-pc-windows-msvc` (samt Visual-Studio-Build-Tools), 7-Zip und LLVM mit `llvm-readobj` und `llvm-dlltool`, am einfachsten `scoop install 7zip llvm` (der Installer von 7-zip.org trägt `7z` nicht in den `PATH` ein). Ohne LLVM geht es in einer Developer-PowerShell; dann lauten die beiden Zeilen für Exportliste und Importbibliothek:
-
-```powershell
-$exports = dumpbin /exports libmpv-2.dll |
-    Select-String '\s(mpv_\S+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
-lib /def:mpv.def /machine:x64 /out:mpv.lib
-```
+Voraussetzungen: Rust mit der Standard-Toolchain `x86_64-pc-windows-msvc` (samt Visual-Studio-Build-Tools), 7-Zip und LLVM mit `llvm-readobj` und `llvm-dlltool`, am einfachsten `scoop install 7zip llvm` (der Installer von 7-zip.org trägt `7z` nicht in den `PATH` ein). Ohne LLVM geht es in einer Developer-PowerShell mit `dumpbin` und `lib` (siehe unten).
 
 ### libmpv
 
@@ -65,6 +59,15 @@ $exports = llvm-readobj --coff-exports libmpv-2.dll |
     Select-String '^\s*Name: (mpv_\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }
 Set-Content mpv.def -Value (@('LIBRARY libmpv-2.dll', 'EXPORTS') + $exports)
 llvm-dlltool -m i386:x86-64 -d mpv.def -l mpv.lib
+```
+
+Ohne LLVM, in einer Developer-PowerShell im selben Ordner:
+
+```powershell
+$exports = dumpbin /exports libmpv-2.dll |
+    Select-String '\s(mpv_\S+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+Set-Content mpv.def -Value (@('LIBRARY libmpv-2.dll', 'EXPORTS') + $exports)
+lib /def:mpv.def /machine:x64 /out:mpv.lib
 ```
 
 #### Lizenz der vorgebauten libmpv
@@ -104,7 +107,7 @@ Dauerhaft gehören **drei** Einstellungen dazu: die beiden Variablen und die bei
 [Environment]::SetEnvironmentVariable('FFMPEG_DIR', 'E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0', 'User')
 ```
 
-Die beiden `PATH`-Einträge von Hand in den Systemeinstellungen („Umgebungsvariablen bearbeiten“, Benutzer-`Path`) eintragen, möglichst weit oben, damit keine andere `libmpv-2.dll` oder `avutil-*.dll` weiter vorn gewinnt. Nicht per Skript: `setx` kürzt auf 1024 Zeichen, und `[Environment]::SetEnvironmentVariable('Path', …)` friert Einträge wie `%USERPROFILE%\…` als feste Pfade ein. Danach Terminal bzw. Editor neu starten.
+Die beiden `PATH`-Einträge von Hand in den Systemeinstellungen („Umgebungsvariablen bearbeiten“, Benutzer-`Path`) eintragen, vor anderen Einträgen mit libmpv oder FFmpeg. Windows setzt den `PATH` aus System-`Path` und danach Benutzer-`Path` zusammen; liegt schon im System-`Path` eine andere `libmpv-2.dll` oder `avutil-*.dll`, gehören die Einträge in den System-`Path`. Nicht per Skript: `setx` kürzt auf 1024 Zeichen, und `[Environment]::SetEnvironmentVariable('Path', …)` friert Einträge wie `%USERPROFILE%\…` als feste Pfade ein. Danach Terminal bzw. Editor neu starten.
 
 ---
 
@@ -120,21 +123,21 @@ sudo apt install libmpv-dev pkg-config
 ```
 
 ```bash
-# Schlägt pkg-config fehl, bricht die Zeile ab, statt eine leere Variable zu
-# setzen (leer heißt für build.rs „nicht gesetzt“, also stumm null Tests).
-TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)" && export TAKT_LIBMPV_DIR
-cargo test -p takt-player --test native_link
+# Eine Kette: scheitert pkg-config oder liefert nichts, läuft cargo nicht.
+# Leer heißt für build.rs „nicht gesetzt“, also stumm null Tests.
+TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)" && [ -n "$TAKT_LIBMPV_DIR" ] \
+    && export TAKT_LIBMPV_DIR && cargo test -p takt-player --test native_link
 ```
 
 Erwartet: genau ein Test, `libmpv::client_api_is_version_2`, grün.
 
-`FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und setzt `FFMPEG_DIR` auf dessen Wurzel und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib"`; dann liegen allerdings zwei FFmpeg-Versionen im Prozess.
+`FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und exportiert `FFMPEG_DIR` (dessen Wurzel) und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`. Dann liegen zwei FFmpeg-Versionen im Prozess; haben beide dieselbe SONAME-Hauptversion, lädt sogar die Distributions-libmpv die BtbN-Bibliotheken (ABI-Mischung). Das taugt zum Prüfen, nicht zum Alltag.
 
 Noch nicht auf echter Hardware geprüft (siehe Plattform-Tabelle im README).
 
 ## macOS
 
-Ungetestet, es gibt kein Testgerät. Der naheliegende Weg ist Homebrew (`brew install mpv`, dann `TAKT_LIBMPV_DIR="$(brew --prefix mpv)/lib"`). `FFMPEG_DIR` wie unter Linux ungesetzt lassen: Homebrew-FFmpeg ist ein GPL-Build.
+Ungetestet, es gibt kein Testgerät. Der naheliegende Weg ist Homebrew (`brew install mpv`, dann `export TAKT_LIBMPV_DIR="$(brew --prefix mpv)/lib"`). `FFMPEG_DIR` wie unter Linux ungesetzt lassen: Homebrew-FFmpeg ist ein GPL-Build.
 
 ---
 
