@@ -12,7 +12,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 
 | Was | Wo |
 |---|---|
-| Konzept (Zielbild, Nicht-Ziele, Architektur, Entscheidungen) | [docs/KONZEPT.md](docs/KONZEPT.md) |
+| Konzept (Zielbild, Nicht-Ziele, Architektur, Entscheidungen) | Vault [`tasks-vault/takt/KONZEPT.md`](https://github.com/WKDSteve/tasks-vault/blob/main/takt/KONZEPT.md) (privat) |
 | Threads, Uhren und Invarianten | [docs/THREADS-UND-UHREN.md](docs/THREADS-UND-UHREN.md) |
 | Phase 0 und ihr Review | [docs/PHASE-0.md](docs/PHASE-0.md), [docs/reviews/](docs/reviews/) |
 | Planung: Plan mit Etappen und Gates, Tasks, offene Entscheidungen | Vault [`tasks-vault/takt/`](https://github.com/WKDSteve/tasks-vault/tree/main/takt) (privat) |
