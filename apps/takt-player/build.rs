@@ -15,6 +15,8 @@ struct NativeLib {
     var: &'static str,
     /// Subdirectory below the root that holds the import libraries.
     lib_subdir: &'static str,
+    /// Library name as passed to the linker (`mpv` -> `mpv.lib`, `libmpv.so`).
+    link_name: &'static str,
     /// cfg flag set when the library was found.
     cfg: &'static str,
 }
@@ -24,6 +26,7 @@ const NATIVE_LIBS: [NativeLib; 2] = [
     NativeLib {
         var: "TAKT_LIBMPV_DIR",
         lib_subdir: "",
+        link_name: "mpv",
         cfg: "takt_libmpv",
     },
     // Same variable and layout (`include/`, `lib/`) as ffmpeg-sys-next, so a
@@ -31,9 +34,22 @@ const NATIVE_LIBS: [NativeLib; 2] = [
     NativeLib {
         var: "FFMPEG_DIR",
         lib_subdir: "lib",
+        link_name: "avutil",
         cfg: "takt_ffmpeg",
     },
 ];
+
+/// File names the linker accepts for `name` on the current target.
+fn import_lib_names(name: &str) -> Vec<String> {
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    match (os.as_str(), target_env.as_str()) {
+        ("windows", "msvc") => vec![format!("{name}.lib")],
+        ("windows", _) => vec![format!("lib{name}.dll.a"), format!("{name}.lib")],
+        ("macos", _) => vec![format!("lib{name}.dylib")],
+        _ => vec![format!("lib{name}.so")],
+    }
+}
 
 fn main() {
     for lib in NATIVE_LIBS {
@@ -43,20 +59,39 @@ fn main() {
         let Some(root) = env::var_os(lib.var).filter(|v| !v.is_empty()) else {
             continue;
         };
+        // A variable that is set but wrong must fail the build: silently
+        // falling back to NullBackend would hide the misconfiguration.
         let mut dir = PathBuf::from(root);
+        // The build script runs in the package directory, rustc in the
+        // workspace root; a relative path would mean two different places.
+        if !dir.is_absolute() {
+            println!(
+                "cargo::error={} must be an absolute path, got {} (see docs/BUILD.md)",
+                lib.var,
+                dir.display()
+            );
+            continue;
+        }
         if !lib.lib_subdir.is_empty() {
             dir.push(lib.lib_subdir);
         }
-        // A variable that is set but wrong must fail the build: silently
-        // falling back to NullBackend would hide the misconfiguration.
-        assert!(
-            dir.is_dir(),
-            "{} is set, but {} is not a directory (see docs/BUILD.md)",
-            lib.var,
-            dir.display()
-        );
-        println!("cargo::rerun-if-changed={}", dir.display());
-        println!("cargo::rustc-link-search=native={}", dir.display());
+        let Some(dir_str) = dir.to_str() else {
+            println!("cargo::error={} is not valid UTF-8", lib.var);
+            continue;
+        };
+        let candidates = import_lib_names(lib.link_name);
+        if !candidates.iter().any(|f| dir.join(f).is_file()) {
+            println!(
+                "cargo::error={} is set, but {dir_str} holds none of {} (see docs/BUILD.md)",
+                lib.var,
+                candidates.join(", ")
+            );
+            continue;
+        }
+        // No rerun-if-changed on the directory: cargo would scan the whole
+        // tree (all of /usr/lib on Linux), and the output only depends on
+        // the variable.
+        println!("cargo::rustc-link-search=native={dir_str}");
         println!("cargo::rustc-cfg={}", lib.cfg);
     }
 }

@@ -20,20 +20,22 @@ Takt baut ohne jede Systembibliothek: Ohne libmpv und FFmpeg läuft `takt-player
 ## Grundregeln
 
 - **Dynamisch linken.** libmpv und FFmpeg stehen unter der LGPL. Bei statischem Linken greift deren Relinking-Pflicht; dynamisch gelinkt bleibt die Bibliothek austauschbar.
-- **Keine GPL-Builds von FFmpeg.** Ein mit `--enable-gpl` gebautes FFmpeg macht jede Binärdatei, die es lädt, endgültig zu reiner GPL. Der Smoke-Test `build_is_lgpl` prüft das und scheitert bei einem GPL-Build.
-- **libmpv ist derzeit ein GPL-Build.** Siehe [Lizenz der vorgebauten libmpv](#lizenz-der-vorgebauten-libmpv): für den GPL-3-Player verträglich, aber eine offene Abweichung vom Konzept.
+- **Keine GPL-Builds von FFmpeg.** Ein mit `--enable-gpl` gebautes FFmpeg macht jede Binärdatei, die es lädt, endgültig zu reiner GPL. Der Smoke-Test `build_is_lgpl` prüft das für das separat gelinkte FFmpeg aus `FFMPEG_DIR` und scheitert bei einem GPL-Build. Die BtbN-Builds melden sich als „LGPL version 3 or later“ (gebaut mit `--enable-version3`): verträglich mit `GPL-3.0-or-later`, aber nicht mit GPL-2.0-only, und mit den eigenen Pflichten der LGPLv3.
+- **libmpv ist derzeit ein GPL-Build mit eingebautem GPL-FFmpeg.** Siehe [Lizenz der vorgebauten libmpv](#lizenz-der-vorgebauten-libmpv): für den GPL-3-Player verträglich, aber eine offene Abweichung vom Konzept, die `build_is_lgpl` nicht sieht.
 - **Keine Bibliothek im Repo.** DLLs, Importbibliotheken und Header liegen außerhalb des Repos (NREL-11), etwa unter `E:\deps\`. Im Repo stehen keine absoluten Pfade, nur die Variablennamen.
 
 ## Umgebungsvariablen
 
 | Variable | Zeigt auf | Wirkung |
 |---|---|---|
-| `TAKT_LIBMPV_DIR` | Ordner mit der Importbibliothek (`mpv.lib` bzw. `libmpv.so`) | Suchpfad für den Linker, cfg `takt_libmpv` |
-| `FFMPEG_DIR` | FFmpeg-Wurzel mit `include/` und `lib/` | Suchpfad `lib/` für den Linker, cfg `takt_ffmpeg` |
+| `TAKT_LIBMPV_DIR` | absoluter Pfad zum Ordner mit der Importbibliothek (`mpv.lib`, `libmpv.so`, `libmpv.dylib`) | Suchpfad für den Linker, cfg `takt_libmpv` |
+| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (`avutil.lib` bzw. `libavutil.so`) | Suchpfad `lib/` für den Linker, cfg `takt_ffmpeg` |
 
-`FFMPEG_DIR` ist bewusst derselbe Name und dasselbe Layout wie bei `ffmpeg-sys-next`, damit eine spätere FFmpeg-Anbindung dieselbe Einstellung liest.
+`FFMPEG_DIR` ist bewusst derselbe Name und dasselbe Layout wie bei `ffmpeg-sys-next`, damit eine spätere FFmpeg-Anbindung dieselbe Einstellung liest. Der Name ist allgemein: Ist er auf dem Rechner schon für ein anderes Projekt gesetzt (etwa auf einen GPL-Build), läuft der takt-Smoke-Test damit und scheitert.
 
-Ist eine Variable gesetzt, zeigt aber nicht auf einen Ordner, bricht der Build ab, statt still auf `NullBackend` zurückzufallen. Das Build-Skript liegt in [`apps/takt-player/build.rs`](../apps/takt-player/build.rs).
+Ist eine Variable gesetzt, aber kein absoluter Pfad oder fehlt die Importbibliothek im Ordner, bricht der Build mit einer Meldung ab, statt still auf `NullBackend` zurückzufallen. Absolut muss der Pfad sein, weil das Build-Skript im Paketordner läuft, der Compiler aber im Workspace-Wurzelordner. Das Build-Skript liegt in [`apps/takt-player/build.rs`](../apps/takt-player/build.rs).
+
+Bequem für Terminal und Editor zugleich: die Variablen in `~/.cargo/config.toml` unter `[env]` setzen; dann bauen beide mit denselben Werten und kompilieren nicht abwechselnd neu.
 
 Zur Laufzeit muss das Betriebssystem die Bibliotheken finden: unter Windows liegen die DLLs im `PATH` oder neben der `.exe`, unter Linux im Bibliothekspfad des Systems.
 
@@ -41,14 +43,14 @@ Zur Laufzeit muss das Betriebssystem die Bibliotheken finden: unter Windows lieg
 
 ## Windows
 
-Voraussetzungen: Rust mit MSVC-Toolchain (`rust-toolchain.toml`), [7-Zip](https://www.7-zip.org/) und `llvm-dlltool` (etwa `scoop install llvm`). Statt `llvm-dlltool` geht auch `lib.exe` aus den Visual-Studio-Build-Tools in einer Developer-PowerShell.
+Voraussetzungen: Rust mit der Standard-Toolchain `x86_64-pc-windows-msvc` (samt Visual-Studio-Build-Tools), 7-Zip und LLVM mit `llvm-readobj` und `llvm-dlltool`, am einfachsten `scoop install 7zip llvm` (der Installer von 7-zip.org trägt `7z` nicht in den `PATH` ein). Ohne LLVM geht es in einer Developer-PowerShell mit `dumpbin /exports libmpv-2.dll` für die Exportliste und `lib /def:mpv.def /machine:x64 /out:mpv.lib`.
 
 ### libmpv
 
-Quelle: die vorgebauten Archive `mpv-dev-x86_64-<Datum>-git-<Hash>.7z` aus [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake/releases). Sie enthalten `libmpv-2.dll`, die Header unter `include/mpv/` und die GNU-Importbibliothek `libmpv.dll.a`, aber keine `mpv.lib` für den MSVC-Linker. Die erzeugt man aus den Exporten der DLL:
+Quelle: die vorgebauten Archive `mpv-dev-x86_64-<Datum>-git-<Hash>.7z` aus [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake/releases), die Variante **ohne** `-v3` im Namen (`-v3` setzt AVX2 voraus). Sie enthalten `libmpv-2.dll`, die Header unter `include/mpv/` und die GNU-Importbibliothek `libmpv.dll.a`, aber keine `mpv.lib` für den MSVC-Linker. Die erzeugt man aus den Exporten der DLL:
 
 ```powershell
-7z x mpv-dev-x86_64-*.7z -oE:\deps\mpv-dev
+7z x mpv-dev-x86_64-20261021-git-e471496c56.7z -oE:\deps\mpv-dev
 cd E:\deps\mpv-dev
 
 # Nur die mpv_*-Funktionen: die DLL exportiert zusätzlich Symbole statisch
@@ -57,14 +59,16 @@ $exports = llvm-readobj --coff-exports libmpv-2.dll |
     Select-String '^\s*Name: (mpv_\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }
 Set-Content mpv.def -Value (@('LIBRARY libmpv-2.dll', 'EXPORTS') + $exports)
 llvm-dlltool -m i386:x86-64 -d mpv.def -l mpv.lib
-# Alternativ in einer Developer-PowerShell: lib /def:mpv.def /machine:x64 /out:mpv.lib
 ```
 
 #### Lizenz der vorgebauten libmpv
 
-Die shinchiro-Builds sind **GPL-Builds**: mpv baut ohne `-Dgpl=false` als GPL (Standard), und die Archive binden GPL-Teile wie rubberband und dvdnav ein. Nachprüfbar über die Eigenschaft `mpv-configuration` (Stand Build 20261021: kein `-Dgpl=false`).
+Die shinchiro-Builds sind **GPL-Builds**, in zweierlei Hinsicht:
 
-Was das bedeutet: `takt-player` steht ohnehin unter `GPL-3.0-or-later`, und mpv unter „GPLv2 or later“ ist damit verträglich. Die Zone-1-Crates linken libmpv nie und bleiben permissiv. Ausgeschlossen ist damit nur, eine Binärdatei mit dieser libmpv unter einer anderen Lizenz als GPL weiterzugeben. Eine LGPL-libmpv gibt es nicht vorgebaut; sie bräuchte einen eigenen Build mit `-Dgpl=false` (ohne rubberband, dvdnav und weitere GPL-Teile). Offen als Entscheidung `takt/entscheidung-libmpv-lizenz-build` im Vault.
+- mpv selbst baut ohne `-Dgpl=false` als GPL (Standard) und bindet GPL-Teile wie rubberband und dvdnav ein. Nachprüfbar über die Eigenschaft `mpv-configuration` (Stand Build 20261021: kein `-Dgpl=false`).
+- Die DLL enthält eine **statisch eingebundene FFmpeg** (Build 20261021: `N-127893-g9a861e968`) mit libx264, libx265 und postproc, also ein `--enable-gpl`-Build. Sie lädt keine `av*.dll`; diese FFmpeg ist weder austauschbar noch LGPL. `build_is_lgpl` sieht sie nicht, denn der Test prüft nur das separat gelinkte FFmpeg aus `FFMPEG_DIR`.
+
+Was das bedeutet: `takt-player` steht ohnehin unter `GPL-3.0-or-later`, und mpv unter „GPLv2 or later“ ist damit verträglich. Die Zone-1-Crates linken libmpv nie und bleiben permissiv. Ausgeschlossen ist, eine Binärdatei mit dieser libmpv unter einer anderen Lizenz als GPL weiterzugeben. Technisch liegen außerdem zwei FFmpeg-Kopien verschiedener Version im Prozess, sobald takt selbst FFmpeg linkt; Frames lassen sich zwischen libmpv und einer eigenen FFmpeg-Schicht dann nicht direkt austauschen. Eine LGPL-libmpv gibt es nicht vorgebaut; sie bräuchte einen eigenen Build mit `-Dgpl=false` gegen eine LGPL-FFmpeg (ohne rubberband, dvdnav, x264 und weitere GPL-Teile). Offen als Entscheidung `takt/entscheidung-libmpv-lizenz-build` im Vault.
 
 ### FFmpeg
 
@@ -85,34 +89,44 @@ $env:PATH = "$env:TAKT_LIBMPV_DIR;$env:FFMPEG_DIR\bin;$env:PATH"
 cargo test -p takt-player --test native_link
 ```
 
-Erwartet: `libmpv::client_api_is_version_2` und `ffmpeg::build_is_lgpl` laufen grün. Ohne die beiden Variablen läuft derselbe Befehl mit null Tests, so wie in der CI. Dauerhaft setzt man die Variablen mit `setx` oder in den Systemeinstellungen; danach Terminal bzw. Editor neu starten.
+Erwartet: `libmpv::client_api_is_version_2` und `ffmpeg::build_is_lgpl` laufen grün. Ohne die beiden Variablen läuft derselbe Befehl mit null Tests, so wie in der CI.
+
+Dauerhaft gehören **drei** Einstellungen dazu: die beiden Variablen und die beiden DLL-Ordner im `PATH`. Fehlt der `PATH`-Teil, bricht jedes `cargo test --workspace` mit `STATUS_DLL_NOT_FOUND` (`0xc0000135`) ab. `PATH` nicht mit `setx` setzen (kürzt auf 1024 Zeichen), sondern in den Systemeinstellungen oder so:
+
+```powershell
+[Environment]::SetEnvironmentVariable('TAKT_LIBMPV_DIR', 'E:\deps\mpv-dev', 'User')
+[Environment]::SetEnvironmentVariable('FFMPEG_DIR', 'E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0', 'User')
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+[Environment]::SetEnvironmentVariable('Path', "$userPath;E:\deps\mpv-dev;E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0\bin", 'User')
+```
+
+Danach Terminal bzw. Editor neu starten.
 
 ---
 
 ## Linux
 
-Die Distributionen liefern libmpv und FFmpeg als Pakete mit Entwicklungsdateien.
+Die Distributionen liefern libmpv als Paket mit Entwicklungsdateien.
 
 ```bash
 # Arch
-sudo pacman -S mpv ffmpeg pkgconf
+sudo pacman -S mpv pkgconf
 # Debian/Ubuntu
-sudo apt install libmpv-dev libavutil-dev libavformat-dev libavcodec-dev pkg-config
+sudo apt install libmpv-dev pkg-config
 ```
 
 ```bash
 export TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)"
-export FFMPEG_DIR=/usr
 cargo test -p takt-player --test native_link
 ```
 
-Distributions-FFmpeg ist häufig mit `--enable-gpl` gebaut; dann schlägt `build_is_lgpl` fehl. Für Entwicklung und eigene Tests ist das unerheblich, für eine weitergegebene Binärdatei nicht.
+`FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und setzt `FFMPEG_DIR` auf dessen Wurzel; dann liegen allerdings zwei FFmpeg-Versionen im Prozess.
 
 Noch nicht auf echter Hardware geprüft (siehe Plattform-Tabelle im README).
 
 ## macOS
 
-Ungetestet, es gibt kein Testgerät. Der naheliegende Weg ist Homebrew (`brew install mpv ffmpeg`, dann `TAKT_LIBMPV_DIR="$(brew --prefix)/lib"` und `FFMPEG_DIR="$(brew --prefix ffmpeg)"`); Homebrew-FFmpeg ist ein GPL-Build.
+Ungetestet, es gibt kein Testgerät. Der naheliegende Weg ist Homebrew (`brew install mpv`, dann `TAKT_LIBMPV_DIR="$(brew --prefix mpv)/lib"`). `FFMPEG_DIR` wie unter Linux ungesetzt lassen: Homebrew-FFmpeg ist ein GPL-Build.
 
 ---
 

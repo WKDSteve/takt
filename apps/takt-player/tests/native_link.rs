@@ -23,6 +23,9 @@ mod libmpv {
     }
 }
 
+// Checks only the separately linked FFmpeg from FFMPEG_DIR. The prebuilt
+// libmpv carries its own statically linked FFmpeg, which this test cannot
+// see (docs/BUILD.md, "Lizenz der vorgebauten libmpv").
 #[cfg(takt_ffmpeg)]
 mod ffmpeg {
     use std::ffi::{CStr, c_char};
@@ -40,7 +43,7 @@ mod ffmpeg {
         // lives for the whole process and is never written to.
         let license = unsafe { CStr::from_ptr(avutil_license()) }.to_string_lossy();
         // A GPL build of FFmpeg would turn the whole player into GPL-only
-        // binaries with no way back (KONZEPT, licence zones).
+        // binaries with no way back (KONZEPT, license zones).
         assert!(
             license.starts_with("LGPL"),
             "FFmpeg build is licensed {license:?}, takt needs an LGPL build"
