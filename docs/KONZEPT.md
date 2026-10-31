@@ -1,8 +1,10 @@
 # Takt — Konzept
 
-*Stand: 2026-08-23. Lebendes Dokument.*
+*Stand: 2026-10-31. Lebendes Dokument.*
 
-> **Aktueller Stand:** Phase 0 begonnen — Fundament und Zeitmechanik stehen, 63 Tests grün. Siehe [PHASE-0.md](PHASE-0.md) und [reviews/phase-0.md](reviews/phase-0.md).
+> **Aktueller Stand (2026-10-31):** Phase 0 läuft seit 2026-08-23. Fundament und Zeitmechanik stehen (`takt-core`, `takt-clock`, `takt-backend`, kopfloser `takt-player`; 64 Tests, CI grün auf Windows, Linux und macOS). Es fehlen noch Fenster, Audio-Ausgabe und `MpvBackend`. Siehe [PHASE-0.md](PHASE-0.md) und [reviews/phase-0.md](reviews/phase-0.md).
+>
+> **Planung** (Plan mit Etappen und Gates, Tasks, offene Entscheidungen, Architektur-Notizen) liegt nicht im Repo, sondern im Vault unter [`tasks-vault/takt/`](https://github.com/WKDSteve/tasks-vault/tree/main/takt).
 
 **Takt** ist eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Compositing und Audio-Verarbeitung, auf dem vier Betriebsmodi aufsetzen — Player, Live-Studio, Video-Editor und, als Fernziel, eine Digital Audio Workstation.
 
@@ -43,7 +45,7 @@ Das ist wichtig festzuhalten, weil es jede spätere Prioritätsfrage entscheidet
 
 **Zielbild:** eine Anwendung, die als 50-MB-Player startet und per Moduswechsel zur Medien-Workstation aufsteigt, ohne die Ressourcen der nicht genutzten Modi zu belegen.
 
-**Realistischer Zeithorizont** bei etwa 8 bis 12 Wochenstunden neben einer Vollzeitstelle:
+**Realistischer Zeithorizont** bei etwa 8 bis 12 Wochenstunden neben einer Vollzeitstelle (geplantes Budget seit 2026-10-30: 8 Stunden pro Woche, also eher das obere Ende der Kalenderzeiten):
 
 | Ausbaustufe | Aufwand | Kalenderzeit |
 |---|---|---|
@@ -62,7 +64,8 @@ Die Vollausbaustufe ist damit ein **Projekt über vier bis acht Jahre**. VLC, mp
 Bei einem Projekt dieser Größe sind die Nicht-Ziele wichtiger als die Ziele.
 
 * **Kein Nachbau von VLC, OBS oder Cubase.** Deren Wert liegt in tausenden Randfällen aus Jahrzehnten. Der Anspruch ist eine saubere, moderne Kernarchitektur, nicht Featureparität.
-* **Keine KI-Features vor Phase 3.** Whisper-Untertitel, Real-ESRGAN-Upscaling und Anime4K sind Demos, keine Fundamente. Sie sind später leicht zu ergänzen und binden früh nur Zeit.
+* **Kein Nachbau von GIMP oder Krita.** Der Bild-Modus (beschlossen 2026-10-30) ist schlank: Ebenen, Farbraum und Export auf `takt-gpu`, keine Malprogramm-Werkzeugkiste.
+* **Keine KI-Modelle vor ihrer Zeit.** Die KI-Schnittstelle (Protokoll, Datenmodell, Hilfsprozess-Rahmen) entsteht früh, weil sie sich nachträglich schlecht einziehen lässt. Die Modelle selbst kommen spät: Whisper-Untertitel nach Gate 0, Upscaling (Real-ESRGAN, Anime4K) und weitere Modelle ab Phase 3. Modelle laufen immer in einem eigenen Prozess.
 * **Keine Wasm-Plugins für Realtime-Video.** Die Idee ist reizvoll, aber Wasm mit GPU-Zugriff bei Frame-Deadlines ist heute nicht praktikabel. Für Audio-DSP später ein möglicher Zweig.
 * **Keine Mobilplattformen.** Android und iOS verdoppeln den Aufwand bei GPU- und Audio-Schnittstellen.
 * **Keine eigenen Codecs.** Demuxer schreiben ist lehrreich, Codecs schreiben ist ein eigenes Lebenswerk.
@@ -277,8 +280,9 @@ ZONE 2 — Anwendung:  GPL-3.0-or-later
   sie schaltet VST3, x264/x265 und Qt frei, falls je gebraucht.
 
 ZONE 3 — Isolierte Hilfsprozesse:  eigene Lizenz je Prozess
-  takt-vst3 (GPLv3), takt-x264 (GPLv3)
-  Kommunikation über Shared Memory und ein eigenes Protokoll.
+  takt-vst3 (GPLv3), takt-x264 (GPLv3), KI-Dienste (Lizenz je Modell)
+  Kommunikation über anonymes Shared Memory (lock-freier Ring) für Daten
+  und eine Pipe mit versioniertem Protokoll für die Steuerung.
   Bilden mit der Hauptanwendung kein Gesamtwerk.
 ```
 
@@ -286,7 +290,7 @@ Beitragsmodell zunächst **DCO**, kein CLA. In `CONTRIBUTING.md` wird festgehalt
 
 `cargo-deny` mit Allowlist läuft in der CI ab dem ersten Tag. Nachträgliches Entwirren von Lizenzen in einem gewachsenen Monolithen ist teuer; die Prüfung ist billig.
 
-Details und Herleitung: `C:\repos\WKDBooks\Development\wkdbook-SoftwareDevelopment\Lizenzen\`
+Details und Herleitung: Repository `WKDBooks`, Ordner `Development/wkdbook-SoftwareDevelopment/Lizenzen/` (`Medien-Stack-Lizenzen.md`, `Software-Lizenzen-Grundlagen.md`).
 
 ---
 
@@ -375,10 +379,12 @@ Der Prototyp soll zwei Fragen beantworten: *Macht das Spaß?* und *Steht die Gru
 
 | Gerät | Rolle | Deckt ab |
 |---|---|---|
-| Desktop: RTX 5070 Super, i5-12400F, 48 GB | Hauptentwicklung | NVENC/NVDEC inkl. AV1-Encode, Vulkan auf Nvidia, WASAPI |
-| Arch / Ubuntu (nativ, gleiche Maschine) | GPU-Interop-Forschung | `VK_KHR_video_decode`, DMA-BUF, VA-API, PipeWire |
+| Desktop: RTX 4070 SUPER, i5-12400F, 48 GB, Windows 11 | Hauptentwicklung | NVENC/NVDEC inkl. AV1-Encode (Ada), Vulkan auf Nvidia, WASAPI |
+| Arch / Ubuntu (nativ, gleiche Maschine) — **geplant**, Stand 2026-10-31 kein Dual-Boot eingerichtet | GPU-Interop-Forschung | `VK_KHR_video_decode`, DMA-BUF, VA-API, PipeWire |
 | Dell 14 Pro (Core Ultra, Arc-iGPU) | Zweiter Treiberstack | Quick Sync inkl. AV1, Intel-Vulkan, mobile Energieprofile |
 | Laptop, ~10 Jahre alt | **Negativtest** | Software-Fallback, fehlendes AV1, schwaches Vulkan, saubere Degradation |
+
+Desktop-Hardware gemessen am 2026-10-30. Bis der Linux-Dual-Boot steht, deckt nur die CI (`ubuntu-latest`, ohne GPU) Linux ab; GPU-Interop-Forschung unter Linux wartet darauf.
 
 Der 12400F hat kein iGPU — Quick Sync ist auf dem Desktop nicht verfügbar, alles läuft über die Nvidia-Karte. Die Dell deckt diese Lücke ab.
 
@@ -396,7 +402,7 @@ Was daraus folgt, ist Disziplin, nicht nur Absicht:
 
 * **CI auf allen drei Zielen ab dem ersten Commit.** Nicht später ergänzen — der Moment, in dem eine Plattform drei Wochen nicht gebaut wurde, ist der Moment, in dem sie kaputt ist.
 * **Kein `#[cfg(target_os)]` in Anwendungslogik.** Plattformcode lebt ausschließlich in dafür benannten Modulen hinter einem Trait. Sobald `cfg` durch die Geschäftslogik wandert, sind es drei Programme in einem Repository.
-* **Der schwache Punkt ist macOS, nicht Linux.** Kein Vulkan, kein PipeWire, eigenes Codesigning, kein Testgerät. Die Abstraktionen halten macOS möglich, aber es wird als ungetestet geführt statt vorgetäuscht.
+* **Der schwache Punkt ist macOS, nicht Linux.** Kein Vulkan, kein PipeWire, eigenes Codesigning, kein Testgerät. Die Abstraktionen halten macOS möglich, aber es wird als ungetestet geführt statt vorgetäuscht (präzisiert am 2026-10-30, siehe unten: nur nicht verbauen).
 
 **Vulkan Video als bevorzugter, nicht als einziger Decoder-Pfad.** Die Entscheidung für die modernere Schnittstelle steht, aber sie kann die Abstraktion nicht ersetzen: **macOS hat kein `VK_KHR_video_decode`** — MoltenVK bildet Vulkan auf Metal ab, ohne die Video-Erweiterungen. VideoToolbox ist dort nicht eine Option, sondern der einzige Weg.
 
@@ -411,12 +417,25 @@ Der Software-Pfad wird zuerst gebaut: er ist der Fallback, er läuft auf dem zeh
 
 ---
 
+### Entscheidungen vom 2026-10-30
+
+Alle bis dahin offenen Fragen wurden an diesem Tag entschieden. Die Herleitung steht jeweils in der erledigten Task `takt/entscheidung-*` im Vault.
+
+* **macOS: nur nicht verbauen.** Die CI baut und testet macOS weiter, es entstehen aber keine macOS-Backends (kein VideoToolbox-, kein CoreAudio-Pfad), solange es kein Testgerät gibt. Das README führt macOS als ungetestet. Die Decoder-Tabelle oben beschreibt den Weg, falls sich das ändert.
+* **Hilfsprozess-IPC: Shared Memory plus Pipe.** Daten (Pakete, Frames, Audio) laufen über anonymes Shared Memory mit einem lock-freien Ring, die Steuerung über eine Pipe mit versioniertem Protokoll. Das gilt für alle Hilfsprozesse: Demux-Sandbox, Encoder, VST3-Bridge und KI-Dienste. Ein kleiner Prototyp bestätigt das Muster vor Phase 1.
+* **Untertitel: eigen für SRT und WebVTT, libass für ASS.** Eigener SRT/WebVTT-Parser in `takt-fmt` plus GPU-Textdarstellung; ASS/SSA über libass hinter einem Trait, weil dessen Typografie-Umfang ein eigenes Projekt wäre.
+* **KI: Schnittstelle früh, Modelle spät.** Protokoll, Datenmodell und Hilfsprozess-Rahmen in Phase 0/1; Whisper-Untertitel nach Gate 0; weitere Modelle ab Phase 3. Modelle tragen eigene Lizenzen (Whisper MIT, viele Bildmodelle nicht-kommerziell); die Prozessgrenze hält sie aus Zone 1 und 2 heraus.
+* **Web: Spike nach Gate 0.** Eine Machbarkeitsstudie nach Gate 0, danach der Player-Umfang als eigenes Build-Ziel (Wasm). Studio und DAW ausdrücklich nicht. Für `#[cfg(target_arch)]` gilt dieselbe Regel wie für `target_os`: nur in benannten Modulen hinter Traits.
+* **`unsafe`-Policy.** Workspace-weit `unsafe_code = "deny"`. Nur Module mit `ffi` oder `sys` im Namen oder Pfad dürfen `#![allow(unsafe_code)]` setzen, und jeder `unsafe`-Block trägt einen `// SAFETY:`-Kommentar. `takt-clock` kommt heute ohne `unsafe` aus (Seqlock über Atomics) und soll das behalten.
+* **Bild-Modus: ja, schlank.** Ein Bild-Modus ohne Uhr auf `takt-gpu` (Ebenen, Farbraum, Export), Start nach Phase 1. Daraus das Nicht-Ziel „Kein Nachbau von GIMP oder Krita“.
+* **Zeitbudget und Gate 0.** 8 Stunden pro Woche. Zieldatum für den Start der vierwöchigen Alltagsnutzung (Gate 0): 2027-01-04.
+* **Doku-Ort und Sprache.** Dieses Konzept wandert in den Vault (`tasks-vault/takt/`); im Repo bleiben README, CONTRIBUTING, THREADS-UND-UHREN und BUILD. Die Doku bleibt Deutsch, das README bekommt einen englischen Absatz.
+
+---
+
 ## Offene Entscheidungen
 
-| Frage | Zu klären bis |
-|---|---|
-| Wird macOS aktiv unterstützt oder nur nicht verbaut? Es gibt kein Testgerät | Beginn Phase 2 |
-| Wie wird der Demux-Sandbox-Prozess angebunden — Shared Memory oder Ringpuffer über Datei-Mapping? | Beginn Phase 1 |
-| Bleibt es bei einem Repository, oder wandern die permissiven Kern-Crates früh in ein eigenes? | Erste externe Nutzer |
-| Wird der `takt-gpu`-Renderer als eigenständige Bibliothek nutzbar gemacht? | Ende Phase 2 |
-| Werden Untertitel-Rendering und Schriftgestaltung selbst gebaut oder libass eingebunden? | Phase 1 |
+Dieses Dokument führt keinen eigenen Fragenkatalog. Offene Entscheidungen sind Tasks im Vault (`takt/entscheidung-…`, Status `decision`) und stehen hier nur mit ihrer Task-ID; ist eine entschieden, wandert das Ergebnis nach [Getroffene Entscheidungen](#getroffene-entscheidungen).
+
+* `takt/entscheidung-kern-crates-eigenes-repo`
+* `takt/entscheidung-takt-gpu-als-bibliothek`

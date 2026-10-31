@@ -4,7 +4,26 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 
 *Takt* bedeutet gleichzeitig den musikalischen Takt und den Taktgeber. Die Master-Clock ist die Komponente, an der dieses Projekt technisch hängt: Alles Schwere in Takt ist ein Zeitproblem.
 
-> **Status: Konzeptphase.** Es gibt noch keinen Code. Siehe [docs/KONZEPT.md](docs/KONZEPT.md).
+> **Status (2026-10-31): Phase 0.** Das Fundament steht: `takt-core`, `takt-clock`, `takt-backend` und ein kopfloser `takt-player`, 64 Tests, CI grün auf Windows, Linux und macOS. Es fehlen noch Fenster, Audio-Ausgabe und das libmpv-Backend (`MpvBackend`) — noch kein benutzbarer Player. Details: [docs/PHASE-0.md](docs/PHASE-0.md).
+
+**English.** Takt is a modular media suite written in Rust: one shared core for decoding, GPU compositing and audio processing, with four modes on top (player, live studio, video editor and, as a long-term goal, a DAW). It is a personal, non-commercial project in an early stage (phase 0: foundation and timing, no usable player yet). The documentation is in German on purpose; code, comments and commit messages are in English.
+
+## Dokumentation und Planung
+
+| Was | Wo |
+|---|---|
+| Konzept (Zielbild, Nicht-Ziele, Architektur, Entscheidungen) | [docs/KONZEPT.md](docs/KONZEPT.md) |
+| Threads, Uhren und Invarianten | [docs/THREADS-UND-UHREN.md](docs/THREADS-UND-UHREN.md) |
+| Phase 0 und ihr Review | [docs/PHASE-0.md](docs/PHASE-0.md), [docs/reviews/](docs/reviews/) |
+| Planung: Plan mit Etappen und Gates, Tasks, offene Entscheidungen | Vault [`tasks-vault/takt/`](https://github.com/WKDSteve/tasks-vault/tree/main/takt) (privat) |
+
+## Plattformen
+
+| Plattform | Stand |
+|---|---|
+| Windows | Hauptentwicklung, getestet |
+| Linux | CI baut und testet; nativer Test auf echter Hardware geplant |
+| macOS | **ungetestet** — CI baut und testet, aber es gibt kein Testgerät und keine macOS-spezifischen Backends |
 
 ---
 
@@ -23,7 +42,7 @@ Die App startet schlank im Player-Modus und fährt die schweren Subsysteme erst 
 
 ## Nicht-Ziele
 
-Kein Nachbau von VLC, OBS oder Cubase. Keine KI-Features vor Phase 3. Keine Mobilplattformen. Keine eigenen Codecs. Kein VST2. Die vollständige Liste steht im Konzept.
+Kein Nachbau von VLC, OBS, Cubase, GIMP oder Krita. KI-Modelle erst spät (Whisper-Untertitel nach Gate 0, weitere ab Phase 3), immer in einem eigenen Prozess. Keine Mobilplattformen. Keine eigenen Codecs. Kein VST2. Die vollständige Liste steht im Konzept.
 
 ## Zeithorizont
 
