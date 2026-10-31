@@ -40,8 +40,12 @@ mod libmpv {
     }
 
     /// Options set before `mpv_initialize`. `config=no` is already the
-    /// libmpv default and only made explicit; the rest keep the built-in
-    /// scripts (ytdl hook, stats, console, ...) from loading at all.
+    /// libmpv default and only made explicit (no mpv.conf, no `~~/scripts`);
+    /// `load-scripts=no` is a second guard against user scripts; `ytdl=no`
+    /// keeps the ytdl hook out. The other built-in scripts (stats, console,
+    /// select, ...) still load but do nothing without a VO or a file; their
+    /// `load-*` switches are left alone because a renamed option in a newer
+    /// DLL would fail this test for reasons unrelated to the licence.
     const OPTIONS: [(&CStr, &CStr); 3] = [
         (c"config", c"no"),
         (c"load-scripts", c"no"),
