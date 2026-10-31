@@ -21,7 +21,7 @@ Takt baut ohne jede Systembibliothek: Ohne libmpv und FFmpeg läuft `takt-player
 
 - **Dynamisch linken.** libmpv und FFmpeg stehen unter der LGPL. Bei statischem Linken greift deren Relinking-Pflicht; dynamisch gelinkt bleibt die Bibliothek austauschbar.
 - **Keine GPL-Builds von FFmpeg.** Ein mit `--enable-gpl` gebautes FFmpeg macht jede Binärdatei, die es lädt, endgültig zu reiner GPL. Der Smoke-Test `build_is_lgpl` prüft das für das separat gelinkte FFmpeg aus `FFMPEG_DIR` und scheitert bei einem GPL-Build. Die BtbN-Builds melden sich als „LGPL version 3 or later“ (gebaut mit `--enable-version3`): verträglich mit `GPL-3.0-or-later`, aber nicht mit GPL-2.0-only, und mit den eigenen Pflichten der LGPLv3.
-- **libmpv ist derzeit ein GPL-Build mit eingebautem GPL-FFmpeg.** Siehe [Lizenz der vorgebauten libmpv](#lizenz-der-vorgebauten-libmpv): für den GPL-3-Player verträglich, aber eine offene Abweichung vom Konzept, die `build_is_lgpl` nicht sieht.
+- **libmpv ist derzeit ein GPL-Build mit eingebautem GPL-FFmpeg.** Siehe [Lizenz der vorgebauten libmpv](#lizenz-der-vorgebauten-libmpv): für den GPL-3-Player verträglich und am 2026-10-31 so entschieden (nur Zone 2, nie Zone 1); `build_is_lgpl` sieht die eingebaute FFmpeg nicht.
 - **Keine Bibliothek im Repo.** DLLs, Importbibliotheken und Header liegen außerhalb des Repos (NREL-11), etwa unter `E:\deps\`. Im Repo stehen keine absoluten Pfade, nur die Variablennamen.
 
 ## Umgebungsvariablen
@@ -77,7 +77,7 @@ Die shinchiro-Builds sind **GPL-Builds**, in zweierlei Hinsicht:
 - mpv selbst baut ohne `-Dgpl=false` als GPL (Standard) und bindet GPL-Teile wie rubberband und dvdnav ein. Nachprüfbar über die Eigenschaft `mpv-configuration` (Stand Build 20261021: kein `-Dgpl=false`).
 - Die DLL enthält eine **statisch eingebundene FFmpeg** (Build 20261021: `N-127893-g9a861e968`) mit libx264, libx265 und postproc, also ein `--enable-gpl`-Build. Sie lädt keine `av*.dll`; diese FFmpeg ist weder austauschbar noch LGPL. `build_is_lgpl` sieht sie nicht, denn der Test prüft nur das separat gelinkte FFmpeg aus `FFMPEG_DIR`.
 
-Was das bedeutet: `takt-player` steht ohnehin unter `GPL-3.0-or-later`, und mpv unter „GPLv2 or later“ ist damit verträglich. Die Zone-1-Crates linken libmpv nie und bleiben permissiv. Ausgeschlossen ist, eine Binärdatei mit dieser libmpv unter einer anderen Lizenz als GPL weiterzugeben. Technisch liegen außerdem zwei FFmpeg-Kopien verschiedener Version im Prozess, sobald takt selbst FFmpeg linkt; Frames lassen sich zwischen libmpv und einer eigenen FFmpeg-Schicht dann nicht direkt austauschen. Eine LGPL-libmpv gibt es nicht vorgebaut; sie bräuchte einen eigenen Build mit `-Dgpl=false` gegen eine LGPL-FFmpeg (ohne rubberband, dvdnav, x264 und weitere GPL-Teile). Offen als Entscheidung `takt/entscheidung-libmpv-lizenz-build` im Vault.
+Was das bedeutet: `takt-player` steht ohnehin unter `GPL-3.0-or-later`, und mpv unter „GPLv2 or later“ ist damit verträglich. Die Zone-1-Crates linken libmpv nie und bleiben permissiv. Ausgeschlossen ist, eine Binärdatei mit dieser libmpv unter einer anderen Lizenz als GPL weiterzugeben. Technisch liegen außerdem zwei FFmpeg-Kopien verschiedener Version im Prozess, sobald takt selbst FFmpeg linkt; Frames lassen sich zwischen libmpv und einer eigenen FFmpeg-Schicht dann nicht direkt austauschen. Eine LGPL-libmpv gibt es nicht vorgebaut; sie bräuchte einen eigenen Build mit `-Dgpl=false` gegen eine LGPL-FFmpeg (ohne rubberband, dvdnav, x264 und weitere GPL-Teile). **Entschieden am 2026-10-31** (`takt/entscheidung-libmpv-lizenz-build` im Vault): der vorgebaute GPL-Build bleibt, GPL-libmpv nur in Zone 2, nie in Zone 1. Der Smoke-Test `license_state_matches_build_md` liest `mpv-configuration` und schlägt fehl, sobald ein LGPL-Build (`-Dgpl=false`) auftaucht, damit dieser Abschnitt dann nachgezogen wird.
 
 ### FFmpeg
 
@@ -95,10 +95,10 @@ Die gängigen Windows-Pakete (winget `Gyan.FFmpeg`, scoop `ffmpeg`) liefern nur 
 $env:TAKT_LIBMPV_DIR = 'E:\deps\mpv-dev'
 $env:FFMPEG_DIR = 'E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0'
 $env:PATH = "$env:TAKT_LIBMPV_DIR;$env:FFMPEG_DIR\bin;$env:PATH"
-cargo test -p takt-player --test native_link
+cargo test -p takt-player --test ffi_native_link
 ```
 
-Erwartet: `libmpv::client_api_is_version_2` und `ffmpeg::build_is_lgpl` laufen grün. Ohne die beiden Variablen läuft derselbe Befehl mit null Tests, so wie in der CI.
+Erwartet: `libmpv::client_api_is_version_2`, `libmpv::license_state_matches_build_md` und `ffmpeg::build_is_lgpl` laufen grün. Ohne die beiden Variablen läuft derselbe Befehl mit null Tests, so wie in der CI.
 
 Dauerhaft gehören **drei** Einstellungen dazu: die beiden Variablen und die beiden DLL-Ordner im `PATH`. Fehlt der `PATH`-Teil, bricht jedes `cargo test --workspace` mit `STATUS_DLL_NOT_FOUND` (`0xc0000135`) ab. Die beiden Variablen:
 
@@ -126,10 +126,10 @@ sudo apt install libmpv-dev pkg-config
 # Eine Kette: scheitert pkg-config oder liefert nichts, läuft cargo nicht.
 # Leer heißt für build.rs „nicht gesetzt“, also stumm null Tests.
 TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)" && [ -n "$TAKT_LIBMPV_DIR" ] \
-    && export TAKT_LIBMPV_DIR && cargo test -p takt-player --test native_link
+    && export TAKT_LIBMPV_DIR && cargo test -p takt-player --test ffi_native_link
 ```
 
-Erwartet: genau ein Test, `libmpv::client_api_is_version_2`, grün.
+Erwartet: genau zwei Tests, `libmpv::client_api_is_version_2` und `libmpv::license_state_matches_build_md`, grün (Distributions-libmpv ist ebenfalls ein GPL-Build).
 
 `FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und exportiert `FFMPEG_DIR` (dessen Wurzel) und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`. Dann liegen zwei FFmpeg-Versionen im Prozess; haben beide dieselbe SONAME-Hauptversion, lädt sogar die Distributions-libmpv die BtbN-Bibliotheken (ABI-Mischung). Das taugt zum Prüfen, nicht zum Alltag.
 

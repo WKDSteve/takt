@@ -107,9 +107,9 @@ Erst nach Schritt 4 beginnt die vierwöchige Alltagsnutzung, die Gate 0 entschei
 
 ## libmpv beschaffen
 
-Erledigt am 2026-10-31, beschrieben in [BUILD.md](BUILD.md): vorgebaute Archive für libmpv (shinchiro) und FFmpeg (BtbN, LGPL), auf Windows eine selbst erzeugte `mpv.lib`, eingebunden über die Umgebungsvariablen `TAKT_LIBMPV_DIR` und `FFMPEG_DIR` und geprüft durch den Smoke-Test `apps/takt-player/tests/native_link.rs`. Ohne die Variablen bleibt alles beim Alten: der Player läuft über `NullBackend`, die CI braucht keine Systembibliothek. Das Player-Binary selbst linkt libmpv erst mit dem `MpvBackend`; bis dahin beweist der Smoke-Test, dass Beschaffung und Linken funktionieren.
+Erledigt am 2026-10-31, beschrieben in [BUILD.md](BUILD.md): vorgebaute Archive für libmpv (shinchiro) und FFmpeg (BtbN, LGPL), auf Windows eine selbst erzeugte `mpv.lib`, eingebunden über die Umgebungsvariablen `TAKT_LIBMPV_DIR` und `FFMPEG_DIR` und geprüft durch den Smoke-Test `apps/takt-player/tests/ffi_native_link.rs`. Ohne die Variablen bleibt alles beim Alten: der Player läuft über `NullBackend`, die CI braucht keine Systembibliothek. Das Player-Binary selbst linkt libmpv erst mit dem `MpvBackend`; bis dahin beweist der Smoke-Test, dass Beschaffung und Linken funktionieren.
 
-Zwei Abweichungen von der ursprünglichen Planung: vcpkg ist nicht der erste Weg, sondern die Ausweichlösung (baut alles aus dem Quelltext), und die vorgebaute libmpv ist ein GPL-Build mit statisch eingebauter GPL-FFmpeg. Für den GPL-3-Player ist das verträglich, widerspricht aber der Regel „kein libmpv-Build mit GPL“. Die Entscheidung dazu steht offen (BUILD.md, Abschnitt „Lizenz der vorgebauten libmpv“).
+Zwei Abweichungen von der ursprünglichen Planung: vcpkg ist nicht der erste Weg, sondern die Ausweichlösung (baut alles aus dem Quelltext), und die vorgebaute libmpv ist ein GPL-Build mit statisch eingebauter GPL-FFmpeg. Für den GPL-3-Player ist das verträglich, widerspricht aber der Regel „kein libmpv-Build mit GPL“. Entschieden am 2026-10-31: der GPL-Build bleibt, aber nur in Zone 2 (BUILD.md, Abschnitt „Lizenz der vorgebauten libmpv“).
 
 ---
 
