@@ -244,6 +244,8 @@ impl Default for AnchorCell {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
 
     #[test]
     fn leer_bis_zum_ersten_publish() {
@@ -281,33 +283,55 @@ mod tests {
     fn nebenlaeufig_niemals_zerrissen() {
         // Der Anker haelt die Invariante nanos == samples * 1000: ein
         // zerrissener Lesevorgang wuerde sie brechen.
+        //
+        // The writer runs until the reader has seen enough: with a fixed number
+        // of writes it can finish before the reader's first load on a busy
+        // machine. The deadline only keeps a broken cell from hanging the test.
+        //
+        // A torn read needs a write between two adjacent loads: with the check
+        // of the counter removed, 10_000 reads can miss it, 1_000_000 did not.
+        const MIN_READS: u32 = 1_000_000;
+        const MIN_WRITES: u64 = 200_000;
+
         let cell = Arc::new(AnchorCell::new());
+        let stop = Arc::new(AtomicBool::new(false));
         let writer = {
             let cell = Arc::clone(&cell);
+            let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                for i in 1..200_000_u64 {
+                let mut i = 1_u64;
+                while !stop.load(Ordering::Relaxed) {
                     cell.publish(Anchor {
                         samples: i,
                         nanos: i * 1_000,
                     });
+                    i += 1;
                 }
             })
         };
 
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut reads = 0_u32;
         let mut torn = 0_u32;
-        while !writer.is_finished() {
+        let mut newest = 0_u64;
+        while (reads < MIN_READS || newest < MIN_WRITES) && Instant::now() < deadline {
             if let Some(a) = cell.load(64) {
                 reads += 1;
+                newest = newest.max(a.samples);
                 if a.nanos != a.samples * 1_000 {
                     torn += 1;
                 }
             }
         }
+        stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
 
         assert_eq!(torn, 0, "zerrissener Lesevorgang trotz Seqlock");
-        assert!(reads > 0, "kein einziger Lesevorgang zustande gekommen");
+        assert!(reads >= MIN_READS, "only {reads} reads before the deadline");
+        assert!(
+            newest >= MIN_WRITES,
+            "only saw {newest} writes before the deadline"
+        );
     }
 
     #[test]
