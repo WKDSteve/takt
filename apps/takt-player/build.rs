@@ -54,7 +54,25 @@ fn import_lib_names(name: &str) -> Vec<String> {
     }
 }
 
+/// The icon of the program, which Explorer shows and a link takes from its target. The file is the
+/// compiled resource the icon generator writes; the linker of MSVC takes it as it is.
+fn link_program_icon() {
+    println!("cargo::rerun-if-changed=build.rs");
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let res = manifest
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("takt.res");
+    println!("cargo::rerun-if-changed={}", res.display());
+    println!("cargo::rustc-link-arg-bins={}", res.display());
+}
+
 fn main() {
+    link_program_icon();
     for lib in NATIVE_LIBS {
         println!("cargo::rerun-if-env-changed={}", lib.var);
         println!("cargo::rustc-check-cfg=cfg({})", lib.cfg);
