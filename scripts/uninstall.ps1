@@ -25,6 +25,9 @@ function Exit-Uninstall([string] $Message) {
     throw "uninstall.ps1: $Message"
 }
 
+if ($env:CLAUDECODE) {
+    Exit-Uninstall 'remove in a normal terminal, not in a Claude session (the app redirects AppData and the registry)'
+}
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $AllowElevated -and $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Exit-Uninstall 'do not run this elevated: it removes the installation of one user (-AllowElevated for a build machine)'
