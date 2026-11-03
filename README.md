@@ -1,3 +1,5 @@
+![takt](assets/icons/takt/png/takt-128.png)
+
 # Takt
 
 Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Compositing und Audio-Verarbeitung, auf dem vier Betriebsmodi aufsetzen — Player, Live-Studio, Video-Editor und, als Fernziel, eine Digital Audio Workstation.
