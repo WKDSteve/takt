@@ -16,6 +16,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Threads, Uhren und Invarianten | [docs/THREADS-UND-UHREN.md](docs/THREADS-UND-UHREN.md) |
 | Phase 0 und ihr Review | [docs/PHASE-0.md](docs/PHASE-0.md), [docs/reviews/](docs/reviews/) |
 | Bauen mit libmpv und FFmpeg | [docs/BUILD.md](docs/BUILD.md) |
+| Bauen und für den eigenen Benutzer installieren (Windows, ohne Setup, nach `%LOCALAPPDATA%\takt\bin`): `scripts\build-install.ps1 [-BuildOnly]`; entfernen: `scripts\uninstall.ps1` | [scripts/](scripts/) |
 | Planung: Plan mit Etappen und Gates, Tasks, offene Entscheidungen | Vault [`tasks-vault/takt/`](https://github.com/WKDSteve/tasks-vault/tree/main/takt) (privat) |
 
 ## Plattformen
