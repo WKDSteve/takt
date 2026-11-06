@@ -1,0 +1,26 @@
+# The license boundary of the permissive core (zone 1, `Apache-2.0 OR MIT`, see the concept). Zone 1 crates must stay
+# usable without any copyleft, so a copyleft license anywhere in their graph fails this check, a zone 2 crate of this
+# workspace included. `deny.toml` is the check of the whole workspace, where zone 2 and 3 may be copyleft.
+#
+#   cargo deny --config deny-zone1.toml --manifest-path crates/takt-core/Cargo.toml check licenses
+#
+# A new zone 1 crate joins the matrix of the job `zone1` in .github/workflows/ci.yml.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93

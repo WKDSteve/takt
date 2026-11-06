@@ -53,6 +53,25 @@ jobs:
         with:
           command: check all
 
+  zone1:
+    name: Zone 1 baut allein und bleibt frei von Copyleft
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [takt-core, takt-clock]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bauen ohne den Rest des Workspace
+        run: cargo build -p ${{ matrix.crate }} --locked
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/${{ matrix.crate }}/Cargo.toml
+          arguments: --config deny-zone1.toml
+          command: check licenses
+
   msrv:
     name: Mindest-Rust-Version
     runs-on: ubuntu-latest
