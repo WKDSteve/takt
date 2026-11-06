@@ -184,3 +184,5 @@ Die Punkte, die ohne Diskussion gelten und in Reviews geprüft werden:
 5. **Kommunikation zum Audio-Thread ausschließlich wartefrei:** Atomics, Seqlock, lock-freie SPSC-Ringpuffer.
 6. **Zähler statt Protokoll.** Der Audio-Thread schreibt Zahlen, die ein anderer Thread ausliest und ausgibt.
 7. **`takt-audio` und `takt-clock` kennen keine Modi.** Sie kennen Puffer und Anker. Welcher Modus sie füllt, ist ihnen gleichgültig.
+
+Wachsende Quellen (eine Datei oder ein Strom, der beim Abspielen noch länger wird) ändern an den Uhren nichts: Siehe [SOURCES.md](SOURCES.md), „Wachsende Quellen im Player“.
