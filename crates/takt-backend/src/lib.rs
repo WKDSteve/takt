@@ -104,6 +104,18 @@ pub trait VideoBackend: Send {
         clock: &dyn takt_clock::Clock,
     ) -> takt_core::Result<Option<takt_core::PooledFrame>>;
 
+    /// The period of the display that shows the frames, in nanoseconds, or
+    /// `None` when unknown (the default).
+    ///
+    /// A frame is due once it is closer to now than half a display period:
+    /// it then goes to the refresh nearest its timestamp, and the error stays
+    /// within half a period, at 60 Hz as at 120 Hz. Without a period the
+    /// tolerance is half a frame duration, which grows the error with the
+    /// refresh rate (an early frame waits on screen for its time).
+    fn set_display_period(&mut self, nanos: Option<i64>) {
+        let _ = nanos;
+    }
+
     /// Ob die Quelle erschoepft ist.
     fn is_eof(&self) -> bool;
 

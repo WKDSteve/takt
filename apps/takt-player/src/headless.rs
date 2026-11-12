@@ -72,6 +72,7 @@ pub fn run() {
 
     // Anzeigedurchlauf bei 60 Hz, so wie ein echter Renderer aufgerufen wuerde.
     let vsync = Duration::from_nanos(16_666_667);
+    backend.set_display_period(Some(16_666_667));
     loop {
         let frame = match backend.next_frame(&clock) {
             Ok(f) => f,

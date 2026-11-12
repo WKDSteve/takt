@@ -15,6 +15,9 @@
 //! wrapped in a [`SeekableClock`]: a jump moves the media position, resets
 //! source and scheduler (their numbers are about the old position), and the
 //! device plays on.
+//!
+//! The source learns the display period ([`RefreshMeter`], the median of the
+//! passes), so a frame is due at the refresh nearest its timestamp.
 
 use std::sync::Arc;
 
@@ -28,6 +31,7 @@ use takt_core::{
 
 use crate::app::{Command, Key, PlayerState, command_for, seek_target};
 use crate::audio::{self, AudioPath};
+use crate::refresh::RefreshMeter;
 use crate::render::{self, Shown, gpu::Nv12Image};
 
 /// Length of the test source.
@@ -69,6 +73,8 @@ struct PlayerApp {
     audio_line: String,
     source: NullBackend,
     shown: Option<Shown>,
+    refresh: RefreshMeter,
+    started: Instant,
 }
 
 impl PlayerApp {
@@ -88,12 +94,17 @@ impl PlayerApp {
             audio_line,
             source: test_source(),
             shown: None,
+            refresh: RefreshMeter::default(),
+            started: Instant::now(),
         }
     }
 
     /// One pass of the render loop: the frame that is due now, judged by the
     /// scheduler; a new picture when it is shown.
     fn take_due_frame(&mut self) {
+        let elapsed = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.refresh.pass(elapsed);
+        self.source.set_display_period(self.refresh.period_nanos());
         if !self.state.playing() {
             return;
         }
@@ -159,8 +170,13 @@ impl PlayerApp {
         let s = self.scheduler.stats();
         #[expect(clippy::cast_precision_loss, reason = "a display value, not time")]
         let mean = s.mean_abs_error_nanos() as f64 / 1e6;
+        #[expect(clippy::cast_precision_loss, reason = "a display value, not time")]
+        let refresh = self
+            .refresh
+            .period_nanos()
+            .map_or("-".to_owned(), |p| format!("{:.1} Hz", 1e9 / p as f64));
         format!(
-            "shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms",
+            "shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms, display {refresh}",
             s.shown,
             s.repeated,
             s.repeat_ratio(),

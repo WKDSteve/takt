@@ -13,6 +13,7 @@
 mod app;
 mod audio;
 mod headless;
+mod refresh;
 mod render;
 mod ui;
 

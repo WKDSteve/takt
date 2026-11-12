@@ -46,6 +46,8 @@ pub struct NullBackend {
     next_index: i64,
     total_frames: i64,
     stats: BackendStats,
+    /// See [`VideoBackend::set_display_period`].
+    display_period_ns: Option<i64>,
 }
 
 impl NullBackend {
@@ -71,6 +73,7 @@ impl NullBackend {
             next_index: 0,
             total_frames: total,
             stats: BackendStats::default(),
+            display_period_ns: None,
         }
     }
 
@@ -93,6 +96,18 @@ impl NullBackend {
     #[must_use]
     pub const fn next_index(&self) -> i64 {
         self.next_index
+    }
+
+    /// How early a frame may be handed out: half the display period when it
+    /// is known, never more than half a frame duration (then the next frame
+    /// is nearer).
+    #[must_use]
+    pub fn due_tolerance_nanos(&self) -> i64 {
+        let frame_ns = 1_000_000_000_i64 * self.frame_rate.den() / self.frame_rate.num().max(1);
+        let half_frame = frame_ns / 2;
+        self.display_period_ns
+            .filter(|&p| p > 0)
+            .map_or(half_frame, |p| (p / 2).min(half_frame))
     }
 
     /// Fuellt ein Frame mit dem eingestellten Muster.
@@ -185,10 +200,9 @@ impl VideoBackend for NullBackend {
 
         let pts = self.pts_of(self.next_index).ok_or(Error::InvalidTimeBase)?;
 
-        // Halbe Frame-Dauer als Toleranz: ein Frame ist faellig, sobald es
-        // naeher an jetzt liegt als an seinem Nachfolger.
-        let frame_ns = 1_000_000_000_i64 * self.frame_rate.den() / self.frame_rate.num().max(1);
-        if !clock.is_due(pts, frame_ns / 2) {
+        // Due at the display refresh nearest the timestamp (half a display
+        // period), see `due_tolerance_nanos`.
+        if !clock.is_due(pts, self.due_tolerance_nanos()) {
             return Ok(None);
         }
 
@@ -227,6 +241,10 @@ impl VideoBackend for NullBackend {
 
     fn stats(&self) -> BackendStats {
         self.stats
+    }
+
+    fn set_display_period(&mut self, nanos: Option<i64>) {
+        self.display_period_ns = nanos;
     }
 }
 
@@ -432,5 +450,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_tolerance_is_half_the_display_period_at_most_half_a_frame() {
+        let mut b = backend(Pattern::Flat);
+        assert_eq!(
+            b.due_tolerance_nanos(),
+            20_000_000,
+            "unknown: half of 40 ms"
+        );
+        b.set_display_period(Some(8_333_333));
+        assert_eq!(b.due_tolerance_nanos(), 4_166_666, "120 Hz");
+        b.set_display_period(Some(16_666_667));
+        assert_eq!(b.due_tolerance_nanos(), 8_333_333, "60 Hz");
+        b.set_display_period(Some(100_000_000));
+        assert_eq!(b.due_tolerance_nanos(), 20_000_000, "a slow display");
+        b.set_display_period(Some(0));
+        assert_eq!(b.due_tolerance_nanos(), 20_000_000);
+    }
+
+    #[test]
+    fn at_120_hz_a_frame_is_not_handed_out_20_ms_early() {
+        let src = Arc::new(ManualMonotonic::new());
+        let clock = AudioMasterClock::new(
+            48_000,
+            Arc::clone(&src) as Arc<dyn MonotonicSource>,
+            20_000_000,
+        );
+        let w = clock.writer().unwrap();
+        let mut b = backend(Pattern::Flat);
+        b.open("test").unwrap();
+        b.set_display_period(Some(8_333_333));
+        w.report(0, 0);
+        assert!(b.next_frame(&clock).unwrap().is_some(), "frame 0 at 0 ms");
+        // Frame 1 at 40 ms: at 25 ms it was due with half a frame (20 ms),
+        // at 120 Hz it waits for the refresh nearest 40 ms.
+        w.report(48 * 25, 0);
+        assert!(b.next_frame(&clock).unwrap().is_none());
+        w.report(48 * 35, 0);
+        assert!(b.next_frame(&clock).unwrap().is_none());
+        w.report(48 * 36, 0);
+        assert!(b.next_frame(&clock).unwrap().is_some());
     }
 }
