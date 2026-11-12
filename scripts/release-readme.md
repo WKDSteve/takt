@@ -23,6 +23,7 @@ administrator rights. Windows (SmartScreen) may ask before the first start: the 
 
 ## Keys
 
-Space play/pause, arrows jump 5 s, Home to the start, F3 diagnostics, F4 save them, Escape quits.
+Space play/pause, arrows jump 5 s, Home to the start, a click on the timeline jumps there, 9/0
+quieter/louder, m mute, F3 diagnostics, F4 save them, Escape quits.
 
 License: GPL-3.0-or-later (`LICENSE`). Source: <https://github.com/WKDSteve/takt>.

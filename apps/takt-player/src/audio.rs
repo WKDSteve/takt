@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use takt_audio::{Output, OutputCallback, OutputConfig, OutputStats, Priority, ring};
+use takt_audio::{Gain, Output, OutputCallback, OutputConfig, OutputStats, Priority, ring};
 use takt_clock::{AudioMasterClock, MonotonicSource, SystemMonotonic};
 
 /// Frames per second of the clock and the device.
@@ -30,6 +30,7 @@ enum Kind {
         // stays on the thread that started it.
         output: Output,
         stats: Arc<OutputStats>,
+        gain: Arc<Gain>,
     },
     Simulated {
         reason: String,
@@ -74,6 +75,7 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
         let callback =
             OutputCallback::new(rx, writer, Arc::clone(source) as Arc<dyn MonotonicSource>);
         let stats = callback.stats();
+        let gain = callback.gain();
         // A stock before the first callback, or the stream starts with an xrun.
         tx.push(&vec![0.0_f32; RING_FRAMES * 2]);
         let config = OutputConfig {
@@ -95,7 +97,11 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
                     })
                 };
                 let path = AudioPath {
-                    kind: Some(Kind::Device { output, stats }),
+                    kind: Some(Kind::Device {
+                        output,
+                        stats,
+                        gain,
+                    }),
                     stop,
                     thread: Some(feeder),
                 };
@@ -147,6 +153,14 @@ impl AudioPath {
         }
     }
 
+    /// Sets the volume of the device (0 mutes); the simulated path has no
+    /// sound and keeps nothing.
+    pub fn set_volume(&self, volume: f32) {
+        if let Some(Kind::Device { gain, .. }) = &self.kind {
+            gain.set(volume);
+        }
+    }
+
     /// The counters of the device callback, `None` when simulated.
     pub fn device_stats(&self) -> Option<Arc<OutputStats>> {
         match &self.kind {
@@ -162,7 +176,7 @@ impl AudioPath {
 
     fn halt(&mut self) -> Option<DeviceSummary> {
         let summary = match self.kind.take() {
-            Some(Kind::Device { output, stats }) => {
+            Some(Kind::Device { output, stats, .. }) => {
                 // Read after the callbacks ran: a refusal comes before the first.
                 let priority = output.priority();
                 drop(output);

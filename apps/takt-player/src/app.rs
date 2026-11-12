@@ -18,7 +18,18 @@ pub enum Command {
     ToggleOverlay,
     /// Save the diagnostics as text (clipboard and a file).
     SaveDiagnostics,
+    /// Jump to this position in milliseconds (a click on the timeline).
+    SeekTo(i64),
+    /// Louder by one step.
+    VolumeUp,
+    /// Quieter by one step.
+    VolumeDown,
+    /// Mute, or unmute to the volume before.
+    ToggleMute,
 }
+
+/// How far the volume keys move the volume.
+pub const VOLUME_STEP: f32 = 0.05;
 
 /// How far the arrow keys jump.
 pub const SEEK_STEP_MILLIS: i64 = 5_000;
@@ -40,6 +51,12 @@ pub enum Key {
     F3,
     /// F4.
     F4,
+    /// `9`, quieter (as in mpv).
+    Nine,
+    /// `0`, louder (as in mpv).
+    Zero,
+    /// `m`, mute (as in mpv).
+    M,
 }
 
 /// The command of a key.
@@ -53,6 +70,9 @@ pub fn command_for(key: Key) -> Command {
         Key::Home => Command::SeekStart,
         Key::F3 => Command::ToggleOverlay,
         Key::F4 => Command::SaveDiagnostics,
+        Key::Nine => Command::VolumeDown,
+        Key::Zero => Command::VolumeUp,
+        Key::M => Command::ToggleMute,
     }
 }
 
@@ -68,6 +88,7 @@ pub fn seek_target(now: i64, by: i64, duration: i64) -> i64 {
 pub struct PlayerState {
     playing: bool,
     volume: f32,
+    muted: bool,
     overlay: bool,
 }
 
@@ -77,6 +98,7 @@ impl Default for PlayerState {
         Self {
             playing: true,
             volume: 1.0,
+            muted: false,
             overlay: false,
         }
     }
@@ -101,6 +123,18 @@ impl PlayerState {
         self.volume
     }
 
+    /// Whether it is muted (the volume is kept for unmuting).
+    #[must_use]
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// What the sound path plays with: 0 when muted, else the volume.
+    #[must_use]
+    pub fn effective_volume(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
     /// Sets the volume, kept to 0..=1 (a value that is no number is 0).
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = if volume.is_nan() {
@@ -122,9 +156,27 @@ impl PlayerState {
                 self.overlay = !self.overlay;
                 false
             }
+            Command::VolumeUp | Command::VolumeDown => {
+                let step = if command == Command::VolumeUp {
+                    VOLUME_STEP
+                } else {
+                    -VOLUME_STEP
+                };
+                self.set_volume(self.volume + step);
+                // A volume key unmutes, as in mpv.
+                self.muted = false;
+                false
+            }
+            Command::ToggleMute => {
+                self.muted = !self.muted;
+                false
+            }
             // The clock and the source jump, the window saves; the state does
             // not change.
-            Command::SeekBy(_) | Command::SeekStart | Command::SaveDiagnostics => false,
+            Command::SeekBy(_)
+            | Command::SeekStart
+            | Command::SeekTo(_)
+            | Command::SaveDiagnostics => false,
         }
     }
 }
@@ -165,6 +217,27 @@ mod tests {
         assert!(state.overlay() && state.playing());
         state.apply(Command::ToggleOverlay);
         assert!(!state.overlay());
+    }
+
+    #[test]
+    fn nine_and_zero_change_the_volume_and_m_mutes() {
+        let mut state = PlayerState::default();
+        state.apply(command_for(Key::Nine));
+        assert!((state.volume() - 0.95).abs() < 1e-6);
+        state.apply(command_for(Key::M));
+        assert!(state.muted());
+        assert!(state.effective_volume().abs() < f32::EPSILON);
+        assert!((state.volume() - 0.95).abs() < 1e-6, "the volume is kept");
+        state.apply(command_for(Key::Zero));
+        assert!(!state.muted(), "a volume key unmutes");
+        assert!((state.effective_volume() - 1.0).abs() < 1e-6);
+        state.apply(Command::VolumeUp);
+        assert!((state.volume() - 1.0).abs() < f32::EPSILON, "never above 1");
+        for _ in 0..30 {
+            state.apply(Command::VolumeDown);
+        }
+        assert!(state.volume().abs() < f32::EPSILON, "never below 0");
+        assert!(!state.apply(Command::SeekTo(1_000)) && state.playing());
     }
 
     #[test]

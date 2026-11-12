@@ -90,6 +90,9 @@ pub struct Snapshot {
     pub audio: Option<AudioCounters>,
     /// The sample rate the latency is counted in.
     pub sample_rate: u32,
+    /// The last jump: target and the timestamp of the first frame after it,
+    /// in milliseconds.
+    pub seek: Option<(i64, i64)>,
     /// CPU and memory, once measured.
     pub process: Option<ProcessLoad>,
     /// What building the overlay costs per pass: p50 upper bound in
@@ -170,6 +173,15 @@ impl Snapshot {
                     }),
             ),
             ("audio", self.audio_line.clone()),
+            (
+                "seek",
+                self.seek.map_or("no jump yet".to_owned(), |(to, landed)| {
+                    format!(
+                        "to {to} ms, first frame at {landed} ms ({:+} ms)",
+                        landed - to
+                    )
+                }),
+            ),
         ];
         if let Some(a) = &self.audio {
             lines.push((
@@ -349,6 +361,7 @@ mod tests {
                 runtime_max_nanos: 6_000,
             }),
             sample_rate: 48_000,
+            seek: Some((5_000, 5_005)),
             process: Some(ProcessLoad {
                 cpu_percent: 12.5,
                 memory_bytes: 64 * 1024 * 1024,
@@ -372,6 +385,7 @@ mod tests {
             "p50 <4 us  p99 <5 us  p99.99 -",
             "CPU 12.5 % of a core, RAM 64.0 MiB",
             "p50 <128 us, max 200.0 us",
+            "to 5000 ms, first frame at 5005 ms (+5 ms)",
             "1.0..2.0 ms       3 ########################################",
             "2.0..4.1 ms       1 #############",
         ] {

@@ -20,7 +20,7 @@ pub mod output;
 pub mod ring;
 pub mod sample;
 
-pub use callback::{OutputCallback, OutputStats};
+pub use callback::{Gain, OutputCallback, OutputStats};
 pub use histogram::{DurationHistogram, DurationSnapshot};
 #[cfg(feature = "cpal")]
 pub use output::{Output, OutputConfig, OutputError, Priority};

@@ -96,6 +96,13 @@ struct PlayerApp {
     saved: Option<String>,
     /// What the overlay shows, with the time it was read.
     shown_diagnostics: Option<ShownDiagnostics>,
+    /// The target of the last jump, until the first frame after it is shown.
+    seek_probe: Option<i64>,
+    /// The last jump: its target and the timestamp of the first frame shown
+    /// after it, in milliseconds.
+    last_seek: Option<(i64, i64)>,
+    /// The position the timeline is dragged to, before the jump.
+    scrub: Option<i64>,
 }
 
 impl PlayerApp {
@@ -125,6 +132,9 @@ impl PlayerApp {
             overlay_cost: takt_audio::DurationHistogram::default(),
             saved: None,
             shown_diagnostics: None,
+            seek_probe: None,
+            last_seek: None,
+            scrub: None,
         }
     }
 
@@ -152,6 +162,15 @@ impl PlayerApp {
             return;
         }
         if let Some(frame) = frame {
+            if let Some(target) = self.seek_probe.take() {
+                let landed = frame
+                    .get()
+                    .meta()
+                    .pts
+                    .rescale(Rational::MILLIS)
+                    .map_or(target, Timestamp::ticks);
+                self.last_seek = Some((target, landed));
+            }
             match Nv12Image::from_frame(frame.get()) {
                 Ok(image) => {
                     let generation = self.shown.as_ref().map_or(0, |s| s.generation + 1);
@@ -173,6 +192,7 @@ impl PlayerApp {
             eprintln!("takt-player: seek: {e}");
         }
         self.scheduler.reset();
+        self.seek_probe = Some(millis);
     }
 
     fn now_millis(&self) -> i64 {
@@ -189,10 +209,17 @@ impl PlayerApp {
         match command {
             Command::SeekBy(by) => self.seek_to(seek_target(self.now_millis(), by, SOURCE_MILLIS)),
             Command::SeekStart => self.seek_to(0),
+            Command::SeekTo(to) => self.seek_to(to.clamp(0, SOURCE_MILLIS)),
             Command::SaveDiagnostics => self.save_diagnostics(ctx),
-            Command::TogglePlay | Command::Quit | Command::ToggleOverlay => {}
+            Command::TogglePlay
+            | Command::Quit
+            | Command::ToggleOverlay
+            | Command::VolumeUp
+            | Command::VolumeDown
+            | Command::ToggleMute => {}
         }
         self.clock.set_paused(!self.state.playing());
+        self._audio.set_volume(self.state.effective_volume());
     }
 
     /// All counters, read now.
@@ -207,6 +234,7 @@ impl PlayerApp {
             display_period_nanos: self.refresh.period_nanos(),
             audio_line: self.audio_line.clone(),
             audio: self._audio.device_stats().map(|s| AudioCounters::read(&s)),
+            seek: self.last_seek,
             sample_rate: clock.sample_rate(),
             process: self.process.load(),
             overlay_cost: diagnostics::overlay_cost(&self.overlay_cost.snapshot()),
@@ -320,6 +348,9 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     egui::Key::Home => Some(command_for(Key::Home)),
                     egui::Key::F3 => Some(command_for(Key::F3)),
                     egui::Key::F4 => Some(command_for(Key::F4)),
+                    egui::Key::Num9 => Some(command_for(Key::Nine)),
+                    egui::Key::Num0 => Some(command_for(Key::Zero)),
+                    egui::Key::M => Some(command_for(Key::M)),
                     _ => None,
                 },
                 _ => None,
@@ -352,15 +383,44 @@ impl eframe::App for PlayerApp {
                 if ui.button(label).on_hover_text("Space").clicked() {
                     self.run(ctx, Command::TogglePlay);
                 }
-                ui.monospace(self.clock.now().format_hms());
+                // The timeline: the jump happens when the drag ends or on a
+                // click, the label follows the drag before that.
+                let mut position = self.scrub.unwrap_or_else(|| self.now_millis());
+                ui.spacing_mut().slider_width = 320.0;
+                let timeline = ui
+                    .add(
+                        egui::Slider::new(&mut position, 0..=SOURCE_MILLIS)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    )
+                    .on_hover_text("click or drag to jump; arrows 5 s, Home to the start");
+                if timeline.dragged() {
+                    self.scrub = Some(position);
+                }
+                if timeline.drag_stopped() || (timeline.changed() && !timeline.dragged()) {
+                    self.scrub = None;
+                    self.run(ctx, Command::SeekTo(position));
+                }
+                ui.monospace(format!(
+                    "{} / {}",
+                    Timestamp::from_millis(position).format_hms(),
+                    Timestamp::from_millis(SOURCE_MILLIS).format_hms()
+                ));
                 ui.separator();
+                let mute = if self.state.muted() { "Unmute" } else { "Mute" };
+                if ui.button(mute).on_hover_text("m").clicked() {
+                    self.run(ctx, Command::ToggleMute);
+                }
                 let mut volume = self.state.volume();
-                // The source has no sound yet, so the volume is only kept.
+                ui.spacing_mut().slider_width = 100.0;
+                // The test source plays silence; the volume goes to the device all the same.
                 if ui
                     .add(egui::Slider::new(&mut volume, 0.0..=1.0).text("Volume"))
+                    .on_hover_text("9 quieter, 0 louder")
                     .changed()
                 {
                     self.state.set_volume(volume);
+                    self._audio.set_volume(self.state.effective_volume());
                 }
                 ui.separator();
                 ui.weak(self.summary());

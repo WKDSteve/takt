@@ -35,7 +35,7 @@
 //! of stepping it back: the clock stays monotonic.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use takt_clock::{AudioClockWriter, MonotonicSource};
 
@@ -113,6 +113,37 @@ fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
+/// The volume of an output: a factor for every sample, set from any thread
+/// and read by the callback without a lock (the bits of an `f32` in an
+/// atomic).
+#[derive(Debug)]
+pub struct Gain(AtomicU32);
+
+impl Default for Gain {
+    /// Unchanged (1.0).
+    fn default() -> Self {
+        Self(AtomicU32::new(1.0_f32.to_bits()))
+    }
+}
+
+impl Gain {
+    /// Sets the factor, kept to `0..=1` (a value that is no number is 0).
+    pub fn set(&self, factor: f32) {
+        let factor = if factor.is_nan() {
+            0.0
+        } else {
+            factor.clamp(0.0, 1.0)
+        };
+        self.0.store(factor.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The factor.
+    #[must_use]
+    pub fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+}
+
 /// The body of the audio callback.
 #[derive(Debug)]
 pub struct OutputCallback {
@@ -125,6 +156,7 @@ pub struct OutputCallback {
     latency: Option<u64>,
     /// The last position reported with a latency, so it never steps back.
     heard: u64,
+    gain: Arc<Gain>,
 }
 
 impl OutputCallback {
@@ -141,6 +173,7 @@ impl OutputCallback {
             dither: Dither::default(),
             latency: None,
             heard: 0,
+            gain: Arc::new(Gain::default()),
         }
     }
 
@@ -156,6 +189,12 @@ impl OutputCallback {
     /// **Callable from the audio thread**: a plain store.
     pub fn set_latency(&mut self, frames: u64) {
         self.latency = Some(frames);
+    }
+
+    /// The volume, to be set while the callback runs elsewhere.
+    #[must_use]
+    pub fn gain(&self) -> Arc<Gain> {
+        Arc::clone(&self.gain)
     }
 
     /// Samples per frame, as the ring carries them.
@@ -188,6 +227,12 @@ impl OutputCallback {
         let channels = self.ring.channels();
         let frames = self.ring.pop(out);
         let wanted = out.len() / channels;
+        let gain = self.gain.get();
+        if gain != 1.0 {
+            for x in &mut out[..frames * channels] {
+                *x *= gain;
+            }
+        }
         out[frames * channels..].fill(0.0);
         self.finish(now, frames, wanted);
     }
@@ -199,12 +244,13 @@ impl OutputCallback {
         // Whole frames per part; a frame wider than the stack buffer gets silence.
         let part = SCRATCH_SAMPLES / channels * channels;
         let mut frames = 0;
+        let gain = self.gain.get();
         if part > 0 {
             let mut scratch = [0.0_f32; SCRATCH_SAMPLES];
             for chunk in out[..wanted * channels].chunks_mut(part) {
                 let got = self.ring.pop(&mut scratch[..chunk.len()]) * channels;
                 for (o, &x) in chunk.iter_mut().zip(&scratch[..got]) {
-                    *o = S::from_f32(x, &mut self.dither);
+                    *o = S::from_f32(x * gain, &mut self.dither);
                 }
                 frames += got / channels;
                 if got < chunk.len() {
@@ -397,5 +443,29 @@ mod tests {
         let (_, mut cb, _, _) = setup(960);
         cb.fill(&mut [0.0_f32; 480 * 2]);
         assert_eq!(cb.stats().latency_frames(), None);
+    }
+
+    #[test]
+    fn the_gain_scales_every_format_and_mute_is_silence() {
+        let (mut tx, mut cb, _, _) = setup(4_096);
+        let gain = cb.gain();
+        assert!((gain.get() - 1.0).abs() < f32::EPSILON);
+        tx.push(&[0.8; 480 * 2]);
+        gain.set(0.5);
+        let mut out = [0.0_f32; 480 * 2];
+        cb.fill(&mut out);
+        assert!(out.iter().all(|&s| (s - 0.4).abs() < 1e-6));
+        tx.push(&[1.0; 480 * 2]);
+        let mut deep = [0_i32; 480 * 2];
+        cb.fill_as(&mut deep);
+        assert!(deep.iter().all(|&s| s == 1_073_741_824));
+        gain.set(0.0);
+        tx.push(&[1.0; 480 * 2]);
+        cb.fill(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "mute");
+        gain.set(7.0);
+        assert!((gain.get() - 1.0).abs() < f32::EPSILON, "kept to 1");
+        gain.set(f32::NAN);
+        assert!(gain.get().abs() < f32::EPSILON);
     }
 }
