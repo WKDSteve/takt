@@ -86,7 +86,12 @@ fn start_audio(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, Audio) {
         let stats = callback.stats();
         // Vorrat vor dem ersten Callback, sonst beginnt der Stream mit einem Xrun.
         tx.push(&vec![0.0_f32; RING_FRAMES * 2]);
-        match Output::open(OutputConfig::default(), callback) {
+        let config = OutputConfig {
+            // Cargo.toml turns on the feature realtime of cpal.
+            realtime: true,
+            ..OutputConfig::default()
+        };
+        match Output::open(config, callback) {
             Ok(output) => {
                 // Die Testquelle hat keinen Ton: der Zufuehrer haelt den Ring
                 // mit Stille voll, damit das Geraet die Uhr gleichmaessig stellt.
@@ -212,10 +217,12 @@ fn main() {
             feeder,
             stop,
         } => {
+            // Read after the callbacks ran: a refusal comes before the first.
+            let priority = output.priority();
             drop(output);
             stop.store(true, Ordering::Relaxed);
             let _ = feeder.join();
-            Some(stats)
+            Some((stats, priority))
         }
         Audio::Simulated { thread, .. } => {
             let _ = thread.join();
@@ -247,7 +254,8 @@ fn main() {
     );
     println!("  Endposition     {}", clock.now());
     println!("  Framedauer      {:.3} ms", frame_ns as f64 / 1e6);
-    if let Some(a) = device_stats {
+    if let Some((a, priority)) = device_stats {
+        println!("  Prioritaet      {priority}");
         println!(
             "  Audio           {} Callbacks, {} Xruns, {} Frames Stille",
             a.callbacks(),

@@ -12,6 +12,7 @@ Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` ü
     - [FFmpeg](#ffmpeg)
     - [Prüfen](#prüfen)
   - [Linux](#linux)
+    - [Priorität des Audio-Threads](#priorität-des-audio-threads)
   - [macOS](#macos)
   - [Warum nicht vcpkg](#warum-nicht-vcpkg)
 
@@ -134,6 +135,20 @@ Erwartet: genau zwei Tests, `libmpv::client_api_is_version_2` und `libmpv::licen
 `FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und exportiert `FFMPEG_DIR` (dessen Wurzel) und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`. Dann liegen zwei FFmpeg-Versionen im Prozess; haben beide dieselbe SONAME-Hauptversion, lädt sogar die Distributions-libmpv die BtbN-Bibliotheken (ABI-Mischung). Das taugt zum Prüfen, nicht zum Alltag.
 
 Noch nicht auf echter Hardware geprüft (siehe Plattform-Tabelle im README).
+
+### Priorität des Audio-Threads
+
+`takt-player` lässt `cpal` den Audio-Thread auf Echtzeit-Priorität (`SCHED_FIFO`) heben. Ein normaler Benutzer darf das unter Linux nur mit einer rtprio-Grenze; ohne sie läuft der Ton mit normaler Priorität weiter, und der Player meldet am Ende `Prioritaet refused: …`. Einrichtung, einmal, danach ab- und wieder anmelden:
+
+```bash
+# Gruppe audio (Debian/Ubuntu: gibt es schon; Arch: mit realtime-privileges die Gruppe realtime)
+sudo usermod -aG audio "$USER"
+printf '@audio - rtprio 95\n@audio - memlock unlimited\n' | sudo tee /etc/security/limits.d/95-audio.conf
+```
+
+Prüfen: `ulimit -r` zeigt danach `95`. Ohne Anmeldung über PAM (etwa in einem Container) greift `limits.d` nicht. Der Weg über rtkit (D-Bus, ohne Gruppe) ist noch nicht eingebaut: er braucht das Feature `realtime-dbus` von `cpal` und `libdbus-1-dev`.
+
+Unter Windows fordert `cpal` über `audio_thread_priority` die MMCSS-Klasse „Audio“ an (nicht „Pro Audio“), ohne Einrichtung, und nimmt bei einer Ablehnung `THREAD_PRIORITY_TIME_CRITICAL`; unter macOS ist der CoreAudio-Thread schon ein Echtzeit-Thread.
 
 ## macOS
 

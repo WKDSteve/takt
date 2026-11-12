@@ -15,6 +15,9 @@ takt-core.workspace = true
 takt-clock.workspace = true
 takt-backend = { path = "../../crates/takt-backend", version = "0.0.1" }
 takt-audio = { workspace = true, features = ["cpal"] }
+# Only for its feature: cpal asks for real-time priority on its audio thread. Pulls audio_thread_priority
+# (MPL-2.0), allowed here in zone 2 and never in takt-audio (zone 1).
+cpal = { version = "0.18", features = ["realtime"] }
 # The guard of the audio callback: without `disable_release`, so it aborts in release builds too.
 assert_no_alloc = { version = "1.1", default-features = false }
 

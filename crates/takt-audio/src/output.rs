@@ -11,8 +11,27 @@
 //! The stream is `f32` at the rate and channel count of the ring. A device
 //! that does not take that is refused with [`OutputError::Unsupported`];
 //! conversion belongs to a resampling stage, not to the callback.
+//!
+//! # Thread priority
+//!
+//! `cpal` raises its audio thread itself when it is built with its feature
+//! `realtime`: on Windows the MMCSS class "Audio" (not "Pro Audio") through
+//! `audio_thread_priority`
+//! (falling back to `THREAD_PRIORITY_TIME_CRITICAL`), on Linux `SCHED_FIFO`,
+//! which needs `CAP_SYS_NICE` or an rtprio limit (`docs/BUILD.md`). On macOS
+//! the CoreAudio thread is a real-time thread already. That feature pulls
+//! `audio_thread_priority` (MPL-2.0) and so is not one of this zone 1 crate:
+//! a zone 2 program turns it on in its own `Cargo.toml` and says so with
+//! [`OutputConfig::realtime`].
+//!
+//! A refusal arrives as `RealtimeDenied` in the error callback, before the
+//! first data callback; it is kept and read with [`Output::priority`] and
+//! never stops the stream, which plays on at normal priority. A grant is not
+//! reported by `cpal` (and ALSA skips the request for some device types), so
+//! the best that can be said without a refusal is [`Priority::NoRefusal`].
 
 use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -27,6 +46,10 @@ pub struct OutputConfig {
     /// A size outside the range the device names, or a device that names
     /// none, gets the device default.
     pub buffer_frames: Option<u32>,
+    /// The program builds `cpal` with its feature `realtime`, so `cpal` asks
+    /// for real-time priority on its audio thread. Only a statement for
+    /// [`Output::priority`]; this crate cannot see the features of `cpal`.
+    pub realtime: bool,
 }
 
 impl Default for OutputConfig {
@@ -36,6 +59,7 @@ impl Default for OutputConfig {
         Self {
             sample_rate: 48_000,
             buffer_frames: Some(480),
+            realtime: false,
         }
     }
 }
@@ -63,11 +87,35 @@ impl fmt::Display for OutputError {
 
 impl std::error::Error for OutputError {}
 
+/// What became of the request for real-time priority of the audio thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Priority {
+    /// The program did not build `cpal` with `realtime`.
+    NotRequested,
+    /// `cpal` asked (where the device type allows it) and reported no
+    /// refusal. Meaningful once the first callback ran.
+    NoRefusal,
+    /// The system refused; the stream plays on at normal priority.
+    Refused(String),
+}
+
+impl fmt::Display for Priority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRequested => write!(f, "not requested"),
+            Self::NoRefusal => write!(f, "requested, no refusal reported"),
+            Self::Refused(why) => write!(f, "refused: {why}"),
+        }
+    }
+}
+
 /// A running output. Dropping it stops the stream.
 pub struct Output {
     // Not Send on every platform: an output stays on the thread that opened it.
     _stream: cpal::Stream,
     buffer: cpal::BufferSize,
+    realtime: bool,
+    refusal: Arc<Mutex<Option<String>>>,
 }
 
 impl fmt::Debug for Output {
@@ -112,12 +160,23 @@ impl Output {
             buffer_size: buffer,
         };
         let mut callback = callback;
+        let refusal = Arc::new(Mutex::new(None::<String>));
+        let refused = Arc::clone(&refusal);
         let stream = device
             .build_output_stream(
                 stream_config,
                 move |out: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(out),
                 // Called by cpal outside the real-time path.
-                |e| eprintln!("takt-audio: {e}"),
+                // Called by cpal outside the data callback (a refusal of the
+                // priority comes before the first one), so it may lock.
+                move |e| {
+                    if e.kind() == cpal::ErrorKind::RealtimeDenied {
+                        *refused.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(e.to_string());
+                    } else {
+                        eprintln!("takt-audio: {e}");
+                    }
+                },
                 None,
             )
             .map_err(|e| OutputError::Stream(e.to_string()))?;
@@ -127,7 +186,18 @@ impl Output {
         Ok(Self {
             _stream: stream,
             buffer,
+            realtime: config.realtime,
+            refusal,
         })
+    }
+
+    /// What became of the request for real-time priority.
+    #[must_use]
+    pub fn priority(&self) -> Priority {
+        priority_of(
+            self.realtime,
+            &self.refusal.lock().unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     /// The buffer size the stream was opened with (`Default` when the device
@@ -135,6 +205,14 @@ impl Output {
     #[must_use]
     pub fn buffer(&self) -> cpal::BufferSize {
         self.buffer
+    }
+}
+
+fn priority_of(realtime: bool, refusal: &Option<String>) -> Priority {
+    match (realtime, refusal) {
+        (false, _) => Priority::NotRequested,
+        (true, None) => Priority::NoRefusal,
+        (true, Some(why)) => Priority::Refused(why.clone()),
     }
 }
 
@@ -154,6 +232,19 @@ fn buffer_size(wanted: Option<u32>, range: &cpal::SupportedBufferSize) -> cpal::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_priority_says_only_what_is_known() {
+        assert_eq!(
+            priority_of(false, &Some("x".into())),
+            Priority::NotRequested
+        );
+        assert_eq!(priority_of(true, &None), Priority::NoRefusal);
+        assert_eq!(
+            priority_of(true, &Some("no rtprio".into())).to_string(),
+            "refused: no rtprio"
+        );
+    }
 
     #[test]
     fn a_fixed_size_only_inside_the_range_of_the_device() {
