@@ -21,6 +21,9 @@ takt-clock = { path = "crates/takt-clock", version = "0.0.1" }
 takt-audio = { path = "crates/takt-audio", version = "0.0.1" }
 
 [workspace.lints.rust]
+# Decided 2026-10-30: deny, not forbid (a FFI project needs it in named places). Only a module that
+# talks to a C library (ffi/sys) says `#![allow(unsafe_code)]`, each block with a `// SAFETY:` comment.
+unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
 

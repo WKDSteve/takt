@@ -46,5 +46,6 @@ Falls das Projekt einmal reguläre externe Beitragende hat, wird ein CLA eingef�
 * `cargo fmt` und `cargo clippy -- -D warnings` müssen sauber durchlaufen.
 * Zeitstempel niemals als `f64`. Immer `Timestamp` mit rationaler Basis.
 * Im Audio-Callback: keine Allokation, kein Lock, kein I/O, kein Logging. `assert_no_alloc` bleibt aktiv.
-* Neue `unsafe`-Blöcke brauchen einen `// SAFETY:`-Kommentar, der die Invariante benennt.
+* `unsafe` ist im Workspace verboten (`unsafe_code = "deny"` in `Cargo.toml`). Erlaubt nur in benannten FFI-Modulen (`ffi`/`sys`, heute nur der Link-Test `apps/takt-player/tests/ffi_native_link.rs`), die das mit `#![allow(unsafe_code)]` sagen; jeder Block dort braucht einen `// SAFETY:`-Kommentar, der die Invariante benennt. Zone 1 bleibt ganz ohne `unsafe`.
+* Formatierung nach `rustfmt.toml` (LF auch unter Windows). Textdateien enthalten keine Steuerzeichen außer Tab und Zeilenende (`python scripts/check-control-chars.py`), jede Action in `.github/workflows` ist per Commit-SHA gepinnt (`python scripts/check-action-pins.py`); beides prüft die CI.
 * Commit-Nachrichten im Stil `bereich: was` — etwa `decode: NV12-Import über DMA-BUF`.

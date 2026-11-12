@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Rule RS-01: one format for every machine; LF also when a file is written on Windows.
+newline_style = "Unix"
