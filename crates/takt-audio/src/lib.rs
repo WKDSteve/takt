@@ -18,9 +18,11 @@ pub mod histogram;
 #[cfg(feature = "cpal")]
 pub mod output;
 pub mod ring;
+pub mod sample;
 
 pub use callback::{OutputCallback, OutputStats};
 pub use histogram::{DurationHistogram, DurationSnapshot};
 #[cfg(feature = "cpal")]
 pub use output::{Output, OutputConfig, OutputError, Priority};
 pub use ring::{Consumer, Producer, ring};
+pub use sample::{DeviceSample, Dither};

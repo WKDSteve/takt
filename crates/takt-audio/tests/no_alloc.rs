@@ -60,3 +60,40 @@ fn the_callback_does_not_allocate_full_or_empty() {
     });
     assert_eq!((stats.callbacks(), stats.xruns()), (10, 8));
 }
+
+#[test]
+fn the_conversion_to_integers_does_not_allocate() {
+    use std::sync::Arc;
+    use takt_audio::OutputCallback;
+    use takt_clock::{AudioMasterClock, ManualMonotonic, MonotonicSource};
+
+    let time = Arc::new(ManualMonotonic::new());
+    let clock = AudioMasterClock::new(
+        48_000,
+        Arc::clone(&time) as Arc<dyn MonotonicSource>,
+        20_000_000,
+    );
+    let (mut tx, rx) = ring(2, 8_192);
+    let mut callback = OutputCallback::new(
+        rx,
+        clock.writer().unwrap(),
+        Arc::clone(&time) as Arc<dyn MonotonicSource>,
+    );
+    let stats = callback.stats();
+    // Larger than the stack buffer of the conversion: converted in parts.
+    let mut wide = vec![0_i16; 2_048 * 2];
+    let mut deep = vec![0_i32; 480 * 2];
+    tx.push(&vec![0.5_f32; 8_192 * 2]);
+    assert_no_alloc(|| {
+        for _ in 0..4 {
+            callback.fill_as(&mut wide);
+            callback.fill_as(&mut deep);
+        }
+    });
+    assert_eq!(stats.callbacks(), 8);
+    assert_eq!(
+        stats.frames(),
+        8_192,
+        "the ring ran dry in the last callbacks"
+    );
+}

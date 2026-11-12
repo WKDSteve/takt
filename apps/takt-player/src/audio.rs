@@ -134,7 +134,11 @@ impl AudioPath {
     pub fn describe(&self) -> String {
         match &self.kind {
             Some(Kind::Device { output, .. }) => {
-                format!("default device, buffer {:?}", output.buffer())
+                format!(
+                    "default device, {:?}, buffer {:?}",
+                    output.format(),
+                    output.buffer()
+                )
             }
             Some(Kind::Simulated { reason }) => {
                 format!("SIMULATED ({reason}): no sound, a thread sets the clock")

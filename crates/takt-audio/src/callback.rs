@@ -28,6 +28,11 @@ use takt_clock::{AudioClockWriter, MonotonicSource};
 
 use crate::histogram::{DurationHistogram, DurationSnapshot};
 use crate::ring::Consumer;
+use crate::sample::{DeviceSample, Dither};
+
+/// Samples of the stack buffer [`OutputCallback::fill_as`] converts through:
+/// 4 KiB, a device buffer larger than that is converted in parts.
+const SCRATCH_SAMPLES: usize = 1_024;
 
 /// Counters of an output, readable from any thread while it runs.
 #[derive(Debug, Default)]
@@ -94,6 +99,7 @@ pub struct OutputCallback {
     time: Arc<dyn MonotonicSource>,
     stats: Arc<OutputStats>,
     played: u64,
+    dither: Dither,
 }
 
 impl OutputCallback {
@@ -107,6 +113,7 @@ impl OutputCallback {
             time,
             stats: Arc::new(OutputStats::default()),
             played: 0,
+            dither: Dither::default(),
         }
     }
 
@@ -132,13 +139,51 @@ impl OutputCallback {
         assert_no_alloc::assert_no_alloc(|| self.fill_inner(out));
     }
 
+    /// Fills the interleaved device buffer `out` of a device that takes no
+    /// `f32`: the frames of the ring are converted (`i16` with dither, see
+    /// [`crate::sample`]) through a buffer on the stack.
+    ///
+    /// **The audio callback**, under `assert_no_alloc` like [`fill`](Self::fill).
+    pub fn fill_as<S: DeviceSample>(&mut self, out: &mut [S]) {
+        assert_no_alloc::assert_no_alloc(|| self.fill_as_inner(out));
+    }
+
     fn fill_inner(&mut self, out: &mut [f32]) {
         let now = self.time.now_nanos();
         let channels = self.ring.channels();
         let frames = self.ring.pop(out);
         let wanted = out.len() / channels;
         out[frames * channels..].fill(0.0);
+        self.finish(now, frames, wanted);
+    }
 
+    fn fill_as_inner<S: DeviceSample>(&mut self, out: &mut [S]) {
+        let now = self.time.now_nanos();
+        let channels = self.ring.channels();
+        let wanted = out.len() / channels;
+        // Whole frames per part; a frame wider than the stack buffer gets silence.
+        let part = SCRATCH_SAMPLES / channels * channels;
+        let mut frames = 0;
+        if part > 0 {
+            let mut scratch = [0.0_f32; SCRATCH_SAMPLES];
+            for chunk in out[..wanted * channels].chunks_mut(part) {
+                let got = self.ring.pop(&mut scratch[..chunk.len()]) * channels;
+                for (o, &x) in chunk.iter_mut().zip(&scratch[..got]) {
+                    *o = S::from_f32(x, &mut self.dither);
+                }
+                frames += got / channels;
+                if got < chunk.len() {
+                    break;
+                }
+            }
+        }
+        out[frames * channels..].fill(S::SILENCE);
+        self.finish(now, frames, wanted);
+    }
+
+    /// The clock and the counters, once per callback: `frames` came from the
+    /// ring, `wanted` were handed to the device.
+    fn finish(&mut self, now: u64, frames: usize, wanted: usize) {
         self.played += to_u64(wanted);
         self.clock.report(self.played, now);
 
@@ -230,5 +275,39 @@ mod tests {
         // silence: the clock follows the device and never steps back.
         assert_eq!(clock.anchored_position().unwrap().ticks(), 960);
         assert_eq!(stats.frames(), 100);
+    }
+
+    #[test]
+    fn an_i16_device_gets_converted_frames_in_parts_then_silence() {
+        // 1500 frames in the ring, a buffer of 2048: three parts of 512, the
+        // third short; the rest silence.
+        let (mut tx, mut cb, clock, _) = setup(4_096);
+        tx.push(&[0.5; 1_500 * 2]);
+        let mut out = [7_i16; 2_048 * 2];
+        cb.fill_as(&mut out);
+        let half = i16::MAX / 2;
+        assert!(
+            out[..3_000]
+                .iter()
+                .all(|&s| (half - 1..=half + 1).contains(&s)),
+            "converted with at most one LSB of dither"
+        );
+        assert!(out[3_000..].iter().all(|&s| s == 0), "the rest is silence");
+        let stats = cb.stats();
+        assert_eq!(
+            (stats.frames(), stats.xruns(), stats.silent_frames()),
+            (1_500, 1, 548)
+        );
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 2_048);
+    }
+
+    #[test]
+    fn an_i32_device_gets_the_full_buffer() {
+        let (mut tx, mut cb, _, _) = setup(960);
+        tx.push(&[-1.0; 480 * 2]);
+        let mut out = [7_i32; 480 * 2];
+        cb.fill_as(&mut out);
+        assert!(out.iter().all(|&s| s == -i32::MAX));
+        assert_eq!(cb.stats().xruns(), 0);
     }
 }
