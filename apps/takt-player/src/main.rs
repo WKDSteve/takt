@@ -12,6 +12,7 @@
 
 mod app;
 mod audio;
+mod diagnostics;
 mod headless;
 mod refresh;
 mod render;
@@ -38,7 +39,9 @@ fn main() -> ExitCode {
         .position(|arg| arg == "--seconds")
         .and_then(|i| args.get(i + 1))
         .and_then(|n| n.parse().ok());
-    match ui::run(seconds) {
+    // `--overlay`: start with the diagnostic overlay shown (F3 toggles it).
+    let overlay = args.iter().any(|arg| arg == "--overlay");
+    match ui::run(seconds, overlay) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("takt-player: no window: {e} (--headless runs without one)");

@@ -147,6 +147,14 @@ impl AudioPath {
         }
     }
 
+    /// The counters of the device callback, `None` when simulated.
+    pub fn device_stats(&self) -> Option<Arc<OutputStats>> {
+        match &self.kind {
+            Some(Kind::Device { stats, .. }) => Some(Arc::clone(stats)),
+            _ => None,
+        }
+    }
+
     /// Stops the path; for a device, what it measured.
     pub fn stop(mut self) -> Option<DeviceSummary> {
         self.halt()

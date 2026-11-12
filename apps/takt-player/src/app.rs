@@ -14,6 +14,10 @@ pub enum Command {
     SeekBy(i64),
     /// Jump to the start.
     SeekStart,
+    /// Show or hide the diagnostic overlay.
+    ToggleOverlay,
+    /// Save the diagnostics as text (clipboard and a file).
+    SaveDiagnostics,
 }
 
 /// How far the arrow keys jump.
@@ -32,6 +36,10 @@ pub enum Key {
     Right,
     /// Home (Pos1).
     Home,
+    /// F3.
+    F3,
+    /// F4.
+    F4,
 }
 
 /// The command of a key.
@@ -43,6 +51,8 @@ pub fn command_for(key: Key) -> Command {
         Key::Left => Command::SeekBy(-SEEK_STEP_MILLIS),
         Key::Right => Command::SeekBy(SEEK_STEP_MILLIS),
         Key::Home => Command::SeekStart,
+        Key::F3 => Command::ToggleOverlay,
+        Key::F4 => Command::SaveDiagnostics,
     }
 }
 
@@ -53,11 +63,12 @@ pub fn seek_target(now: i64, by: i64, duration: i64) -> i64 {
     now.saturating_add(by).clamp(0, duration.max(0))
 }
 
-/// Playing or paused, and the volume.
+/// Playing or paused, the volume, and whether the overlay shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerState {
     playing: bool,
     volume: f32,
+    overlay: bool,
 }
 
 impl Default for PlayerState {
@@ -66,6 +77,7 @@ impl Default for PlayerState {
         Self {
             playing: true,
             volume: 1.0,
+            overlay: false,
         }
     }
 }
@@ -75,6 +87,12 @@ impl PlayerState {
     #[must_use]
     pub fn playing(&self) -> bool {
         self.playing
+    }
+
+    /// Whether the diagnostic overlay shows.
+    #[must_use]
+    pub fn overlay(&self) -> bool {
+        self.overlay
     }
 
     /// Volume from 0 (silent) to 1 (unchanged).
@@ -100,8 +118,13 @@ impl PlayerState {
                 false
             }
             Command::Quit => true,
-            // The clock and the source jump; the state does not change.
-            Command::SeekBy(_) | Command::SeekStart => false,
+            Command::ToggleOverlay => {
+                self.overlay = !self.overlay;
+                false
+            }
+            // The clock and the source jump, the window saves; the state does
+            // not change.
+            Command::SeekBy(_) | Command::SeekStart | Command::SaveDiagnostics => false,
         }
     }
 }
@@ -129,6 +152,19 @@ mod tests {
         let mut state = PlayerState::default();
         assert!(!state.apply(Command::SeekBy(5_000)));
         assert!(state.playing(), "a jump does not pause");
+    }
+
+    #[test]
+    fn f3_toggles_the_overlay_and_f4_saves() {
+        let mut state = PlayerState::default();
+        assert!(!state.overlay());
+        assert!(!state.apply(command_for(Key::F3)));
+        assert!(state.overlay());
+        assert_eq!(command_for(Key::F4), Command::SaveDiagnostics);
+        assert!(!state.apply(Command::SaveDiagnostics));
+        assert!(state.overlay() && state.playing());
+        state.apply(Command::ToggleOverlay);
+        assert!(!state.overlay());
     }
 
     #[test]

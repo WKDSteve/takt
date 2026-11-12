@@ -16,6 +16,12 @@
 //! source and scheduler (their numbers are about the old position), and the
 //! device plays on.
 //!
+//! F3 shows the diagnostic overlay ([`crate::diagnostics`]): presentation
+//! counters with the histogram of the errors, anchor age, pool, audio
+//! counters, CPU and memory, and what the overlay itself costs per pass. F4
+//! copies the same as text to the clipboard and saves it in the temporary
+//! directory (`takt-diagnostics-<unix seconds>.txt`), for gate reports.
+//!
 //! The source learns the display period ([`RefreshMeter`], the median of the
 //! passes), so a frame is due at the refresh nearest its timestamp.
 
@@ -31,11 +37,19 @@ use takt_core::{
 
 use crate::app::{Command, Key, PlayerState, command_for, seek_target};
 use crate::audio::{self, AudioPath};
+use crate::diagnostics::{self, AudioCounters, ProcessMeter, Snapshot};
 use crate::refresh::RefreshMeter;
 use crate::render::{self, Shown, gpu::Nv12Image};
 
 /// Length of the test source.
 const SOURCE_MILLIS: i64 = 3_600_000;
+/// Frames of the pool of the test source.
+const POOL_FRAMES: usize = 6;
+/// What the overlay shows: when it was read, its lines and the error classes.
+type ShownDiagnostics = (Instant, Vec<(&'static str, String)>, [u32; 16]);
+
+/// How often the overlay reads the counters again.
+const OVERLAY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The test source: the moving block of `NullBackend`, 1920x1080 NV12 at the
 /// NTSC rate, one hour long.
@@ -54,7 +68,7 @@ fn test_source() -> NullBackend {
         Rational::lit(24_000, 1_001),
         Timestamp::from_millis(SOURCE_MILLIS),
         Pattern::Motion,
-        6,
+        POOL_FRAMES,
     );
     // NullBackend opens any name.
     let _ = backend.open("null://motion");
@@ -75,18 +89,29 @@ struct PlayerApp {
     shown: Option<Shown>,
     refresh: RefreshMeter,
     started: Instant,
+    process: ProcessMeter,
+    /// What building the overlay costs per pass.
+    overlay_cost: takt_audio::DurationHistogram,
+    /// The line of the last F4, shown in the overlay.
+    saved: Option<String>,
+    /// What the overlay shows, with the time it was read.
+    shown_diagnostics: Option<ShownDiagnostics>,
 }
 
 impl PlayerApp {
-    fn new(cc: &eframe::CreationContext<'_>, seconds: Option<u64>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, seconds: Option<u64>, overlay: bool) -> Self {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             render::install(state);
         }
         let time = Arc::new(SystemMonotonic::new());
         let (clock, audio) = audio::start(&time);
         let audio_line = audio.describe();
+        let mut state = PlayerState::default();
+        if overlay {
+            state.apply(Command::ToggleOverlay);
+        }
         Self {
-            state: PlayerState::default(),
+            state,
             clock: SeekableClock::new(clock),
             scheduler: Scheduler::new(),
             close_at: seconds.map(|s| Instant::now() + Duration::from_secs(s)),
@@ -96,6 +121,10 @@ impl PlayerApp {
             shown: None,
             refresh: RefreshMeter::default(),
             started: Instant::now(),
+            process: ProcessMeter::start(),
+            overlay_cost: takt_audio::DurationHistogram::default(),
+            saved: None,
+            shown_diagnostics: None,
         }
     }
 
@@ -160,9 +189,95 @@ impl PlayerApp {
         match command {
             Command::SeekBy(by) => self.seek_to(seek_target(self.now_millis(), by, SOURCE_MILLIS)),
             Command::SeekStart => self.seek_to(0),
-            Command::TogglePlay | Command::Quit => {}
+            Command::SaveDiagnostics => self.save_diagnostics(ctx),
+            Command::TogglePlay | Command::Quit | Command::ToggleOverlay => {}
         }
         self.clock.set_paused(!self.state.playing());
+    }
+
+    /// All counters, read now.
+    fn snapshot(&mut self) -> Snapshot {
+        let clock = self.clock.inner();
+        Snapshot {
+            scheduler: self.scheduler.stats().clone(),
+            dropped: self.source.stats().dropped,
+            pool: (self.source.stats().queued, POOL_FRAMES),
+            anchor_age_nanos: clock.anchor_age_nanos(),
+            max_extrapolation_nanos: clock.max_extrapolation_nanos(),
+            display_period_nanos: self.refresh.period_nanos(),
+            audio_line: self.audio_line.clone(),
+            audio: self._audio.device_stats().map(|s| AudioCounters::read(&s)),
+            sample_rate: clock.sample_rate(),
+            process: self.process.load(),
+            overlay_cost: diagnostics::overlay_cost(&self.overlay_cost.snapshot()),
+        }
+    }
+
+    /// F4: the diagnostics as text, to the clipboard and into a file.
+    fn save_diagnostics(&mut self, ctx: &egui::Context) {
+        let text = self.snapshot().report(&format!(
+            "takt diagnostics at {}",
+            self.clock.now().format_hms()
+        ));
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let path = std::env::temp_dir().join(format!("takt-diagnostics-{secs}.txt"));
+        let line = match std::fs::write(&path, &text) {
+            Ok(()) => format!("saved: {} (and the clipboard)", path.display()),
+            Err(e) => format!("not saved ({e}), in the clipboard"),
+        };
+        println!("takt-player: diagnostics {line}");
+        ctx.copy_text(text);
+        self.saved = Some(line);
+    }
+
+    /// The overlay over the video, its own cost measured.
+    fn overlay(&mut self, ctx: &egui::Context) {
+        let start = Instant::now();
+        // Read four times a second: numbers that change every pass cannot be
+        // read anyway, and unchanged text keeps its layout in egui's cache.
+        let stale = self
+            .shown_diagnostics
+            .as_ref()
+            .is_none_or(|(at, _, _)| at.elapsed() >= OVERLAY_INTERVAL);
+        if stale {
+            let snapshot = self.snapshot();
+            self.shown_diagnostics = Some((
+                Instant::now(),
+                snapshot.lines(),
+                snapshot.scheduler.histogram,
+            ));
+        }
+        let Some((_, lines, classes)) = &self.shown_diagnostics else {
+            return;
+        };
+        egui::Area::new(egui::Id::new("diagnostics"))
+            .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.strong("Diagnostics (F3 hides, F4 saves)");
+                    egui::Grid::new("diagnostics-grid")
+                        .num_columns(2)
+                        .spacing([12.0, 2.0])
+                        .show(ui, |ui| {
+                            for (label, value) in lines {
+                                ui.weak(*label);
+                                ui.monospace(value.as_str());
+                                ui.end_row();
+                            }
+                        });
+                    ui.add_space(4.0);
+                    ui.weak("presentation error");
+                    histogram(ui, classes);
+                    if let Some(saved) = &self.saved {
+                        ui.weak(saved);
+                    }
+                });
+            });
+        let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.overlay_cost.record(nanos);
     }
 
     /// The measurements, as the headless run prints them.
@@ -203,6 +318,8 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     egui::Key::ArrowLeft => Some(command_for(Key::Left)),
                     egui::Key::ArrowRight => Some(command_for(Key::Right)),
                     egui::Key::Home => Some(command_for(Key::Home)),
+                    egui::Key::F3 => Some(command_for(Key::F3)),
+                    egui::Key::F4 => Some(command_for(Key::F4)),
                     _ => None,
                 },
                 _ => None,
@@ -220,6 +337,9 @@ impl eframe::App for PlayerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.take_due_frame();
+        if self.state.overlay() {
+            self.overlay(ctx);
+        }
         let uploads = frame.wgpu_render_state().and_then(render::uploads);
 
         egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
@@ -266,10 +386,41 @@ impl eframe::App for PlayerApp {
     }
 }
 
+/// The classes of the error histogram as bars, the fullest one wide.
+fn histogram(ui: &mut egui::Ui, classes: &[u32; 16]) {
+    let peak = classes.iter().copied().max().unwrap_or(0).max(1);
+    egui::Grid::new("diagnostics-histogram")
+        .num_columns(3)
+        .spacing([8.0, 1.0])
+        .show(ui, |ui| {
+            for (i, &count) in classes.iter().enumerate().filter(|(_, c)| **c > 0) {
+                ui.monospace(diagnostics::class_label(i));
+                #[expect(clippy::cast_precision_loss, reason = "a bar length, not time")]
+                let width = 160.0 * count as f32 / peak as f32;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(160.0, 10.0), egui::Sense::hover());
+                let bar = egui::Rect::from_min_size(rect.min, egui::vec2(width.max(1.0), 10.0));
+                ui.painter()
+                    .rect_filled(bar, 0.0, ui.visuals().selection.bg_fill);
+                ui.monospace(count.to_string());
+                ui.end_row();
+            }
+        });
+}
+
 impl Drop for PlayerApp {
     /// The measurements of the run, when the window closes.
     fn drop(&mut self) {
         println!("takt-player: {}", self.summary());
+        let cost = self.overlay_cost.snapshot();
+        if let Some((p50, max)) = diagnostics::overlay_cost(&cost) {
+            println!(
+                "takt-player: overlay p50 <{p50} us, p99 <{} us, max {} us over {} passes",
+                cost.quantile_micros(99, 100).unwrap_or(0),
+                max / 1_000,
+                cost.total()
+            );
+        }
     }
 }
 
@@ -278,7 +429,7 @@ impl Drop for PlayerApp {
 /// # Errors
 ///
 /// When no window or no wgpu device could be created.
-pub fn run(seconds: Option<u64>) -> eframe::Result {
+pub fn run(seconds: Option<u64>, overlay: bool) -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -290,6 +441,6 @@ pub fn run(seconds: Option<u64>) -> eframe::Result {
     eframe::run_native(
         "Takt",
         options,
-        Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds)))),
+        Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds, overlay)))),
     )
 }
