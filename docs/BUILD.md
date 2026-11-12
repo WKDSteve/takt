@@ -114,7 +114,7 @@ Die beiden `PATH`-Einträge von Hand in den Systemeinstellungen („Umgebungsvar
 
 ## Linux
 
-Die Distributionen liefern libmpv als Paket mit Entwicklungsdateien.
+Die Distributionen liefern libmpv als Paket mit Entwicklungsdateien. Der Link-Test gegen die libmpv aus `apt` läuft in der CI im Job „libmpv gelinkt (Ubuntu, apt)“ (`TAKT_LIBMPV_DIR=/usr/lib/x86_64-linux-gnu`); die FFmpeg von Ubuntu ist ein GPL-Build und bleibt dort draußen. Ohne gesetzte Variable melden die Link-Tests `SKIP`, und jeder Testlauf der CI nennt die Zahl der übersprungenen Tests in seiner Zusammenfassung (`scripts/ci-skip-summary.py`).
 
 ```bash
 # Arch

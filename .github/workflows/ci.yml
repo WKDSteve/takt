@@ -43,7 +43,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features
       - name: Tests
-        run: cargo test --workspace --all-features
+        shell: bash
+        run: cargo test --workspace --all-features 2>&1 | tee test.log
+      # Ignored tests are no evidence (TST-16): their number and reasons go into the summary of the run.
+      - name: SKIPs in die Zusammenfassung
+        if: always()
+        shell: bash
+        run: python3 scripts/ci-skip-summary.py test.log --title "Tests ${{ matrix.os }}"
       # The shader against its CPU reference. The runners have no GPU; on Windows the software adapter of DX12 (WARP)
       # renders it. Linux and macOS keep the test ignored.
       - name: Shader gegen die CPU-Referenz (Windows, WARP)
@@ -66,6 +72,30 @@ jobs:
         run: python3 scripts/check-control-chars.py
       - name: Jede uses-Zeile per SHA gepinnt (NREL-03)
         run: python3 scripts/check-action-pins.py
+
+  # libmpv from the distribution (a GPL build, accepted for zone 2 on 2026-10-31): the link smoke test runs for
+  # real here; without it the test says SKIP. FFmpeg of Ubuntu is a GPL build and stays out (build_is_lgpl).
+  libmpv-linux:
+    name: libmpv gelinkt (Ubuntu, apt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-12
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, resolved 2026-11-12
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
+      - name: ALSA- und libmpv-Header
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libmpv-dev
+      - name: Link-Test gegen libmpv
+        env:
+          TAKT_LIBMPV_DIR: /usr/lib/x86_64-linux-gnu
+        run: |
+          cargo test -p takt-player --test ffi_native_link 2>&1 | tee test.log
+          # The cfg must have come on: two libmpv tests ran, not the stand-in that says SKIP.
+          grep -q "test libmpv::client_api_is_version_2 ... ok" test.log
+      - name: SKIPs in die Zusammenfassung
+        if: always()
+        run: python3 scripts/ci-skip-summary.py test.log --title "libmpv (Ubuntu)"
 
   licenses:
     name: Lizenzen und Sicherheitshinweise

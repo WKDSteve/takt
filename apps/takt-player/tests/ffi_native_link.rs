@@ -8,6 +8,18 @@
 //! decisions of 2026-10-30) requires for `unsafe` code.
 #![allow(unsafe_code)]
 
+// Without the library the module is gone; these stand in for it, so a run
+// without TAKT_LIBMPV_DIR or FFMPEG_DIR says SKIP instead of counting nothing.
+#[cfg(not(takt_libmpv))]
+#[test]
+#[ignore = "SKIP: libmpv not linked; set TAKT_LIBMPV_DIR (docs/BUILD.md)"]
+fn libmpv_link_smoke_test() {}
+
+#[cfg(not(takt_ffmpeg))]
+#[test]
+#[ignore = "SKIP: FFmpeg not linked; set FFMPEG_DIR (docs/BUILD.md)"]
+fn ffmpeg_link_smoke_test() {}
+
 #[cfg(takt_libmpv)]
 mod libmpv {
     use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
