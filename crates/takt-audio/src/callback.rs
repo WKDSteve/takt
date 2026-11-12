@@ -18,8 +18,21 @@
 //! How much was silence is in [`OutputStats`].
 //!
 //! The time of a report is the monotonic clock at the start of the callback.
-//! The device latency (the time from the callback to the speaker) is not
-//! subtracted yet; it is a constant offset and belongs to the A/V sync work.
+//! Without a known device latency the position is the write head: all frames
+//! handed over so far, this buffer included.
+//!
+//! # The device latency
+//!
+//! The device layer tells [`OutputCallback::set_latency`] before each fill how
+//! many frames lie between the callback and the moment the first frame of
+//! this buffer reaches the output (`cpal`: `playback - callback` of the
+//! `OutputCallbackInfo`). The clock is then told the frame at the output
+//! instead: the frames handed over before this buffer, minus that latency.
+//! Video follows that position, so the picture waits for the sound.
+//!
+//! Until the first frame reached the output no position is reported (the
+//! clock stays at zero), and a latency that grows holds the position instead
+//! of stepping it back: the clock stays monotonic.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +56,8 @@ pub struct OutputStats {
     silent_frames: AtomicU64,
     /// Monotonic time of the last xrun plus one; 0 = never.
     last_xrun: AtomicU64,
+    /// Device latency of the last callback in frames plus one; 0 = unknown.
+    latency: AtomicU64,
     runtime: DurationHistogram,
 }
 
@@ -80,6 +95,13 @@ impl OutputStats {
         self.runtime.snapshot()
     }
 
+    /// The device latency of the last callback in frames, as the device layer
+    /// reported it, or `None` if it reports none.
+    #[must_use]
+    pub fn latency_frames(&self) -> Option<u64> {
+        self.latency.load(Ordering::Relaxed).checked_sub(1)
+    }
+
     /// Frames of silence handed out because the ring was empty.
     #[must_use]
     pub fn silent_frames(&self) -> u64 {
@@ -100,6 +122,9 @@ pub struct OutputCallback {
     stats: Arc<OutputStats>,
     played: u64,
     dither: Dither,
+    latency: Option<u64>,
+    /// The last position reported with a latency, so it never steps back.
+    heard: u64,
 }
 
 impl OutputCallback {
@@ -114,6 +139,8 @@ impl OutputCallback {
             stats: Arc::new(OutputStats::default()),
             played: 0,
             dither: Dither::default(),
+            latency: None,
+            heard: 0,
         }
     }
 
@@ -121,6 +148,14 @@ impl OutputCallback {
     #[must_use]
     pub fn stats(&self) -> Arc<OutputStats> {
         Arc::clone(&self.stats)
+    }
+
+    /// The device latency for the next fill, in frames from the start of the
+    /// callback to the output of the first frame of its buffer.
+    ///
+    /// **Callable from the audio thread**: a plain store.
+    pub fn set_latency(&mut self, frames: u64) {
+        self.latency = Some(frames);
     }
 
     /// Samples per frame, as the ring carries them.
@@ -184,10 +219,22 @@ impl OutputCallback {
     /// The clock and the counters, once per callback: `frames` came from the
     /// ring, `wanted` were handed to the device.
     fn finish(&mut self, now: u64, frames: usize, wanted: usize) {
+        let before = self.played;
         self.played += to_u64(wanted);
-        self.clock.report(self.played, now);
-
         let stats = &*self.stats;
+        match self.latency {
+            None => self.clock.report(self.played, now),
+            Some(latency) => {
+                stats
+                    .latency
+                    .store(latency.saturating_add(1), Ordering::Relaxed);
+                if let Some(heard) = before.checked_sub(latency) {
+                    self.heard = self.heard.max(heard);
+                    self.clock.report(self.heard, now);
+                }
+            }
+        }
+
         stats.callbacks.fetch_add(1, Ordering::Relaxed);
         stats.frames.fetch_add(to_u64(frames), Ordering::Relaxed);
         if frames < wanted {
@@ -309,5 +356,46 @@ mod tests {
         cb.fill_as(&mut out);
         assert!(out.iter().all(|&s| s == -i32::MAX));
         assert_eq!(cb.stats().xruns(), 0);
+    }
+
+    #[test]
+    fn with_a_latency_the_clock_reports_the_frame_at_the_output() {
+        let (mut tx, mut cb, clock, time) = setup(9_600);
+        tx.push(&[0.5; 4_800 * 2]);
+        let mut out = [0.0_f32; 480 * 2];
+        // 960 frames (20 ms) between the callback and the output: the first
+        // two buffers are not heard yet, the clock has no position.
+        for step in 1..=2 {
+            cb.set_latency(960);
+            time.set(step * 10_000_000);
+            cb.fill(&mut out);
+            assert_eq!(clock.anchored_position(), None, "callback {step}");
+        }
+        cb.set_latency(960);
+        time.set(30_000_000);
+        cb.fill(&mut out);
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 0);
+        cb.set_latency(960);
+        cb.fill(&mut out);
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 480);
+        assert_eq!(cb.stats().latency_frames(), Some(960));
+        // A latency that grows holds the position instead of stepping back.
+        cb.set_latency(2_000);
+        cb.fill(&mut out);
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 480);
+        cb.set_latency(2_000);
+        cb.fill_as(&mut [0_i16; 480 * 2]);
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 480);
+        cb.set_latency(960);
+        cb.fill(&mut out);
+        // 6 buffers handed over before this one, 2880 frames, minus 960.
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 1_920);
+    }
+
+    #[test]
+    fn without_a_latency_the_latency_is_unknown() {
+        let (_, mut cb, _, _) = setup(960);
+        cb.fill(&mut [0.0_f32; 480 * 2]);
+        assert_eq!(cb.stats().latency_frames(), None);
     }
 }

@@ -15,6 +15,15 @@
 //! refused with [`OutputError::Unsupported`]; rate conversion belongs to a
 //! resampling stage, not to the callback.
 //!
+//! # Device latency
+//!
+//! Before each fill the callback is told the latency `cpal` predicts for the
+//! buffer (`playback - callback` of the `OutputCallbackInfo`), so the audio
+//! master clock follows the frame at the output and not the write head
+//! ([`crate::callback`]). What `cpal` counts differs by host: on WASAPI the
+//! frames queued in the device buffer, on ALSA the delay of the PCM; the
+//! latency of the converter and the speaker after that is not in it.
+//!
 //! # Thread priority
 //!
 //! `cpal` raises its audio thread itself when it is built with its feature
@@ -174,6 +183,7 @@ impl Output {
             buffer_size: buffer,
         };
         let mut callback = callback;
+        let rate = config.sample_rate;
         let refusal = Arc::new(Mutex::new(None::<String>));
         let refused = Arc::clone(&refusal);
         // Called by cpal outside the data callback (a refusal of the priority
@@ -188,19 +198,28 @@ impl Output {
         let stream = match format {
             cpal::SampleFormat::I32 => device.build_output_stream(
                 stream_config,
-                move |out: &mut [i32], _: &cpal::OutputCallbackInfo| callback.fill_as(out),
+                move |out: &mut [i32], info: &cpal::OutputCallbackInfo| {
+                    callback.set_latency(latency_frames(info, rate));
+                    callback.fill_as(out);
+                },
                 on_error,
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_output_stream(
                 stream_config,
-                move |out: &mut [i16], _: &cpal::OutputCallbackInfo| callback.fill_as(out),
+                move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    callback.set_latency(latency_frames(info, rate));
+                    callback.fill_as(out);
+                },
                 on_error,
                 None,
             ),
             _ => device.build_output_stream(
                 stream_config,
-                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(out),
+                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    callback.set_latency(latency_frames(info, rate));
+                    callback.fill(out);
+                },
                 on_error,
                 None,
             ),
@@ -239,6 +258,18 @@ impl Output {
     pub fn format(&self) -> cpal::SampleFormat {
         self.format
     }
+}
+
+/// The latency `cpal` predicts for this buffer, in frames at `rate`.
+fn latency_frames(info: &cpal::OutputCallbackInfo, rate: u32) -> u64 {
+    let stamp = info.timestamp();
+    frames_of(stamp.playback.duration_since(stamp.callback), rate)
+}
+
+/// `duration` in whole frames at `rate`, rounded down.
+fn frames_of(duration: std::time::Duration, rate: u32) -> u64 {
+    let frames = duration.as_nanos() * u128::from(rate) / 1_000_000_000;
+    u64::try_from(frames).unwrap_or(u64::MAX)
 }
 
 /// The first of `candidates` whose format comes first in [`FORMATS`].
@@ -284,6 +315,14 @@ mod tests {
             priority_of(true, &Some("no rtprio".into())).to_string(),
             "refused: no rtprio"
         );
+    }
+
+    #[test]
+    fn a_latency_in_frames_of_the_rate() {
+        use std::time::Duration;
+        assert_eq!(frames_of(Duration::from_millis(20), 48_000), 960);
+        assert_eq!(frames_of(Duration::from_micros(10_417), 48_000), 500);
+        assert_eq!(frames_of(Duration::ZERO, 44_100), 0);
     }
 
     #[test]

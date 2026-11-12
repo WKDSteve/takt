@@ -122,6 +122,13 @@ pub fn run() {
             a.xruns(),
             a.silent_frames()
         );
+        match a.latency_frames() {
+            Some(frames) => println!(
+                "  Geraetelatenz   {frames} Frames ({:.1} ms), von der Uhr abgezogen",
+                frames as f64 * 1e3 / f64::from(crate::audio::SAMPLE_RATE)
+            ),
+            None => println!("  Geraetelatenz   unbekannt, nicht abgezogen"),
+        }
         if let Some(at) = a.last_xrun_nanos() {
             println!("  letzter Xrun    bei {:.3} s", at as f64 / 1e9);
         }
