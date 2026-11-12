@@ -14,9 +14,11 @@ mod app;
 mod audio;
 mod diagnostics;
 mod headless;
+mod palette;
 mod playlist;
 mod refresh;
 mod render;
+mod theme;
 mod ui;
 
 use std::process::ExitCode;

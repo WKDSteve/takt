@@ -122,6 +122,7 @@ impl PlayerApp {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             render::install(state);
         }
+        crate::theme::install(&cc.egui_ctx);
         let time = Arc::new(SystemMonotonic::new());
         let (clock, audio) = audio::start(&time);
         let audio_line = audio.describe();
