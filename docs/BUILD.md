@@ -114,7 +114,7 @@ Die beiden `PATH`-Einträge von Hand in den Systemeinstellungen („Umgebungsvar
 
 ## Linux
 
-Die Distributionen liefern libmpv als Paket mit Entwicklungsdateien. Der Link-Test gegen die libmpv aus `apt` läuft in der CI im Job „libmpv gelinkt (Ubuntu, apt)“ (`TAKT_LIBMPV_DIR=/usr/lib/x86_64-linux-gnu`); die FFmpeg von Ubuntu ist ein GPL-Build und bleibt dort draußen. Ohne gesetzte Variable melden die Link-Tests `SKIP`, und jeder Testlauf der CI nennt die Zahl der übersprungenen Tests in seiner Zusammenfassung (`scripts/ci-skip-summary.py`).
+Die Distributionen liefern libmpv als Paket mit Entwicklungsdateien. Das Rezept unten läuft wörtlich in der CI im Job „libmpv gelinkt (Ubuntu, apt)“ und nennt dort Version und `mpv-configuration` der libmpv; die FFmpeg von Ubuntu ist ein GPL-Build und bleibt dort draußen. Ohne gesetzte Variable melden die Link-Tests `SKIP`, und jeder Testlauf der CI nennt die Zahl der übersprungenen Tests in seiner Zusammenfassung (`scripts/ci-skip-summary.py`).
 
 ```bash
 # Arch
@@ -134,7 +134,7 @@ Erwartet: genau zwei Tests, `libmpv::client_api_is_version_2` und `libmpv::licen
 
 `FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und exportiert `FFMPEG_DIR` (dessen Wurzel) und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`. Dann liegen zwei FFmpeg-Versionen im Prozess; haben beide dieselbe SONAME-Hauptversion, lädt sogar die Distributions-libmpv die BtbN-Bibliotheken (ABI-Mischung). Das taugt zum Prüfen, nicht zum Alltag.
 
-Noch nicht auf echter Hardware geprüft (siehe Plattform-Tabelle im README).
+Geprüft auf Ubuntu (Runner `ubuntu-latest` der CI, libmpv aus `apt`); noch nicht auf eigener Hardware und nicht unter Arch (siehe Plattform-Tabelle im README).
 
 ### Priorität des Audio-Threads
 

@@ -28,7 +28,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Plattform | Stand |
 |---|---|
 | Windows | Hauptentwicklung, getestet |
-| Linux | CI baut und testet; nativer Test auf echter Hardware geplant |
+| Linux | CI baut und testet, der Link-Test gegen die libmpv aus `apt` läuft dort (Ubuntu); nativer Test auf echter Hardware geplant |
 | macOS | **ungetestet** — CI baut und testet, aber es gibt kein Testgerät und keine macOS-spezifischen Backends |
 
 ---

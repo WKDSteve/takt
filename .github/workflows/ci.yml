@@ -89,14 +89,16 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
       - name: ALSA- und libmpv-Header
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libmpv-dev
-      - name: Link-Test gegen libmpv
-        env:
-          TAKT_LIBMPV_DIR: /usr/lib/x86_64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libmpv-dev pkg-config
+      # The recipe of docs/BUILD.md (section Linux), word for word.
+      - name: Link-Test gegen libmpv (Rezept aus BUILD.md)
         run: |
-          cargo test -p takt-player --test ffi_native_link 2>&1 | tee test.log
-          # The cfg must have come on: two libmpv tests ran, not the stand-in that says SKIP.
+          echo "libmpv $(pkg-config --modversion mpv) in $(pkg-config --variable=libdir mpv)"
+          TAKT_LIBMPV_DIR="$(pkg-config --variable=libdir mpv)" && [ -n "$TAKT_LIBMPV_DIR" ] \
+              && export TAKT_LIBMPV_DIR && cargo test -p takt-player --test ffi_native_link -- --nocapture 2>&1 | tee test.log
+          # The cfg must have come on: both libmpv tests ran, not the stand-in that says SKIP.
           grep -q "test libmpv::client_api_is_version_2 ... ok" test.log
+          grep -q "test libmpv::license_state_matches_build_md ... ok" test.log
       - name: SKIPs in die Zusammenfassung
         if: always()
         run: python3 scripts/ci-skip-summary.py test.log --title "libmpv (Ubuntu)"

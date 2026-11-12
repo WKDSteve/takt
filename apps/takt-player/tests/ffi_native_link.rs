@@ -113,6 +113,8 @@ mod libmpv {
     #[test]
     fn license_state_matches_build_md() {
         let config = configuration().unwrap_or_else(|e| panic!("libmpv setup: {e}"));
+        // In the log of a run with --nocapture (the CI job on Ubuntu prints it).
+        println!("mpv-configuration: {config}");
         // Decision of 2026-10-31 (KONZEPT): the prebuilt GPL libmpv is
         // accepted in zone 2. A switch to an LGPL build is welcome but must
         // show up in the docs, so this fails until they are updated. meson
