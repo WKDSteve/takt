@@ -2954,6 +2954,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
+ "pollster",
  "takt-audio",
  "takt-backend",
  "takt-clock",

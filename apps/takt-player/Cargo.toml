@@ -30,5 +30,9 @@ winit = { version = "0.30", default-features = false, features = ["wayland-dlope
 # The guard of the audio callback: without `disable_release`, so it aborts in release builds too.
 assert_no_alloc = { version = "1.1", default-features = false }
 
+[dev-dependencies]
+# Blocks on the adapter and device of the GPU test.
+pollster = "0.4"
+
 [lints]
 workspace = true
