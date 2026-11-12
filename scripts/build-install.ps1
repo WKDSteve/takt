@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 <#
 .SYNOPSIS
 Build takt-player from this checkout and install it for the current user, from the terminal.
@@ -5,14 +6,14 @@ Build takt-player from this checkout and install it for the current user, from t
 .DESCRIPTION
 The same entry point the other desktop apps have (scripts/build-install.ps1, scripts/uninstall.ps1),
 for a machine where no setup may be started: `cargo build --release --locked -p takt-player`, then
-the program is copied to %LOCALAPPDATA%\takt\bin (or $env:TAKT_INSTALL_DIR). No administrator
-rights; a file built on this machine carries no Mark-of-the-Web.
+the build is staged in the shape of the rolling zip (scripts\package-release.ps1) and installed by
+its scripts\install.ps1: %LOCALAPPDATA%\takt\bin (or $env:TAKT_INSTALL_DIR), the Start menu entry
+"Takt", an entry in Settings > Apps. No administrator rights; a file built on this machine carries no
+Mark-of-the-Web.
 
 The build links libmpv and FFmpeg only when TAKT_LIBMPV_DIR / FFMPEG_DIR point at them
 (docs/BUILD.md); without them it is the NullBackend build the CI makes. At run time the DLLs must be
 on the PATH or next to the exe: this script does not copy them.
-
-Phase 0: takt-player has no window yet, so there is no Start menu entry.
 
 Run it in a normal terminal: a Claude session (the Claude app redirects AppData and HKCU) may
 build (-BuildOnly), installing there is refused.
@@ -23,6 +24,9 @@ Build target\release\takt-player.exe and stop (no install).
 .PARAMETER AllowElevated
 Install although the session is elevated (for a build machine).
 
+.PARAMETER DesktopShortcut
+Also put a shortcut on the desktop.
+
 .EXAMPLE
 .\scripts\build-install.ps1
 .\scripts\build-install.ps1 -BuildOnly
@@ -30,7 +34,8 @@ Install although the session is elevated (for a build machine).
 [CmdletBinding()]
 param(
     [switch] $BuildOnly,
-    [switch] $AllowElevated
+    [switch] $AllowElevated,
+    [switch] $DesktopShortcut
 )
 
 Set-StrictMode -Version Latest
@@ -78,24 +83,21 @@ try {
     Write-Output "built $exe"
     if ($BuildOnly) { return }
 
-    $dir = if ($env:TAKT_INSTALL_DIR) { $env:TAKT_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'takt\bin' }
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    $target = Join-Path $dir $name
-    Write-Output "==> installing to $dir"
-    Copy-Item -LiteralPath $exe -Destination "$target.new" -Force
-    # Windows lets a running exe be renamed: the old one moves to .old, the new one takes its name.
-    if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination "$target.old" -Force }
+    # The same folder the rolling zip holds, staged from this build and installed by its install.ps1:
+    # one code path for both (Start menu entry, Settings > Apps, swap with rollback).
+    $sha = (git -C $root rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = '0000000' }
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ('takt-stage-' + [Guid]::NewGuid().ToString('N'))
     try {
-        Move-Item -LiteralPath "$target.new" -Destination $target -Force
+        & (Join-Path $PSScriptRoot 'package-release.ps1') -BuildDir (Split-Path -Parent $exe) -StageDir $stage -NoZip -Sha $sha
+        $installArgs = @{ PayloadDir = $stage }
+        if ($AllowElevated) { $installArgs.AllowElevated = $true }
+        if ($DesktopShortcut) { $installArgs.DesktopShortcut = $true }
+        & (Join-Path $stage 'install.ps1') @installArgs
     }
-    catch {
-        if (Test-Path -LiteralPath "$target.old") { Move-Item -LiteralPath "$target.old" -Destination $target -Force }
-        Remove-Item -LiteralPath "$target.new" -Force -ErrorAction SilentlyContinue
-        Exit-Build "cannot swap in the new program, the old one is back: $($_.Exception.Message)"
+    finally {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
-    # still running from the old file: it stays until the next install or the uninstall
-    Remove-Item -LiteralPath "$target.old" -Force -ErrorAction SilentlyContinue
-    Write-Output "installed $target"
 }
 finally {
     Pop-Location

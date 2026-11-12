@@ -58,6 +58,10 @@ jobs:
         env:
           TAKT_GPU_TESTS: "1"
           TAKT_GPU_ADAPTER: fallback
+      # Packing, install and uninstall of the rolling zip, with a stand-in program and throw-away places.
+      - name: Install-Skripte (Windows)
+        if: runner.os == 'Windows'
+        run: pwsh -NoProfile -File scripts/test-release.ps1
       - name: Doku baut ohne fehlende Verweise
         run: cargo doc --workspace --no-deps
         env:
