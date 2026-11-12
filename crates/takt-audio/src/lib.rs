@@ -14,11 +14,13 @@
 //! License zone 1 (permissive), free of `unsafe`.
 
 pub mod callback;
+pub mod histogram;
 #[cfg(feature = "cpal")]
 pub mod output;
 pub mod ring;
 
 pub use callback::{OutputCallback, OutputStats};
+pub use histogram::{DurationHistogram, DurationSnapshot};
 #[cfg(feature = "cpal")]
 pub use output::{Output, OutputConfig, OutputError};
 pub use ring::{Consumer, Producer, ring};

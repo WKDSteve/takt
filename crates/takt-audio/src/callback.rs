@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use takt_clock::{AudioClockWriter, MonotonicSource};
 
+use crate::histogram::{DurationHistogram, DurationSnapshot};
 use crate::ring::Consumer;
 
 /// Counters of an output, readable from any thread while it runs.
@@ -35,6 +36,9 @@ pub struct OutputStats {
     frames: AtomicU64,
     xruns: AtomicU64,
     silent_frames: AtomicU64,
+    /// Monotonic time of the last xrun plus one; 0 = never.
+    last_xrun: AtomicU64,
+    runtime: DurationHistogram,
 }
 
 impl OutputStats {
@@ -55,6 +59,20 @@ impl OutputStats {
     #[must_use]
     pub fn xruns(&self) -> u64 {
         self.xruns.load(Ordering::Relaxed)
+    }
+
+    /// Monotonic time (of the source the callback was given) of the start of
+    /// the last callback with an xrun, or `None` before the first.
+    #[must_use]
+    pub fn last_xrun_nanos(&self) -> Option<u64> {
+        self.last_xrun.load(Ordering::Relaxed).checked_sub(1)
+    }
+
+    /// The runtime of the callbacks so far, from the start of the callback to
+    /// the end of its work (`KONZEPT.md`: the 99.99th percentile decides).
+    #[must_use]
+    pub fn runtime(&self) -> DurationSnapshot {
+        self.runtime.snapshot()
     }
 
     /// Frames of silence handed out because the ring was empty.
@@ -130,9 +148,15 @@ impl OutputCallback {
         if frames < wanted {
             stats.xruns.fetch_add(1, Ordering::Relaxed);
             stats
+                .last_xrun
+                .store(now.saturating_add(1), Ordering::Relaxed);
+            stats
                 .silent_frames
                 .fetch_add(to_u64(wanted - frames), Ordering::Relaxed);
         }
+        stats
+            .runtime
+            .record(self.time.now_nanos().saturating_sub(now));
     }
 }
 
@@ -182,6 +206,8 @@ mod tests {
         time.set(20_000_000);
         cb.fill(&mut out);
         assert_eq!(clock.anchored_position().unwrap().ticks(), 960);
+        assert_eq!(stats.last_xrun_nanos(), None, "a full ring has no xrun");
+        assert_eq!(stats.runtime().total(), 2, "every callback is timed");
     }
 
     #[test]
@@ -199,6 +225,7 @@ mod tests {
         cb.fill(&mut out);
         assert!(out.iter().all(|&s| s == 0.0));
         assert_eq!((stats.xruns(), stats.silent_frames()), (2, 860));
+        assert_eq!(stats.last_xrun_nanos(), Some(10_000_000));
         // The device played two buffers, 100 frames of content and 860 of
         // silence: the clock follows the device and never steps back.
         assert_eq!(clock.anchored_position().unwrap().ticks(), 960);

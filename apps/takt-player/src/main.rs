@@ -254,6 +254,22 @@ fn main() {
             a.xruns(),
             a.silent_frames()
         );
+        if let Some(at) = a.last_xrun_nanos() {
+            println!("  letzter Xrun    bei {:.3} s", at as f64 / 1e9);
+        }
+        // Obergrenzen der Klassen: nie zu niedrig, hoechstens 25 % zu hoch.
+        let r = a.runtime();
+        let q = |num, den| {
+            r.quantile_micros(num, den)
+                .map_or("-".to_owned(), |us| format!("<{us} us"))
+        };
+        println!(
+            "  Callback-Zeit   p50 {}  p99 {}  p99.99 {}  max {:.1} us",
+            q(1, 2),
+            q(99, 100),
+            q(9_999, 10_000),
+            r.max_nanos() as f64 / 1e3
+        );
     }
     println!();
     println!("Histogramm der Fehlerbetraege");
