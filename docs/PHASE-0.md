@@ -97,7 +97,7 @@ Genau hier setzt später `--video-sync=display-resample` an, mpvs Ansatz: statt 
 In dieser Reihenfolge:
 
 1. ~~**`takt-audio`: lock-freier SPSC-Ringpuffer**, dazu ein `cpal`-Ausgabepfad.~~ Erledigt: `takt-player` spielt über das Standardgerät (WASAPI shared, ALSA, CoreAudio) und die Audio-Master-Uhr folgt dem echten Callback; ohne Gerät oder mit `TAKT_AUDIO=sim` meldet er „SIMULIERT“ und nimmt den simulierten Thread. Der Gerätetest läuft nur mit `TAKT_DEVICE_TESTS=1` (`cargo test -p takt-audio --features cpal --test device -- --ignored`), in der CI ist er „ignored“. Die Latenz des Geräts wird noch nicht abgezogen.
-2. **Fenster und Anzeige.** `winit` plus `egui`, Video über `wgpu` als NV12-Textur mit Farbraum-Shader. Das Testbild aus `NullBackend` ist dabei die erste Prüfung des Farbpfads.
+2. **Fenster und Anzeige.** `winit` plus `egui`, Video über `wgpu` als NV12-Textur mit Farbraum-Shader. Das Fenster steht (eframe 0.33 mit wgpu, `apps/takt-player/src/ui`; Leertaste Play/Pause, Escape beendet, `--headless` für die Messschleife); die Videofläche ist noch leer. Das Testbild aus `NullBackend` ist dabei die erste Prüfung des Farbpfads.
 3. **Diagnose-Overlay**, per Taste umschaltbar: Histogramm, Anker-Alter, Pool-Belegung, Xrun-Zähler.
 4. **`MpvBackend`** hinter dem bestehenden Trait. Ab hier ist es ein benutzbarer Player.
 5. **Playlist, Tastaturbelegung, Drag & Drop, Untertitel.**

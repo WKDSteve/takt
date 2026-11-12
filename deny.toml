@@ -30,6 +30,12 @@ allow = [
     "CC0-1.0",
     # Ab hier Copyleft: nur fuer Zone 2 und 3 zulaessig.
     "MPL-2.0",
+    # The window of takt-player (eframe 0.33), decided 2026-11-12, zone 2 only (deny-zone1.toml stays without):
+    # BSL-1.0 for the clipboard on Windows (clipboard-win, error-code via arboard), OFL-1.1 and
+    # Ubuntu-font-1.0 for the fonts egui embeds (epaint_default_fonts).
+    "BSL-1.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
     "LGPL-2.1-or-later",
     "GPL-3.0-or-later",
 ]
@@ -46,6 +52,14 @@ deny = []
 [advisories]
 version = 2
 yanked = "warn"
+# Unmaintained, no vulnerability, decided 2026-11-12; check again with every egui update:
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: the font parser of epaint (ab_glyph), egui 0.33 has no other" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; accesskit_unix (Linux screen reader) is on zbus 5" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; same path as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; same path as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2024-0436", reason = "paste: a proc-macro at build time of metal, the macOS backend of wgpu 27" },
+]
 
 [sources]
 unknown-registry = "deny"

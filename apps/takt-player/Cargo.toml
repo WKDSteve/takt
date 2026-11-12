@@ -18,6 +18,15 @@ takt-audio = { workspace = true, features = ["cpal"] }
 # Only for its feature: cpal asks for real-time priority on its audio thread. Pulls audio_thread_priority
 # (MPL-2.0), allowed here in zone 2 and never in takt-audio (zone 1).
 cpal = { version = "0.18", features = ["realtime"] }
+# The window (NREL-02): egui for the frame UI and wgpu for the video, as KONZEPT.md decided. 0.33 is the
+# newest eframe for rust-version 1.90. No glow: the video is drawn with wgpu, one renderer is enough.
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "wayland", "x11"] }
+egui = "0.33"
+# Its default features turn on the wgpu backends (DX12, Vulkan, Metal, GL); without them wgpu has none.
+egui-wgpu = "0.33"
+# What the default of eframe would bring for winit on Linux: load libwayland at run time (no build
+# dependency) and draw its own window decorations where Wayland gives none (GNOME).
+winit = { version = "0.30", default-features = false, features = ["wayland-dlopen", "wayland-csd-adwaita"] }
 # The guard of the audio callback: without `disable_release`, so it aborts in release builds too.
 assert_no_alloc = { version = "1.1", default-features = false }
 

@@ -22,5 +22,5 @@ pub mod ring;
 pub use callback::{OutputCallback, OutputStats};
 pub use histogram::{DurationHistogram, DurationSnapshot};
 #[cfg(feature = "cpal")]
-pub use output::{Output, OutputConfig, OutputError};
+pub use output::{Output, OutputConfig, OutputError, Priority};
 pub use ring::{Consumer, Producer, ring};

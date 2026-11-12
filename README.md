@@ -6,7 +6,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 
 *Takt* bedeutet gleichzeitig den musikalischen Takt und den Taktgeber. Die Master-Clock ist die Komponente, an der dieses Projekt technisch hängt: Alles Schwere in Takt ist ein Zeitproblem.
 
-> **Status (2026-10-31): Phase 0.** Das Fundament steht: `takt-core`, `takt-clock`, `takt-backend` und ein kopfloser `takt-player`, 64 Tests, CI grün auf Windows, Linux und macOS. Es fehlen noch Fenster, Audio-Ausgabe und das libmpv-Backend (`MpvBackend`) — noch kein benutzbarer Player. Details: [docs/PHASE-0.md](docs/PHASE-0.md).
+> **Status (2026-11-12): Phase 0.** Das Fundament steht: `takt-core`, `takt-clock`, `takt-backend`, `takt-audio` (wartefreier Ring, Ausgabe über `cpal`, die die Audio-Master-Uhr stellt) und `takt-player` mit einem Fenster (egui über wgpu: Play/Pause, Position, Lautstärke; `--headless` für die Messschleife), CI grün auf Windows, Linux und macOS. Es fehlen noch das Bild im Fenster (NV12-Shader) und das libmpv-Backend (`MpvBackend`) — noch kein benutzbarer Player. Details: [docs/PHASE-0.md](docs/PHASE-0.md).
 
 **English.** Takt is a modular media suite written in Rust: one shared core for decoding, GPU compositing and audio processing, with four modes on top (player, live studio, video editor and, as a long-term goal, a DAW). It is a personal, non-commercial project in an early stage (phase 0: foundation and timing, no usable player yet). The documentation is in German on purpose; code, comments and commit messages are in English.
 
