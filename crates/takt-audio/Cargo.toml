@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "takt-audio"
+version = "0.0.1"
+description = "Audio path of Takt: the wait-free ring between the decoder and the audio callback"
+license = "Apache-2.0 OR MIT"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+assert_no_alloc = "1.1"
+
+[lints]
+workspace = true

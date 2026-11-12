@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [takt-core, takt-clock]
+        crate: [takt-core, takt-clock, takt-audio]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

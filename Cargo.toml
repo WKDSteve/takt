@@ -4,6 +4,7 @@ resolver = "3"
 members = [
     "crates/takt-core",
     "crates/takt-clock",
+    "crates/takt-audio",
     "crates/takt-backend",
     "apps/takt-player",
 ]
@@ -17,6 +18,7 @@ repository = "https://github.com/WKDSteve/takt"
 [workspace.dependencies]
 takt-core = { path = "crates/takt-core", version = "0.0.1" }
 takt-clock = { path = "crates/takt-clock", version = "0.0.1" }
+takt-audio = { path = "crates/takt-audio", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

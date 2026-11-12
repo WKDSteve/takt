@@ -27,6 +27,7 @@ Der erste Push bestand nur lokal auf x86: die CI-Matrix fand auf ARM64 einen ech
 |---|---|---|
 | [`takt-core`](../crates/takt-core) | 1 — `Apache-2.0 OR MIT` | `Rational`, `Timestamp`, `PixelFormat`, Farbraum, `VideoFrame`, `FramePool`, `AudioBuffer`, Fehlertypen |
 | [`takt-clock`](../crates/takt-clock) | 1 — `Apache-2.0 OR MIT` | `Clock`-Trait, `AudioMasterClock`, `WallClock`, `TimelineClock`, `AnchorCell` (Seqlock) |
+| [`takt-audio`](../crates/takt-audio) | 1 — `Apache-2.0 OR MIT` | `ring`: wartefreier SPSC-Ring für verschachtelte `f32`-Frames, Überlauf gezählt, ohne `unsafe` (nach Phase 0 begonnen) |
 | [`takt-backend`](../crates/takt-backend) | 2 — `GPL-3.0-or-later` | `VideoBackend`-Trait, `NullBackend`, `Scheduler` mit Messwerten |
 | [`takt-player`](../apps/takt-player) | 2 — `GPL-3.0-or-later` | Kopflose Wiedergabeschleife, Messwertausgabe |
 
