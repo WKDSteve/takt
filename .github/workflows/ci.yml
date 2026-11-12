@@ -42,6 +42,14 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features
       - name: Tests
         run: cargo test --workspace --all-features
+      # The shader against its CPU reference. The runners have no GPU; on Windows the software adapter of DX12 (WARP)
+      # renders it. Linux and macOS keep the test ignored.
+      - name: Shader gegen die CPU-Referenz (Windows, WARP)
+        if: runner.os == 'Windows'
+        run: cargo test -p takt-player gpu -- --ignored --nocapture
+        env:
+          TAKT_GPU_TESTS: "1"
+          TAKT_GPU_ADAPTER: fallback
       - name: Doku baut ohne fehlende Verweise
         run: cargo doc --workspace --no-deps
         env:

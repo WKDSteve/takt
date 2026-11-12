@@ -492,11 +492,16 @@ mod tests {
         Nv12View::new(p.0, p.1, &p.2, p.3, &p.4, p.5).unwrap()
     }
 
+    /// The adapter of the test. `TAKT_GPU_ADAPTER=fallback` asks for the software adapter (WARP of
+    /// DX12 on Windows): the CI runners have no GPU, and WARP renders the shader exactly enough.
     fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
+        let options = wgpu::RequestAdapterOptions {
+            force_fallback_adapter: std::env::var("TAKT_GPU_ADAPTER").as_deref() == Ok("fallback"),
+            ..Default::default()
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options)).ok()?;
+        println!("gpu test on {:?}", adapter.get_info().name);
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
     }
 
@@ -599,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "SKIP: renders on a GPU adapter; TAKT_GPU_TESTS=1 cargo test -p takt-player gpu -- --ignored"]
+    #[ignore = "SKIP: renders on a GPU adapter; TAKT_GPU_TESTS=1 cargo test -p takt-player gpu -- --ignored (CI: Windows with WARP)"]
     fn the_shader_matches_the_cpu_reference_also_for_padded_rows() {
         if !gpu_wanted() {
             return;
