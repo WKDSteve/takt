@@ -14,6 +14,7 @@ mod app;
 mod audio;
 mod diagnostics;
 mod headless;
+mod playlist;
 mod refresh;
 mod render;
 mod ui;
@@ -28,6 +29,11 @@ use assert_no_alloc::AllocDisabler;
 static ALLOCATOR: AllocDisabler = AllocDisabler;
 
 fn main() -> ExitCode {
+    // `--keys`: the list of keys as Markdown (the text of docs/KEYS.md).
+    if std::env::args().skip(1).any(|arg| arg == "--keys") {
+        print!("{}", app::keys_markdown());
+        return ExitCode::SUCCESS;
+    }
     if std::env::args().skip(1).any(|arg| arg == "--headless") {
         headless::run();
         return ExitCode::SUCCESS;

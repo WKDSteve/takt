@@ -24,6 +24,8 @@ administrator rights. Windows (SmartScreen) may ask before the first start: the 
 ## Keys
 
 Space play/pause, arrows jump 5 s, Home to the start, a click on the timeline jumps there, 9/0
-quieter/louder, m mute, F3 diagnostics, F4 save them, Escape quits.
+quieter/louder, m mute, > and < next and previous entry, F8 the playlist, ? all keys, F3
+diagnostics, F4 save them, Escape quits. Drop files or folders on the window to play them (Shift
+appends); until the media backend comes, every entry plays as the test picture.
 
 License: GPL-3.0-or-later (`LICENSE`). Source: <https://github.com/WKDSteve/takt>.

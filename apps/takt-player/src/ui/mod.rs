@@ -22,9 +22,17 @@
 //! copies the same as text to the clipboard and saves it in the temporary
 //! directory (`takt-diagnostics-<unix seconds>.txt`), for gate reports.
 //!
+//! Files and folders dropped on the window become the playlist (Shift
+//! appends); `>` and `<` go to the next and the entry before, the end of an
+//! entry goes on to the next, F8 shows the playlist (select, remove,
+//! shuffle) and `?` the keys of [`crate::app::BINDINGS`]. Until the
+//! MpvBackend comes, an entry plays as the test picture of the NullBackend:
+//! the list, the keys and the drop work, the file itself is not read.
+//!
 //! The source learns the display period ([`RefreshMeter`], the median of the
 //! passes), so a frame is due at the refresh nearest its timestamp.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use std::time::{Duration, Instant};
@@ -35,9 +43,10 @@ use takt_core::{
     ColorPrimaries, ColorRange, FrameMeta, PixelFormat, Rational, Timestamp, TransferFunction,
 };
 
-use crate::app::{Command, Key, PlayerState, command_for, seek_target};
+use crate::app::{BINDINGS, Command, Key, MOUSE, PlayerState, command_for, seek_target};
 use crate::audio::{self, AudioPath};
 use crate::diagnostics::{self, AudioCounters, ProcessMeter, Snapshot};
+use crate::playlist::{self, Playlist};
 use crate::refresh::RefreshMeter;
 use crate::render::{self, Shown, gpu::Nv12Image};
 
@@ -103,6 +112,9 @@ struct PlayerApp {
     last_seek: Option<(i64, i64)>,
     /// The position the timeline is dragged to, before the jump.
     scrub: Option<i64>,
+    playlist: Playlist,
+    /// What the last drop could not take (folders without media, errors).
+    drop_problems: Vec<String>,
 }
 
 impl PlayerApp {
@@ -135,6 +147,8 @@ impl PlayerApp {
             seek_probe: None,
             last_seek: None,
             scrub: None,
+            playlist: Playlist::default(),
+            drop_problems: Vec::new(),
         }
     }
 
@@ -155,6 +169,13 @@ impl PlayerApp {
             }
         };
         let eof = self.source.is_eof();
+        if eof && frame.is_none() {
+            // The end of an entry: on to the next one, if there is one.
+            if let Some(next) = self.playlist.next().map(Path::to_path_buf) {
+                self.play(&next);
+                return;
+            }
+        }
         if !matches!(
             self.scheduler.accept(&self.clock, frame.as_ref(), eof),
             Presentation::Shown { .. }
@@ -184,6 +205,147 @@ impl PlayerApp {
         }
     }
 
+    /// Opens `path` and plays it from the start.
+    fn play(&mut self, path: &Path) {
+        let name = path.to_string_lossy();
+        if let Err(e) = self.source.open(&name) {
+            eprintln!("takt-player: cannot open {name}: {e}");
+            return;
+        }
+        self.seek_to(0);
+        self.shown = None;
+    }
+
+    /// Takes the files dropped on the window: they replace the playlist, or
+    /// are appended with Shift held.
+    fn take_drops(&mut self, ctx: &egui::Context) {
+        let (dropped, append) = ctx.input(|i| {
+            (
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect::<Vec<_>>(),
+                i.modifiers.shift,
+            )
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let base = std::env::current_dir().unwrap_or_default();
+        let (entries, problems) = playlist::expand(&dropped, &base);
+        self.drop_problems = problems;
+        let start = if append {
+            self.playlist.append(entries)
+        } else {
+            self.playlist.replace(entries)
+        }
+        .map(Path::to_path_buf);
+        if let Some(path) = start {
+            self.play(&path);
+        }
+    }
+
+    /// The playlist window (F8): select, remove, shuffle.
+    fn playlist_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut play = None;
+        let mut remove = None;
+        let mut shuffle = false;
+        egui::Window::new("Playlist")
+            .open(&mut open)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                if self.playlist.entries().is_empty() {
+                    ui.weak("Drop files or folders on the window (Shift appends).");
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for (i, entry) in self.playlist.entries().iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("x").on_hover_text("remove").clicked() {
+                                    remove = Some(i);
+                                }
+                                // The name is foreign text: shown, never interpreted.
+                                let label = Playlist::label(entry);
+                                let current = self.playlist.current() == Some(i);
+                                if ui
+                                    .selectable_label(current, label)
+                                    .on_hover_text(entry.display().to_string())
+                                    .clicked()
+                                {
+                                    play = Some(i);
+                                }
+                            });
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Shuffle")
+                        .on_hover_text("the entries after the playing one")
+                        .clicked()
+                    {
+                        shuffle = true;
+                    }
+                    ui.weak(format!("{} entries", self.playlist.entries().len()));
+                });
+                for problem in &self.drop_problems {
+                    ui.weak(problem);
+                }
+            });
+        if shuffle {
+            let seed = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(1);
+            self.playlist.shuffle(seed);
+        }
+        if let Some(i) = remove
+            && self.playlist.remove(i)
+        {
+            match self.playlist.current_entry().map(Path::to_path_buf) {
+                Some(path) => self.play(&path),
+                None => self.shown = None,
+            }
+        }
+        if let Some(path) = play
+            .and_then(|i| self.playlist.select(i))
+            .map(Path::to_path_buf)
+        {
+            self.play(&path);
+        }
+        if !open {
+            self.state.apply(Command::TogglePlaylist);
+        }
+    }
+
+    /// The list of keys (`?`), from the same table as `docs/KEYS.md`.
+    fn help_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Keys")
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("keys")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (_, key, what) in BINDINGS {
+                            ui.monospace(key);
+                            ui.label(what);
+                            ui.end_row();
+                        }
+                        for (what, effect) in MOUSE {
+                            ui.weak(what);
+                            ui.label(effect);
+                            ui.end_row();
+                        }
+                    });
+            });
+        if !open {
+            self.state.apply(Command::ToggleHelp);
+        }
+    }
+
     /// Jumps to `millis`: clock, source and scheduler.
     fn seek_to(&mut self, millis: i64) {
         let to = Timestamp::from_millis(millis);
@@ -210,13 +372,25 @@ impl PlayerApp {
             Command::SeekBy(by) => self.seek_to(seek_target(self.now_millis(), by, SOURCE_MILLIS)),
             Command::SeekStart => self.seek_to(0),
             Command::SeekTo(to) => self.seek_to(to.clamp(0, SOURCE_MILLIS)),
+            Command::Next => {
+                if let Some(path) = self.playlist.next().map(Path::to_path_buf) {
+                    self.play(&path);
+                }
+            }
+            Command::Previous => {
+                if let Some(path) = self.playlist.previous().map(Path::to_path_buf) {
+                    self.play(&path);
+                }
+            }
             Command::SaveDiagnostics => self.save_diagnostics(ctx),
             Command::TogglePlay
             | Command::Quit
             | Command::ToggleOverlay
             | Command::VolumeUp
             | Command::VolumeDown
-            | Command::ToggleMute => {}
+            | Command::ToggleMute
+            | Command::TogglePlaylist
+            | Command::ToggleHelp => {}
         }
         self.clock.set_paused(!self.state.playing());
         self._audio.set_volume(self.state.effective_volume());
@@ -351,6 +525,14 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     egui::Key::Num9 => Some(command_for(Key::Nine)),
                     egui::Key::Num0 => Some(command_for(Key::Zero)),
                     egui::Key::M => Some(command_for(Key::M)),
+                    egui::Key::F8 => Some(command_for(Key::F8)),
+                    _ => None,
+                },
+                // Characters that sit on different keys per layout come as text.
+                egui::Event::Text(text) => match text.as_str() {
+                    "?" => Some(command_for(Key::Question)),
+                    ">" => Some(command_for(Key::Greater)),
+                    "<" => Some(command_for(Key::Less)),
                     _ => None,
                 },
                 _ => None,
@@ -367,9 +549,16 @@ impl eframe::App for PlayerApp {
         if self.close_at.is_some_and(|at| Instant::now() >= at) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        self.take_drops(ctx);
         self.take_due_frame();
         if self.state.overlay() {
             self.overlay(ctx);
+        }
+        if self.state.playlist() {
+            self.playlist_window(ctx);
+        }
+        if self.state.help() {
+            self.help_window(ctx);
         }
         let uploads = frame.wgpu_render_state().and_then(render::uploads);
 

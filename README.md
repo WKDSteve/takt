@@ -18,6 +18,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Threads, Uhren und Invarianten | [docs/THREADS-UND-UHREN.md](docs/THREADS-UND-UHREN.md) |
 | Phase 0 und ihr Review | [docs/PHASE-0.md](docs/PHASE-0.md), [docs/reviews/](docs/reviews/) |
 | Bauen mit libmpv und FFmpeg | [docs/BUILD.md](docs/BUILD.md) |
+| Tasten und Maus des Players (`?` im Fenster, `takt-player --keys`) | [docs/KEYS.md](docs/KEYS.md) |
 | Den neuesten grünen Stand installieren (Windows, Pre-release `latest`, nicht signiert): `gh release download latest -R WKDSteve/takt -D takt-dl; Unblock-File takt-dl\takt-windows-x86_64.zip; Expand-Archive takt-dl\takt-windows-x86_64.zip takt-latest; .\takt-latest\install.ps1 [-DesktopShortcut]` (Prüfsumme in `takt-dl\SHA256SUMS`; das Zip in einen neuen, leeren Ordner entpacken; Startmenü „Takt“, Eintrag unter *Einstellungen > Apps*) | [Releases](https://github.com/WKDSteve/takt/releases/tag/latest) |
 | Bauen und für den eigenen Benutzer installieren (Windows, ohne Setup, nach `%LOCALAPPDATA%\takt\bin`): `scripts\build-install.ps1 [-BuildOnly] [-DesktopShortcut]` (derselbe Installer wie im Zip); entfernen: `scripts\uninstall.ps1` | [scripts/](scripts/) |
 | Planung: Plan mit Etappen und Gates, Tasks, offene Entscheidungen | Vault [`tasks-vault/takt/`](https://github.com/WKDSteve/tasks-vault/tree/main/takt) (privat) |

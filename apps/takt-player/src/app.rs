@@ -26,6 +26,14 @@ pub enum Command {
     VolumeDown,
     /// Mute, or unmute to the volume before.
     ToggleMute,
+    /// The next entry of the playlist.
+    Next,
+    /// The entry before in the playlist.
+    Previous,
+    /// Show or hide the playlist window.
+    TogglePlaylist,
+    /// Show or hide the list of keys.
+    ToggleHelp,
 }
 
 /// How far the volume keys move the volume.
@@ -57,6 +65,64 @@ pub enum Key {
     Zero,
     /// `m`, mute (as in mpv).
     M,
+    /// `>`, next entry (as in mpv).
+    Greater,
+    /// `<`, entry before (as in mpv).
+    Less,
+    /// F8, the playlist (as in mpv).
+    F8,
+    /// `?`, the list of keys.
+    Question,
+}
+
+/// Every key with its label and what it does: the one table the help overlay
+/// and `docs/KEYS.md` are made from (a test holds the file to it).
+pub const BINDINGS: [(Key, &str, &str); 14] = [
+    (Key::Space, "Space", "play / pause"),
+    (Key::Left, "Left", "jump back 5 s"),
+    (Key::Right, "Right", "jump forward 5 s"),
+    (Key::Home, "Home", "jump to the start"),
+    (Key::Nine, "9", "quieter (5 %)"),
+    (Key::Zero, "0", "louder (5 %)"),
+    (Key::M, "m", "mute / unmute"),
+    (Key::Greater, ">", "next entry of the playlist"),
+    (Key::Less, "<", "entry before in the playlist"),
+    (Key::F8, "F8", "show / hide the playlist"),
+    (Key::Question, "?", "show / hide this list of keys"),
+    (Key::F3, "F3", "show / hide the diagnostics"),
+    (Key::F4, "F4", "save the diagnostics (clipboard and a file)"),
+    (Key::Escape, "Escape", "quit"),
+];
+
+/// What the mouse does, for the same list.
+pub const MOUSE: [(&str, &str); 3] = [
+    ("Click / drag on the timeline", "jump there"),
+    (
+        "Drop files or folders",
+        "play them (a folder: its media files by name)",
+    ),
+    ("Drop with Shift held", "append them to the playlist"),
+];
+
+/// `docs/KEYS.md`, made from [`BINDINGS`] and [`MOUSE`].
+#[must_use]
+pub fn keys_markdown() -> String {
+    let mut out = String::from(
+        "# Tasten von takt-player\n\n\
+         Erzeugt aus `BINDINGS` in `apps/takt-player/src/app.rs`; der Test \
+         `docs_keys_md_is_the_table` hält die Datei daran fest (neu schreiben: \
+         `TAKT_WRITE_KEYS=1 cargo test -p takt-player docs_keys_md`). Das Hilfe-Overlay \
+         (`?`) zeigt dieselbe Tabelle.\n\n| Taste | Wirkung |\n|---|---|\n",
+    );
+    for (_, label, what) in BINDINGS {
+        let label = label.replace('|', "\\|");
+        out.push_str(&format!("| `{label}` | {what} |\n"));
+    }
+    out.push_str("\n| Maus | Wirkung |\n|---|---|\n");
+    for (what, effect) in MOUSE {
+        out.push_str(&format!("| {what} | {effect} |\n"));
+    }
+    out
 }
 
 /// The command of a key.
@@ -73,6 +139,10 @@ pub fn command_for(key: Key) -> Command {
         Key::Nine => Command::VolumeDown,
         Key::Zero => Command::VolumeUp,
         Key::M => Command::ToggleMute,
+        Key::Greater => Command::Next,
+        Key::Less => Command::Previous,
+        Key::F8 => Command::TogglePlaylist,
+        Key::Question => Command::ToggleHelp,
     }
 }
 
@@ -90,6 +160,8 @@ pub struct PlayerState {
     volume: f32,
     muted: bool,
     overlay: bool,
+    playlist: bool,
+    help: bool,
 }
 
 impl Default for PlayerState {
@@ -100,6 +172,8 @@ impl Default for PlayerState {
             volume: 1.0,
             muted: false,
             overlay: false,
+            playlist: false,
+            help: false,
         }
     }
 }
@@ -121,6 +195,18 @@ impl PlayerState {
     #[must_use]
     pub fn volume(&self) -> f32 {
         self.volume
+    }
+
+    /// Whether the playlist window shows.
+    #[must_use]
+    pub fn playlist(&self) -> bool {
+        self.playlist
+    }
+
+    /// Whether the list of keys shows.
+    #[must_use]
+    pub fn help(&self) -> bool {
+        self.help
     }
 
     /// Whether it is muted (the volume is kept for unmuting).
@@ -171,11 +257,21 @@ impl PlayerState {
                 self.muted = !self.muted;
                 false
             }
+            Command::TogglePlaylist => {
+                self.playlist = !self.playlist;
+                false
+            }
+            Command::ToggleHelp => {
+                self.help = !self.help;
+                false
+            }
             // The clock and the source jump, the window saves; the state does
             // not change.
             Command::SeekBy(_)
             | Command::SeekStart
             | Command::SeekTo(_)
+            | Command::Next
+            | Command::Previous
             | Command::SaveDiagnostics => false,
         }
     }
@@ -238,6 +334,63 @@ mod tests {
         }
         assert!(state.volume().abs() < f32::EPSILON, "never below 0");
         assert!(!state.apply(Command::SeekTo(1_000)) && state.playing());
+    }
+
+    #[test]
+    fn every_key_is_in_the_table_once() {
+        // A new Key that is not in BINDINGS fails here: the match lists them all.
+        let all = |key: Key| match key {
+            Key::Space
+            | Key::Escape
+            | Key::Left
+            | Key::Right
+            | Key::Home
+            | Key::F3
+            | Key::F4
+            | Key::Nine
+            | Key::Zero
+            | Key::M
+            | Key::Greater
+            | Key::Less
+            | Key::F8
+            | Key::Question => (),
+        };
+        for (key, _, _) in BINDINGS {
+            all(key);
+            assert_eq!(
+                BINDINGS.iter().filter(|(k, _, _)| *k == key).count(),
+                1,
+                "{key:?}"
+            );
+        }
+        assert_eq!(BINDINGS.len(), 14, "every variant of Key, once");
+    }
+
+    #[test]
+    fn the_playlist_keys() {
+        assert_eq!(command_for(Key::Greater), Command::Next);
+        assert_eq!(command_for(Key::Less), Command::Previous);
+        let mut state = PlayerState::default();
+        state.apply(command_for(Key::F8));
+        state.apply(command_for(Key::Question));
+        assert!(state.playlist() && state.help());
+        assert!(!state.apply(Command::Next) && state.playing());
+    }
+
+    #[test]
+    fn docs_keys_md_is_the_table() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/KEYS.md");
+        let wanted = keys_markdown();
+        if std::env::var("TAKT_WRITE_KEYS").as_deref() == Ok("1") {
+            std::fs::write(path, &wanted).unwrap();
+        }
+        let have = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert_eq!(
+            have, wanted,
+            "docs/KEYS.md is not the table: TAKT_WRITE_KEYS=1 cargo test -p takt-player docs_keys_md"
+        );
     }
 
     #[test]
