@@ -139,7 +139,8 @@ try {
         $install = Join-Path $work "$shell-install\takt\bin"
         $startMenu = Join-Path $work "$shell-startmenu"
         $desktop = Join-Path $work "$shell-desktop"
-        $places = @('-InstallDir', $install, '-StartMenuDir', $startMenu, '-DesktopDir', $desktop, '-RegistryRoot', $regRoot)
+        # The hosted runners run elevated; the places are temp places, so that is allowed here.
+        $places = @('-InstallDir', $install, '-StartMenuDir', $startMenu, '-DesktopDir', $desktop, '-RegistryRoot', $regRoot, '-AllowElevated')
         $r = Invoke-Child (Join-Path $payload 'install.ps1') ($places + '-DesktopShortcut') $shell
         Write-Check ($r.Code -eq 0) "${shell}: install exits 0"
         if ($r.Code -ne 0) { Write-Output $r.Output }
@@ -170,15 +171,15 @@ try {
     $foreign = Join-Path $work 'foreign'
     New-Item -ItemType Directory -Force -Path $foreign | Out-Null
     Set-Content -LiteralPath (Join-Path $foreign 'notes.txt') -Value 'mine'
-    $r = Invoke-Child (Join-Path $payload 'install.ps1') @('-InstallDir', $foreign, '-StartMenuDir', $startMenu, '-RegistryRoot', $regRoot)
-    Write-Check ($r.Code -ne 0 -and (Get-Names $foreign).Count -eq 1) 'a folder of somebody else is refused and left alone'
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') @('-InstallDir', $foreign, '-StartMenuDir', $startMenu, '-RegistryRoot', $regRoot, '-AllowElevated')
+    Write-Check ($r.Code -ne 0 -and $r.Output -match 'no takt install' -and (Get-Names $foreign).Count -eq 1) 'a folder of somebody else is refused and left alone'
     $extra = Join-Path $work 'extra'
     Copy-Item -LiteralPath $payload -Destination $extra -Recurse
     Set-Content -LiteralPath (Join-Path $extra 'evil.dll') -Value 'x'
-    $r = Invoke-Child (Join-Path $extra 'install.ps1') @('-InstallDir', (Join-Path $work 'extra-install'), '-StartMenuDir', $startMenu, '-RegistryRoot', $regRoot)
-    Write-Check ($r.Code -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $work 'extra-install'))) 'a payload with a file that is no release is refused'
-    $r = Invoke-Child (Join-Path $payload 'install.ps1') @('-InstallDir', (Join-Path $work 'hklm'), '-StartMenuDir', $startMenu, '-RegistryRoot', 'HKLM:\Software\x')
-    Write-Check ($r.Code -ne 0) 'a registry root outside HKCU is refused'
+    $r = Invoke-Child (Join-Path $extra 'install.ps1') @('-InstallDir', (Join-Path $work 'extra-install'), '-StartMenuDir', $startMenu, '-RegistryRoot', $regRoot, '-AllowElevated')
+    Write-Check ($r.Code -ne 0 -and $r.Output -match 'evil.dll' -and -not (Test-Path -LiteralPath (Join-Path $work 'extra-install'))) 'a payload with a file that is no release is refused'
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') @('-InstallDir', (Join-Path $work 'hklm'), '-StartMenuDir', $startMenu, '-RegistryRoot', 'HKLM:\Software\x', '-AllowElevated')
+    Write-Check ($r.Code -ne 0 -and $r.Output -match 'below HKCU') 'a registry root outside HKCU is refused'
     $savedClaude = $env:CLAUDECODE
     $env:CLAUDECODE = '1'
     $refused = $false
