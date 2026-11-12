@@ -34,6 +34,7 @@
 
 pub mod anchor;
 mod audio_master;
+mod seekable;
 mod timeline;
 mod wall;
 
@@ -41,6 +42,7 @@ use takt_core::Timestamp;
 
 pub use anchor::{Anchor, AnchorCell, ManualMonotonic, MonotonicSource, SystemMonotonic};
 pub use audio_master::{AudioClockWriter, AudioMasterClock};
+pub use seekable::SeekableClock;
 pub use timeline::TimelineClock;
 pub use wall::WallClock;
 

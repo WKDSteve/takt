@@ -3,22 +3,35 @@
 //! pause, the position and the volume, above it the video surface.
 //!
 //! The source is the moving test picture of [`NullBackend`] (NV12, BT.709,
-//! limited range), drawn through the colour path of [`render`]. Every display
-//! refresh takes the frame that is due on the audio master clock; scheduler,
-//! measurements and seeking come with the render loop (task
-//! `render-schleife-an-scheduler-und-uhr-koppeln`).
+//! limited range), drawn through the colour path of [`render`].
+//!
+//! # The render loop
+//!
+//! eframe calls [`eframe::App::update`] once per display refresh (vsync, no
+//! sleep anywhere). Each call asks the source for the frame that is due on the
+//! clock and gives the answer to the [`Scheduler`], exactly as the headless
+//! loop does, so the measurements of both can be compared. While paused,
+//! nothing is asked and nothing counted. The clock is the audio master clock
+//! wrapped in a [`SeekableClock`]: a jump moves the media position, resets
+//! source and scheduler (their numbers are about the old position), and the
+//! device plays on.
 
 use std::sync::Arc;
 
-use takt_backend::{NullBackend, Pattern, VideoBackend};
-use takt_clock::{AudioMasterClock, Clock, SystemMonotonic};
+use std::time::{Duration, Instant};
+
+use takt_backend::{NullBackend, Pattern, Presentation, Scheduler, SeekMode, VideoBackend};
+use takt_clock::{AudioMasterClock, Clock, SeekableClock, SystemMonotonic};
 use takt_core::{
     ColorPrimaries, ColorRange, FrameMeta, PixelFormat, Rational, Timestamp, TransferFunction,
 };
 
-use crate::app::{Command, Key, PlayerState, command_for};
+use crate::app::{Command, Key, PlayerState, command_for, seek_target};
 use crate::audio::{self, AudioPath};
 use crate::render::{self, Shown, gpu::Nv12Image};
+
+/// Length of the test source.
+const SOURCE_MILLIS: i64 = 3_600_000;
 
 /// The test source: the moving block of `NullBackend`, 1920x1080 NV12 at the
 /// NTSC rate, one hour long.
@@ -35,7 +48,7 @@ fn test_source() -> NullBackend {
     let mut backend = NullBackend::new(
         meta,
         Rational::lit(24_000, 1_001),
-        Timestamp::from_millis(3_600_000),
+        Timestamp::from_millis(SOURCE_MILLIS),
         Pattern::Motion,
         6,
     );
@@ -47,7 +60,10 @@ fn test_source() -> NullBackend {
 /// The player in its window.
 struct PlayerApp {
     state: PlayerState,
-    clock: AudioMasterClock,
+    clock: SeekableClock<AudioMasterClock>,
+    scheduler: Scheduler,
+    /// `--seconds N`: close after N seconds (a measuring run).
+    close_at: Option<Instant>,
     // Kept for its life; dropping it stops the sound.
     _audio: AudioPath,
     audio_line: String,
@@ -56,7 +72,7 @@ struct PlayerApp {
 }
 
 impl PlayerApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, seconds: Option<u64>) -> Self {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             render::install(state);
         }
@@ -65,7 +81,9 @@ impl PlayerApp {
         let audio_line = audio.describe();
         Self {
             state: PlayerState::default(),
-            clock,
+            clock: SeekableClock::new(clock),
+            scheduler: Scheduler::new(),
+            close_at: seconds.map(|s| Instant::now() + Duration::from_secs(s)),
             _audio: audio,
             audio_line,
             source: test_source(),
@@ -73,10 +91,28 @@ impl PlayerApp {
         }
     }
 
-    /// Takes the frame that is due now, if there is a new one.
+    /// One pass of the render loop: the frame that is due now, judged by the
+    /// scheduler; a new picture when it is shown.
     fn take_due_frame(&mut self) {
-        match self.source.next_frame(&self.clock) {
-            Ok(Some(frame)) => match Nv12Image::from_frame(frame.get()) {
+        if !self.state.playing() {
+            return;
+        }
+        let frame = match self.source.next_frame(&self.clock) {
+            Ok(frame) => frame,
+            Err(e) => {
+                eprintln!("takt-player: source: {e}");
+                return;
+            }
+        };
+        let eof = self.source.is_eof();
+        if !matches!(
+            self.scheduler.accept(&self.clock, frame.as_ref(), eof),
+            Presentation::Shown { .. }
+        ) {
+            return;
+        }
+        if let Some(frame) = frame {
+            match Nv12Image::from_frame(frame.get()) {
                 Ok(image) => {
                     let generation = self.shown.as_ref().map_or(0, |s| s.generation + 1);
                     self.shown = Some(Shown {
@@ -85,17 +121,51 @@ impl PlayerApp {
                     });
                 }
                 Err(e) => eprintln!("takt-player: frame not shown: {e}"),
-            },
-            Ok(None) => {}
-            Err(e) => eprintln!("takt-player: source: {e}"),
+            }
         }
+    }
+
+    /// Jumps to `millis`: clock, source and scheduler.
+    fn seek_to(&mut self, millis: i64) {
+        let to = Timestamp::from_millis(millis);
+        self.clock.seek(to);
+        if let Err(e) = self.source.seek(to, SeekMode::Keyframe) {
+            eprintln!("takt-player: seek: {e}");
+        }
+        self.scheduler.reset();
+    }
+
+    fn now_millis(&self) -> i64 {
+        self.clock
+            .now()
+            .rescale(Rational::MILLIS)
+            .map_or(0, Timestamp::ticks)
     }
 
     fn run(&mut self, ctx: &egui::Context, command: Command) {
         if self.state.apply(command) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        match command {
+            Command::SeekBy(by) => self.seek_to(seek_target(self.now_millis(), by, SOURCE_MILLIS)),
+            Command::SeekStart => self.seek_to(0),
+            Command::TogglePlay | Command::Quit => {}
+        }
         self.clock.set_paused(!self.state.playing());
+    }
+
+    /// The measurements, as the headless run prints them.
+    fn summary(&self) -> String {
+        let s = self.scheduler.stats();
+        #[expect(clippy::cast_precision_loss, reason = "a display value, not time")]
+        let mean = s.mean_abs_error_nanos() as f64 / 1e6;
+        format!(
+            "shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms",
+            s.shown,
+            s.repeated,
+            s.repeat_ratio(),
+            self.source.stats().dropped
+        )
     }
 }
 
@@ -114,6 +184,9 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                 } => match key {
                     egui::Key::Space => Some(command_for(Key::Space)),
                     egui::Key::Escape => Some(command_for(Key::Escape)),
+                    egui::Key::ArrowLeft => Some(command_for(Key::Left)),
+                    egui::Key::ArrowRight => Some(command_for(Key::Right)),
+                    egui::Key::Home => Some(command_for(Key::Home)),
                     _ => None,
                 },
                 _ => None,
@@ -126,6 +199,9 @@ impl eframe::App for PlayerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         for command in commands(ctx) {
             self.run(ctx, command);
+        }
+        if self.close_at.is_some_and(|at| Instant::now() >= at) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.take_due_frame();
         let uploads = frame.wgpu_render_state().and_then(render::uploads);
@@ -151,6 +227,8 @@ impl eframe::App for PlayerApp {
                     self.state.set_volume(volume);
                 }
                 ui.separator();
+                ui.weak(self.summary());
+                ui.separator();
                 ui.weak(&self.audio_line);
                 if let Some(u) = uploads.filter(|u| u.total() > 0) {
                     ui.separator();
@@ -172,12 +250,19 @@ impl eframe::App for PlayerApp {
     }
 }
 
-/// Opens the window and runs until it closes.
+impl Drop for PlayerApp {
+    /// The measurements of the run, when the window closes.
+    fn drop(&mut self) {
+        println!("takt-player: {}", self.summary());
+    }
+}
+
+/// Opens the window and runs until it closes, or for `seconds`.
 ///
 /// # Errors
 ///
 /// When no window or no wgpu device could be created.
-pub fn run() -> eframe::Result {
+pub fn run(seconds: Option<u64>) -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -189,6 +274,6 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         "Takt",
         options,
-        Box::new(|cc| Ok(Box::new(PlayerApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds)))),
     )
 }

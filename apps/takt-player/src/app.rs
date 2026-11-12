@@ -10,7 +10,14 @@ pub enum Command {
     TogglePlay,
     /// Close the player.
     Quit,
+    /// Jump by this many milliseconds (negative: back).
+    SeekBy(i64),
+    /// Jump to the start.
+    SeekStart,
 }
+
+/// How far the arrow keys jump.
+pub const SEEK_STEP_MILLIS: i64 = 5_000;
 
 /// A key the player knows, independent of the window library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +26,12 @@ pub enum Key {
     Space,
     /// Escape.
     Escape,
+    /// Arrow left.
+    Left,
+    /// Arrow right.
+    Right,
+    /// Home (Pos1).
+    Home,
 }
 
 /// The command of a key.
@@ -27,7 +40,17 @@ pub fn command_for(key: Key) -> Command {
     match key {
         Key::Space => Command::TogglePlay,
         Key::Escape => Command::Quit,
+        Key::Left => Command::SeekBy(-SEEK_STEP_MILLIS),
+        Key::Right => Command::SeekBy(SEEK_STEP_MILLIS),
+        Key::Home => Command::SeekStart,
     }
+}
+
+/// Where a jump of `by` from `now` lands, inside `0..=duration` (all in
+/// milliseconds).
+#[must_use]
+pub fn seek_target(now: i64, by: i64, duration: i64) -> i64 {
+    now.saturating_add(by).clamp(0, duration.max(0))
 }
 
 /// Playing or paused, and the volume.
@@ -77,6 +100,8 @@ impl PlayerState {
                 false
             }
             Command::Quit => true,
+            // The clock and the source jump; the state does not change.
+            Command::SeekBy(_) | Command::SeekStart => false,
         }
     }
 }
@@ -94,6 +119,24 @@ mod tests {
         assert!(!state.apply(command_for(Key::Space)));
         assert!(state.playing());
         assert!(state.apply(command_for(Key::Escape)));
+    }
+
+    #[test]
+    fn the_arrows_jump_and_home_goes_to_the_start() {
+        assert_eq!(command_for(Key::Left), Command::SeekBy(-SEEK_STEP_MILLIS));
+        assert_eq!(command_for(Key::Right), Command::SeekBy(SEEK_STEP_MILLIS));
+        assert_eq!(command_for(Key::Home), Command::SeekStart);
+        let mut state = PlayerState::default();
+        assert!(!state.apply(Command::SeekBy(5_000)));
+        assert!(state.playing(), "a jump does not pause");
+    }
+
+    #[test]
+    fn a_jump_stays_inside_the_source() {
+        assert_eq!(seek_target(10_000, -5_000, 60_000), 5_000);
+        assert_eq!(seek_target(2_000, -5_000, 60_000), 0);
+        assert_eq!(seek_target(58_000, 5_000, 60_000), 60_000);
+        assert_eq!(seek_target(0, i64::MAX, 60_000), 60_000);
     }
 
     #[test]

@@ -30,7 +30,14 @@ fn main() -> ExitCode {
         headless::run();
         return ExitCode::SUCCESS;
     }
-    match ui::run() {
+    // `--seconds N`: a measuring run of the window, closed after N seconds.
+    let args: Vec<String> = std::env::args().collect();
+    let seconds = args
+        .iter()
+        .position(|arg| arg == "--seconds")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| n.parse().ok());
+    match ui::run(seconds) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("takt-player: no window: {e} (--headless runs without one)");
