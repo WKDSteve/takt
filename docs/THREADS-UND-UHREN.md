@@ -178,7 +178,7 @@ Der Linux-Fall ist der klassische „funktioniert bei mir": auf einem für Audio
 Die Punkte, die ohne Diskussion gelten und in Reviews geprüft werden:
 
 1. **Genau ein hart-echtzeitfähiger Thread.** Er wird vom Betriebssystem erzeugt, nicht von uns.
-2. **Im Audio-Callback:** keine Allokation, kein Lock, kein Datei- oder Netzwerkzugriff, kein Logging, kein `panic!`. `assert_no_alloc` bleibt aktiv, auch im Release-Build der Entwicklungsversionen.
+2. **Im Audio-Callback:** keine Allokation, kein Lock, kein Datei- oder Netzwerkzugriff, kein Logging, kein `panic!`. `assert_no_alloc` bleibt aktiv, auch im Release-Build der Entwicklungsversionen: `takt-player` setzt `AllocDisabler` als globalen Allokator, und `OutputCallback::fill` ([`crates/takt-audio/src/callback.rs`](../crates/takt-audio/src/callback.rs)) läuft unter dem Wächter; das Crate ist ohne `disable_release` eingebunden.
 3. **Genau eine Uhr ist aktiv.** Der Moduswechsel tauscht die Uhr, er startet keine zweite.
 4. **Zeitstempel sind niemals `f64`.** Immer `Timestamp` mit rationaler Basis. Gleitkomma ausschließlich zur Anzeige, und das Ergebnis fließt nie in eine Rechnung zurück.
 5. **Kommunikation zum Audio-Thread ausschließlich wartefrei:** Atomics, Seqlock, lock-freie SPSC-Ringpuffer. Der Ring für die Samples: [`crates/takt-audio/src/ring.rs`](../crates/takt-audio/src/ring.rs) (eigene Umsetzung statt `rtrb`, die Slots sind `AtomicU32`, damit kein `unsafe` nötig ist).

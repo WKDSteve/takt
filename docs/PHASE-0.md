@@ -27,7 +27,7 @@ Der erste Push bestand nur lokal auf x86: die CI-Matrix fand auf ARM64 einen ech
 |---|---|---|
 | [`takt-core`](../crates/takt-core) | 1 — `Apache-2.0 OR MIT` | `Rational`, `Timestamp`, `PixelFormat`, Farbraum, `VideoFrame`, `FramePool`, `AudioBuffer`, Fehlertypen |
 | [`takt-clock`](../crates/takt-clock) | 1 — `Apache-2.0 OR MIT` | `Clock`-Trait, `AudioMasterClock`, `WallClock`, `TimelineClock`, `AnchorCell` (Seqlock) |
-| [`takt-audio`](../crates/takt-audio) | 1 — `Apache-2.0 OR MIT` | `ring`: wartefreier SPSC-Ring für verschachtelte `f32`-Frames, Überlauf gezählt, ohne `unsafe` (nach Phase 0 begonnen) |
+| [`takt-audio`](../crates/takt-audio) | 1 — `Apache-2.0 OR MIT` | `ring`: wartefreier SPSC-Ring für verschachtelte `f32`-Frames, Überlauf gezählt, ohne `unsafe`; `OutputCallback` (Ring → Gerät, Stille und Xrun bei leerem Ring, stellt die Audio-Master-Uhr, unter `assert_no_alloc`); `Output` über `cpal` hinter dem Feature `cpal` (nach Phase 0 begonnen) |
 | [`takt-backend`](../crates/takt-backend) | 2 — `GPL-3.0-or-later` | `VideoBackend`-Trait, `NullBackend`, `Scheduler` mit Messwerten |
 | [`takt-player`](../apps/takt-player) | 2 — `GPL-3.0-or-later` | Kopflose Wiedergabeschleife, Messwertausgabe |
 
@@ -96,7 +96,7 @@ Genau hier setzt später `--video-sync=display-resample` an, mpvs Ansatz: statt 
 
 In dieser Reihenfolge:
 
-1. **`takt-audio`: lock-freier SPSC-Ringpuffer**, dazu ein `cpal`-Ausgabepfad. Damit wird die Audio-Master-Uhr von einem echten Callback gefüttert statt von einem simulierten Thread, und `assert_no_alloc` kommt in den Callback.
+1. ~~**`takt-audio`: lock-freier SPSC-Ringpuffer**, dazu ein `cpal`-Ausgabepfad.~~ Erledigt: `takt-player` spielt über das Standardgerät (WASAPI shared, ALSA, CoreAudio) und die Audio-Master-Uhr folgt dem echten Callback; ohne Gerät oder mit `TAKT_AUDIO=sim` meldet er „SIMULIERT“ und nimmt den simulierten Thread. Der Gerätetest läuft nur mit `TAKT_DEVICE_TESTS=1` (`cargo test -p takt-audio --features cpal --test device -- --ignored`), in der CI ist er „ignored“. Die Latenz des Geräts wird noch nicht abgezogen.
 2. **Fenster und Anzeige.** `winit` plus `egui`, Video über `wgpu` als NV12-Textur mit Farbraum-Shader. Das Testbild aus `NullBackend` ist dabei die erste Prüfung des Farbpfads.
 3. **Diagnose-Overlay**, per Taste umschaltbar: Histogramm, Anker-Alter, Pool-Belegung, Xrun-Zähler.
 4. **`MpvBackend`** hinter dem bestehenden Trait. Ab hier ist es ein benutzbarer Player.

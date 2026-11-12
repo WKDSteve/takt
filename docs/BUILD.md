@@ -1,6 +1,6 @@
 # Bauen
 
-Takt baut ohne jede Systembibliothek: Ohne libmpv und FFmpeg läuft `takt-player` über `NullBackend`, und genau so baut die CI. Die nativen Bibliotheken werden nur eingebunden, wenn eine Umgebungsvariable auf sie zeigt. Dieses Dokument beschreibt, wie man sie beschafft.
+Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` über `NullBackend`, und genau so baut die CI. Einzige Systemvoraussetzung ist unter Linux die Audio-Ausgabe (`cpal` über ALSA): `sudo apt-get install libasound2-dev` (Fedora: `alsa-lib-devel`); Windows und macOS brauchen nichts. Die nativen Bibliotheken werden nur eingebunden, wenn eine Umgebungsvariable auf sie zeigt. Dieses Dokument beschreibt, wie man sie beschafft.
 
 ## Table of content
 

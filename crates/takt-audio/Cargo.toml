@@ -9,10 +9,18 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[dependencies]
+[features]
+# The device output (cpal). Off by default: the ring and the callback are
+# usable and testable without a sound system, and zone 1 stays buildable
+# where no audio headers are installed.
+cpal = ["dep:cpal"]
 
-[dev-dependencies]
-assert_no_alloc = "1.1"
+[dependencies]
+takt-clock.workspace = true
+# Without `disable_release`: the guard aborts on an allocation in release
+# builds too (it only acts where the program installs its AllocDisabler).
+assert_no_alloc = { version = "1.1", default-features = false }
+cpal = { version = "0.18", optional = true }
 
 [lints]
 workspace = true

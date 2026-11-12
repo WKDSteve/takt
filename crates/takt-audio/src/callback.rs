@@ -1,0 +1,207 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//! What the audio callback does, without a device.
+//!
+//! [`OutputCallback::fill`] is the whole body of the device callback: take
+//! frames from the [`Consumer`], pad with silence when the ring runs dry (and
+//! count that as an xrun), report the position to the audio master clock. The
+//! device layer ([`crate::output`], feature `cpal`) only hands it the buffer of
+//! the device; everything that can go wrong in real time is here and is
+//! tested without a sound card.
+//!
+//! # The position
+//!
+//! The clock is told every frame handed to the device, silence after an
+//! underrun included: the device plays on through a dropout, and the clock
+//! must stay monotonic. Reporting only the frames from the ring would hold the
+//! anchor still while the clock extrapolates up to its limit between two
+//! callbacks, so the position would step back at every callback of a dropout.
+//! How much was silence is in [`OutputStats`].
+//!
+//! The time of a report is the monotonic clock at the start of the callback.
+//! The device latency (the time from the callback to the speaker) is not
+//! subtracted yet; it is a constant offset and belongs to the A/V sync work.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use takt_clock::{AudioClockWriter, MonotonicSource};
+
+use crate::ring::Consumer;
+
+/// Counters of an output, readable from any thread while it runs.
+#[derive(Debug, Default)]
+pub struct OutputStats {
+    callbacks: AtomicU64,
+    frames: AtomicU64,
+    xruns: AtomicU64,
+    silent_frames: AtomicU64,
+}
+
+impl OutputStats {
+    /// Callbacks so far.
+    #[must_use]
+    pub fn callbacks(&self) -> u64 {
+        self.callbacks.load(Ordering::Relaxed)
+    }
+
+    /// Frames taken from the ring and handed to the device so far (without
+    /// the silence of [`silent_frames`](Self::silent_frames)).
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    /// Callbacks that found too little in the ring and padded with silence.
+    #[must_use]
+    pub fn xruns(&self) -> u64 {
+        self.xruns.load(Ordering::Relaxed)
+    }
+
+    /// Frames of silence handed out because the ring was empty.
+    #[must_use]
+    pub fn silent_frames(&self) -> u64 {
+        self.silent_frames.load(Ordering::Relaxed)
+    }
+}
+
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// The body of the audio callback.
+#[derive(Debug)]
+pub struct OutputCallback {
+    ring: Consumer,
+    clock: AudioClockWriter,
+    time: Arc<dyn MonotonicSource>,
+    stats: Arc<OutputStats>,
+    played: u64,
+}
+
+impl OutputCallback {
+    /// A callback that plays from `ring` and reports to `clock`, with the
+    /// times of `time` (the source the clock itself reads).
+    #[must_use]
+    pub fn new(ring: Consumer, clock: AudioClockWriter, time: Arc<dyn MonotonicSource>) -> Self {
+        Self {
+            ring,
+            clock,
+            time,
+            stats: Arc::new(OutputStats::default()),
+            played: 0,
+        }
+    }
+
+    /// The counters, to be read while the callback runs elsewhere.
+    #[must_use]
+    pub fn stats(&self) -> Arc<OutputStats> {
+        Arc::clone(&self.stats)
+    }
+
+    /// Samples per frame, as the ring carries them.
+    #[must_use]
+    pub fn channels(&self) -> usize {
+        self.ring.channels()
+    }
+
+    /// Fills the interleaved device buffer `out`.
+    ///
+    /// **The audio callback.** Runs under `assert_no_alloc`: an allocation
+    /// in here aborts the process when the program installs
+    /// `assert_no_alloc::AllocDisabler` as its global allocator (takt-player
+    /// does, in debug and in release). Does not lock or wait.
+    pub fn fill(&mut self, out: &mut [f32]) {
+        assert_no_alloc::assert_no_alloc(|| self.fill_inner(out));
+    }
+
+    fn fill_inner(&mut self, out: &mut [f32]) {
+        let now = self.time.now_nanos();
+        let channels = self.ring.channels();
+        let frames = self.ring.pop(out);
+        let wanted = out.len() / channels;
+        out[frames * channels..].fill(0.0);
+
+        self.played += to_u64(wanted);
+        self.clock.report(self.played, now);
+
+        let stats = &*self.stats;
+        stats.callbacks.fetch_add(1, Ordering::Relaxed);
+        stats.frames.fetch_add(to_u64(frames), Ordering::Relaxed);
+        if frames < wanted {
+            stats.xruns.fetch_add(1, Ordering::Relaxed);
+            stats
+                .silent_frames
+                .fetch_add(to_u64(wanted - frames), Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ring;
+    use takt_clock::{AudioMasterClock, ManualMonotonic};
+
+    fn setup(
+        capacity: usize,
+    ) -> (
+        ring::Producer,
+        OutputCallback,
+        AudioMasterClock,
+        Arc<ManualMonotonic>,
+    ) {
+        let time = Arc::new(ManualMonotonic::new());
+        let clock = AudioMasterClock::new(
+            48_000,
+            Arc::clone(&time) as Arc<dyn MonotonicSource>,
+            20_000_000,
+        );
+        let (tx, rx) = ring::ring(2, capacity);
+        let cb = OutputCallback::new(
+            rx,
+            clock.writer().unwrap(),
+            Arc::clone(&time) as Arc<dyn MonotonicSource>,
+        );
+        (tx, cb, clock, time)
+    }
+
+    #[test]
+    fn a_full_ring_plays_and_moves_the_clock() {
+        let (mut tx, mut cb, clock, time) = setup(960);
+        tx.push(&[0.5; 960 * 2]);
+        let mut out = [9.0_f32; 480 * 2];
+        time.set(10_000_000);
+        cb.fill(&mut out);
+        assert!(out.iter().all(|&s| s == 0.5));
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 480);
+        let stats = cb.stats();
+        assert_eq!(
+            (stats.callbacks(), stats.frames(), stats.xruns()),
+            (1, 480, 0)
+        );
+        time.set(20_000_000);
+        cb.fill(&mut out);
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 960);
+    }
+
+    #[test]
+    fn an_empty_ring_gives_silence_counts_an_xrun_and_the_clock_runs_on() {
+        let (mut tx, mut cb, clock, time) = setup(960);
+        tx.push(&[0.5; 100 * 2]);
+        let mut out = [9.0_f32; 480 * 2];
+        cb.fill(&mut out);
+        assert!(out[..200].iter().all(|&s| s == 0.5));
+        assert!(out[200..].iter().all(|&s| s == 0.0), "the rest is silence");
+        let stats = cb.stats();
+        assert_eq!((stats.xruns(), stats.silent_frames()), (1, 380));
+
+        time.set(10_000_000);
+        cb.fill(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!((stats.xruns(), stats.silent_frames()), (2, 860));
+        // The device played two buffers, 100 frames of content and 860 of
+        // silence: the clock follows the device and never steps back.
+        assert_eq!(clock.anchored_position().unwrap().ticks(), 960);
+        assert_eq!(stats.frames(), 100);
+    }
+}

@@ -19,6 +19,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "MIT-0",
+    # assert_no_alloc (guard of the audio callback); decided 2026-11-12: OSI approved, fewer
+    # conditions than BSD-2-Clause, compatible with Apache-2.0 OR MIT.
+    "BSD-1-Clause",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",

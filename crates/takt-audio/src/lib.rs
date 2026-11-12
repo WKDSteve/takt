@@ -5,12 +5,20 @@
 //! wait-free single-producer single-consumer ring that carries interleaved
 //! `f32` frames between the decoder side and the audio callback
 //! (`docs/THREADS-UND-UHREN.md`, invariant 5: the audio thread only talks
-//! through wait-free structures).
+//! through wait-free structures), and [`OutputCallback`], the body of the
+//! audio callback that plays from it and drives the audio master clock. The
+//! device itself is [`output`] behind the feature `cpal`.
 //!
 //! # Zone
 //!
 //! License zone 1 (permissive), free of `unsafe`.
 
+pub mod callback;
+#[cfg(feature = "cpal")]
+pub mod output;
 pub mod ring;
 
+pub use callback::{OutputCallback, OutputStats};
+#[cfg(feature = "cpal")]
+pub use output::{Output, OutputConfig, OutputError};
 pub use ring::{Consumer, Producer, ring};
