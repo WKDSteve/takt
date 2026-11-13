@@ -54,8 +54,11 @@ use crate::render::{self, Shown, gpu::Nv12Image};
 const SOURCE_MILLIS: i64 = 3_600_000;
 /// Frames of the pool of the test source.
 const POOL_FRAMES: usize = 6;
-/// What the overlay shows: when it was read, its lines and the error classes.
-type ShownDiagnostics = (Instant, Vec<(&'static str, String)>, [u32; 16]);
+/// What the overlay read last: when, its lines and the error classes.
+type ShownDiagnostics = (Instant, Vec<diagnostics::Line>, [u32; 16]);
+
+/// Changed lines the overlay takes per pass ([`diagnostics::trickle`]).
+const OVERLAY_LINES_PER_PASS: usize = 1;
 
 /// How often the overlay reads the counters again.
 const OVERLAY_INTERVAL: Duration = Duration::from_millis(250);
@@ -105,6 +108,10 @@ struct PlayerApp {
     saved: Option<String>,
     /// What the overlay shows, with the time it was read.
     shown_diagnostics: Option<ShownDiagnostics>,
+    /// The lines on screen, which follow the lines read last a line per pass, and the line
+    /// taken last.
+    overlay_lines: Vec<diagnostics::Line>,
+    overlay_cursor: usize,
     /// The target of the last jump, until the first frame after it is shown.
     seek_probe: Option<i64>,
     /// The last jump: its target and the timestamp of the first frame shown
@@ -145,6 +152,8 @@ impl PlayerApp {
             overlay_cost: takt_audio::DurationHistogram::default(),
             saved: None,
             shown_diagnostics: None,
+            overlay_lines: Vec::new(),
+            overlay_cursor: 0,
             seek_probe: None,
             last_seek: None,
             scrub: None,
@@ -440,6 +449,8 @@ impl PlayerApp {
         let start = Instant::now();
         // Read four times a second: numbers that change every pass cannot be
         // read anyway, and unchanged text keeps its layout in egui's cache.
+        // What changed comes on screen a line per pass, so no pass lays out
+        // all the text at once.
         let stale = self
             .shown_diagnostics
             .as_ref()
@@ -452,9 +463,16 @@ impl PlayerApp {
                 snapshot.scheduler.histogram,
             ));
         }
-        let Some((_, lines, classes)) = &self.shown_diagnostics else {
+        let Some((_, latest, classes)) = &self.shown_diagnostics else {
             return;
         };
+        diagnostics::trickle(
+            &mut self.overlay_lines,
+            latest,
+            &mut self.overlay_cursor,
+            OVERLAY_LINES_PER_PASS,
+        );
+        let lines = &self.overlay_lines;
         egui::Area::new(egui::Id::new("diagnostics"))
             .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
             .interactable(false)

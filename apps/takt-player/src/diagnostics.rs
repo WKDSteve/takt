@@ -322,6 +322,41 @@ fn measure(into: &Weak<Mutex<Option<ProcessLoad>>>) {
     }
 }
 
+/// A line of the overlay: its label and its value.
+pub type Line = (&'static str, String);
+
+/// Takes at most `most` changed lines of `latest` into `shown`, starting behind the line taken
+/// last (`cursor`), and says how many it took.
+///
+/// The overlay reads its numbers a few times a second, and then nearly every line is new. Text
+/// that changed is laid out again, so taking them all in one pass makes that pass several times
+/// as expensive as the others; one line per pass spreads the work, and every line is still up to
+/// date within a few passes. Lines that came or went are taken at once: that is rare.
+pub fn trickle(shown: &mut Vec<Line>, latest: &[Line], cursor: &mut usize, most: usize) -> usize {
+    let same_shape =
+        shown.len() == latest.len() && shown.iter().zip(latest).all(|(old, new)| old.0 == new.0);
+    if !same_shape {
+        shown.clear();
+        shown.extend(latest.iter().cloned());
+        *cursor = 0;
+        return shown.len();
+    }
+    let count = shown.len();
+    let mut taken = 0;
+    for step in 0..count {
+        if taken == most {
+            break;
+        }
+        let index = (*cursor + step) % count;
+        if shown[index].1 != latest[index].1 {
+            shown[index].1.clone_from(&latest[index].1);
+            taken += 1;
+            *cursor = (index + 1) % count;
+        }
+    }
+    taken
+}
+
 /// The p50 upper bound and maximum of `cost`, once something was recorded.
 #[must_use]
 pub fn overlay_cost(cost: &DurationSnapshot) -> Option<(u64, u64)> {
@@ -331,6 +366,54 @@ pub fn overlay_cost(cost: &DurationSnapshot) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(values: &[&str]) -> Vec<Line> {
+        const LABELS: [&str; 4] = ["a", "b", "c", "d"];
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (LABELS[i], (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn changed_lines_trickle_in_one_per_pass_and_all_arrive() {
+        let mut shown = lines(&["1", "2", "3", "4"]);
+        let latest = lines(&["1", "20", "30", "40"]);
+        let mut cursor = 0;
+        assert_eq!(trickle(&mut shown, &latest, &mut cursor, 1), 1);
+        assert_eq!(shown, lines(&["1", "20", "3", "4"]));
+        assert_eq!(trickle(&mut shown, &latest, &mut cursor, 1), 1);
+        assert_eq!(trickle(&mut shown, &latest, &mut cursor, 1), 1);
+        assert_eq!(shown, latest);
+        // Nothing left: a pass without work.
+        assert_eq!(trickle(&mut shown, &latest, &mut cursor, 1), 0);
+    }
+
+    #[test]
+    fn no_line_starves_while_the_others_keep_changing() {
+        let mut shown = lines(&["0", "0", "0", "0"]);
+        let mut cursor = 0;
+        // Every pass all lines are new again: the cursor still gets around to each.
+        for pass in 1..=4 {
+            let text = pass.to_string();
+            let latest = lines(&[&text, &text, &text, &text]);
+            assert_eq!(trickle(&mut shown, &latest, &mut cursor, 1), 1);
+        }
+        assert_eq!(shown, lines(&["1", "2", "3", "4"]));
+    }
+
+    #[test]
+    fn lines_that_come_or_go_are_taken_at_once() {
+        let mut shown = lines(&["1", "2"]);
+        let latest = lines(&["1", "2", "3"]);
+        let mut cursor = 1;
+        assert_eq!(trickle(&mut shown, &latest, &mut cursor, 1), 3);
+        assert_eq!((shown.clone(), cursor), (latest, 0));
+        let mut empty = Vec::new();
+        assert_eq!(trickle(&mut empty, &shown, &mut cursor, 1), 3);
+        assert_eq!(trickle(&mut empty, &[], &mut cursor, 1), 0);
+    }
 
     fn snapshot() -> Snapshot {
         let mut scheduler = SchedulerStats {
