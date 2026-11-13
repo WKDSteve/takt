@@ -73,3 +73,17 @@ Jede Datei trägt eine `SPDX-License-Identifier`-Kopfzeile, jedes Crate ein eige
 ## Mitwirken
 
 Beiträge unter [Developer Certificate of Origin](LICENSES/DCO.txt) — siehe [CONTRIBUTING.md](CONTRIBUTING.md).
+
+<!-- connections:begin (written by the app-icons tool of the workshop; change integrations.json there, not this block) -->
+## Connections
+
+![takt: what it uses and what uses it](assets/graphs/takt.png)
+
+**Uses**
+
+- [streamtap](https://github.com/WKDSteve/streamtap): takt documents a protocol for external sources (`docs/SOURCES.md`) that providers such as streamtap are to deliver through. ([picture](assets/graphs/pair/takt--streamtap.png))
+
+**Used by**
+
+- [hub-desktop](https://github.com/WKDSteve/hub-desktop): hub-desktop lists takt as a tile. ([picture](assets/graphs/pair/hub-desktop--takt.png))
+<!-- connections:end -->
