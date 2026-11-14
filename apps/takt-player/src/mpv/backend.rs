@@ -106,6 +106,10 @@ const EARLY_STEP_MICROS: u32 = 200;
 const COUNTER_PASSES: u64 = 16;
 /// The longest label of a track shown to the user, in characters.
 const LABEL_CHARS: usize = 60;
+/// The most tracks of one kind a list names, and the most entries of the
+/// track list of mpv looked at for them: a file decides how many it has.
+const LISTED_TRACKS: usize = 32;
+const TRACK_LIST_ENTRIES: i64 = 256;
 
 /// The options of every core. No configuration, scripts or network helper of
 /// the user, no window (`vo=libmpv` is the render API), no text of mpv in
@@ -193,6 +197,18 @@ struct Loading {
     started: bool,
 }
 
+/// How far a jump mpv was asked for has come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Jump {
+    /// None is on its way.
+    Done,
+    /// Asked for; mpv has not begun it. Its position is still the old one,
+    /// and it does not call itself seeking yet.
+    Asked,
+    /// mpv is at it; its position is the target.
+    Begun,
+}
+
 /// A track to choose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Track {
@@ -200,6 +216,18 @@ pub enum Track {
     Audio,
     /// The subtitle track.
     Subtitle,
+}
+
+/// A track of the open file, for a list to choose from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackEntry {
+    /// The number mpv gave it; what [`MpvBackend::select_track`] takes.
+    pub id: i64,
+    /// Its number, and its language and title when the file names them.
+    /// The text of the file is foreign: cut to a line, never interpreted.
+    pub label: String,
+    /// It is the one that plays.
+    pub selected: bool,
 }
 
 /// libmpv as a [`VideoBackend`].
@@ -224,6 +252,8 @@ pub struct MpvBackend {
     pool: Option<FramePool>,
     /// The video changed: look at its size again before the next frame.
     refit: bool,
+    /// The jump that is on its way.
+    jump: Jump,
     /// The file mpv was asked for and has not opened yet.
     loading: Option<Loading>,
     /// How the last load ended, until [`MpvBackend::poll_open`] takes it.
@@ -473,6 +503,7 @@ impl MpvBackend {
             size: None,
             pool: None,
             refit: false,
+            jump: Jump::Done,
             loading: None,
             opened: None,
             loaded: false,
@@ -538,10 +569,29 @@ impl MpvBackend {
         })
     }
 
-    /// Whether mpv is still on its way to the target of the last jump: a
-    /// frame that comes meanwhile may be one from before it.
+    /// Whether mpv is still on its way to the target of the last jump. A
+    /// frame that comes meanwhile may be one from before it, and whichever
+    /// it is, it carries the target as its time, not its own
+    /// ([`VideoBackend::next_frame`]).
+    ///
+    /// The events of mpv decide (a jump begins, playback goes on), as far
+    /// as [`VideoBackend::next_frame`] has taken them: right after the
+    /// command mpv does not call itself seeking yet and still names the old
+    /// position, so its property alone would call a jump over before it
+    /// began. The property is asked as well, for a second jump that was
+    /// asked for while the first one ended.
     pub fn seeking(&mut self) -> bool {
-        self.mpv.flag(c"seeking").unwrap_or(false)
+        self.jump != Jump::Done || self.mpv.flag(c"seeking").unwrap_or(false)
+    }
+
+    /// Where mpv is in the file, in milliseconds: the time of the frame it
+    /// shows, or the target of a jump while it is on its way there
+    /// ([`MpvBackend::seeking`]). `None` when nothing plays.
+    pub fn position_millis(&mut self) -> Option<i64> {
+        self.mpv
+            .double(c"time-pos")
+            .and_then(micros)
+            .map(|micros| micros / 1_000)
     }
 
     /// Pauses or resumes mpv (picture and sound) and its clock.
@@ -594,6 +644,81 @@ impl MpvBackend {
         self.mpv
             .command("cycle", &["cycle", property])
             .map_err(backend_error)?;
+        Ok(self.track_label(kind))
+    }
+
+    /// The tracks of `kind` the open file has, in the order of the file, at
+    /// most [`LISTED_TRACKS`]; empty when nothing plays. A subtitle file
+    /// that was added counts as a track.
+    pub fn tracks(&mut self, kind: Track) -> Vec<TrackEntry> {
+        let wanted = match kind {
+            Track::Audio => "audio",
+            Track::Subtitle => "sub",
+        };
+        let count = self
+            .mpv
+            .int(c"track-list/count")
+            .unwrap_or(0)
+            .clamp(0, TRACK_LIST_ENTRIES);
+        let mut out = Vec::new();
+        for index in 0..count {
+            if out.len() >= LISTED_TRACKS {
+                break;
+            }
+            let mut text = |field: &str| {
+                CString::new(format!("track-list/{index}/{field}"))
+                    .ok()
+                    .and_then(|name| self.mpv.string(&name))
+            };
+            if text("type").as_deref() != Some(wanted) {
+                continue;
+            }
+            let Some(id) = text("id").and_then(|id| id.parse::<i64>().ok()) else {
+                continue;
+            };
+            let named: Vec<String> = [text("lang"), text("title")]
+                .into_iter()
+                .flatten()
+                .map(|text| label_text(&text))
+                .filter(|text| !text.is_empty())
+                .collect();
+            let label = if named.is_empty() {
+                id.to_string()
+            } else {
+                format!("{id} ({})", named.join(", "))
+            };
+            out.push(TrackEntry {
+                id,
+                label,
+                selected: text("selected").as_deref() == Some("yes"),
+            });
+        }
+        out
+    }
+
+    /// Plays the track of `kind` with the number `id`, or none of that
+    /// kind, and says which one plays now, for a label.
+    ///
+    /// # Errors
+    ///
+    /// When the file has no such track, or mpv refuses.
+    pub fn select_track(&mut self, kind: Track, id: Option<i64>) -> takt_core::Result<String> {
+        let property = match kind {
+            Track::Audio => c"aid",
+            Track::Subtitle => c"sid",
+        };
+        let value = match id {
+            None => "no".to_owned(),
+            Some(id) => {
+                // Only a number the list names: mpv would keep any other
+                // one as a wish for the next file.
+                if !self.tracks(kind).iter().any(|track| track.id == id) {
+                    return Err(Error::SourceUnavailable("no such track".to_owned()));
+                }
+                id.to_string()
+            }
+        };
+        self.mpv.set(property, &value).map_err(backend_error)?;
         Ok(self.track_label(kind))
     }
 
@@ -726,6 +851,7 @@ impl MpvBackend {
         let source = self.checked(source)?;
         self.loaded = false;
         self.eof = true;
+        self.jump = Jump::Done;
         self.stats = BackendStats::default();
         self.loading = None;
         self.opened = None;
@@ -880,9 +1006,13 @@ impl MpvBackend {
                     }
                     Event::Hook { id } => self.on_hook(id),
                     Event::VideoReconfig => self.refit = true,
+                    // A file that starts to play says so with the event of
+                    // a jump that ended; none was asked for yet.
                     Event::StartFile { .. }
                     | Event::FileLoaded
                     | Event::EndFile { .. }
+                    | Event::Seek
+                    | Event::PlaybackRestart
                     | Event::Other => {}
                 }
                 continue;
@@ -892,9 +1022,22 @@ impl MpvBackend {
                 Event::EndFile { .. } | Event::Shutdown => {
                     self.eof = true;
                     self.loaded = false;
+                    self.jump = Jump::Done;
                 }
                 Event::VideoReconfig => self.refit = true,
                 Event::Hook { id } => self.on_hook(id),
+                Event::Seek => {
+                    if self.jump == Jump::Asked {
+                        self.jump = Jump::Begun;
+                    }
+                }
+                // The end of a jump that began after the last one was asked
+                // for; the end of an earlier one says nothing about it.
+                Event::PlaybackRestart => {
+                    if self.jump == Jump::Begun {
+                        self.jump = Jump::Done;
+                    }
+                }
                 Event::StartFile { .. } | Event::FileLoaded | Event::Other => {}
             }
         }
@@ -956,12 +1099,23 @@ impl VideoBackend for MpvBackend {
         };
         self.mpv
             .command("seek", &["seek", &seconds_text(micros), how])
-            .map_err(backend_error)
+            .map_err(backend_error)?;
+        self.jump = Jump::Asked;
+        Ok(())
     }
 
     /// The clock is not asked: mpv decides when a frame is due (module
     /// documentation). Each call is one pass of the display: it publishes the
     /// position of mpv to [`MpvBackend::clock`].
+    ///
+    /// The time of a frame is the position of mpv when it was rendered. In
+    /// the run that is the time of that very frame (measured with a file
+    /// whose picture is its frame number, test
+    /// `a_frame_carries_its_own_time_except_on_the_way_to_a_jump`). While
+    /// mpv is on its way to a jump its position is the target, so the
+    /// picture of the jump carries the target and not its own time: it is
+    /// due at once, which is what a jump wants, and where the jump landed
+    /// is read from [`MpvBackend::position_millis`] once mpv has arrived.
     fn next_frame(&mut self, _clock: &dyn Clock) -> takt_core::Result<Option<PooledFrame>> {
         self.pump();
         self.publish_position();
@@ -1834,6 +1988,193 @@ mod tests {
         // And the same backend opens the next file.
         assert!(backend.open(&clip()).is_ok());
         assert!(!backend.is_eof());
+    }
+
+    /// The long-GOP file (`scripts/make-long-gop-clip.py`): 12 s, keyframes
+    /// at 0 s, 4 s and 8 s and nowhere else, no sound.
+    fn long_gop() -> String {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/long-gop-12s.mkv").to_owned()
+    }
+
+    /// Jumps and returns where the jump landed, in milliseconds, measured
+    /// as the window measures it for its overlay line "seek": the position
+    /// of mpv once it has arrived.
+    fn lands_at(backend: &mut MpvBackend, target: i64, mode: SeekMode) -> i64 {
+        let clock = backend.clock();
+        backend.seek(Timestamp::from_millis(target), mode).unwrap();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            let _ = backend.next_frame(clock.as_ref()).unwrap();
+            if !backend.seeking()
+                && let Some(landed) = backend.position_millis()
+            {
+                return landed;
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        panic!("mpv did not arrive at {target} ms");
+    }
+
+    /// The picture of the long-GOP file is the number of its frame within
+    /// its second: in the run, the time a frame carries is the time of the
+    /// frame that is in it, not of a neighbour. On the way to a jump the
+    /// frames carry the target (or are from before it); once mpv has
+    /// arrived they carry their own time again.
+    #[test]
+    fn a_frame_carries_its_own_time_except_on_the_way_to_a_jump() {
+        /// Which frame of its second the picture holds, and which one its
+        /// time says it is.
+        fn held_and_stamped(frame: &PooledFrame) -> (i64, i64) {
+            let picture = frame.get();
+            let rows = picture.plane(0).unwrap();
+            let at = 32 * picture.stride(0).unwrap() + 32 * 4;
+            let held = (i64::from(rows[at]) - 16 + 4) / 8;
+            (held, picture.meta().pts.ticks() / 40_000 % 25)
+        }
+
+        let mut backend = backend(Sources::Files);
+        backend.open(&long_gop()).unwrap();
+        let mut seen = 0;
+        passes(&mut backend, Duration::from_secs(3), |_, frame| {
+            let (held, stamped) = held_and_stamped(frame);
+            assert_eq!(held, stamped, "frame {seen} of the run");
+            seen += 1;
+            seen < 20
+        });
+        assert_eq!(seen, 20);
+
+        // To 6.5 s: the keyframe before it is at 4 s.
+        backend
+            .seek(Timestamp::from_millis(6_500), SeekMode::Keyframe)
+            .unwrap();
+        let clock = backend.clock();
+        let (mut on_the_way, mut after) = (Vec::new(), 0);
+        let started = Instant::now();
+        while after < 5 && started.elapsed() < Duration::from_secs(5) {
+            let frame = backend.next_frame(clock.as_ref()).unwrap();
+            let seeking = backend.seeking();
+            if let Some(frame) = frame {
+                let millis = frame.get().meta().pts.ticks() / 1_000;
+                if seeking {
+                    on_the_way.push(millis);
+                } else {
+                    let (held, stamped) = held_and_stamped(&frame);
+                    assert_eq!(held, stamped, "after the jump, at {millis} ms");
+                    assert!((4_000..4_600).contains(&millis), "{millis}");
+                    after += 1;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert_eq!(after, 5, "it plays on from the keyframe");
+        // On the way: the target, a frame from before the jump, or (the
+        // event of the arrival came in the same pass) the keyframe itself.
+        assert!(
+            on_the_way
+                .iter()
+                .all(|&ms| ms == 6_500 || ms == 4_000 || ms < 1_200),
+            "{on_the_way:?}"
+        );
+    }
+
+    /// The jump of the window (`SeekMode::Keyframe`) in a file whose
+    /// keyframes are four seconds apart: it lands on the keyframe before the
+    /// target, so never further away than one keyframe distance, and never
+    /// after the target. The exact jump lands on the frame.
+    #[test]
+    fn a_jump_lands_on_the_keyframe_before_its_target_within_one_gop() {
+        const GOP_MILLIS: i64 = 4_000;
+        let mut backend = backend(Sources::Files);
+        let info = backend.open(&long_gop()).unwrap();
+        assert_eq!(
+            info.duration.map(|d| d.ticks() / 100_000),
+            Some(120),
+            "12.0 s"
+        );
+        passes(&mut backend, Duration::from_secs(2), |_, _| false);
+
+        let mut measured = Vec::new();
+        for target in [6_500, 1_000, 7_960, 4_000, 11_000, 3_990, 3_500, 7_900] {
+            let landed = lands_at(&mut backend, target, SeekMode::Keyframe);
+            measured.push((target, landed));
+            let keyframe = target / GOP_MILLIS * GOP_MILLIS;
+            assert!(
+                (keyframe..keyframe + 80).contains(&landed),
+                "to {target}: landed at {landed}, keyframe {keyframe}"
+            );
+            assert!(target - landed < GOP_MILLIS && landed <= target + 80);
+        }
+        // For docs/reviews/phase-0.md (`--nocapture`).
+        println!("keyframe jumps (target, landed) in ms: {measured:?}");
+
+        let mut exact = Vec::new();
+        for target in [6_500, 1_000, 7_960] {
+            let landed = lands_at(&mut backend, target, SeekMode::Exact);
+            exact.push((target, landed));
+            // The frame at the target or the one after it (25 fps).
+            assert!(
+                (target..target + 80).contains(&landed),
+                "exact to {target}: landed at {landed}"
+            );
+        }
+        println!("exact jumps (target, landed) in ms: {exact:?}");
+    }
+
+    #[test]
+    fn the_tracks_of_a_file_are_listed_and_one_is_chosen_by_its_number() {
+        let mut backend = backend(Sources::Files);
+        assert!(backend.tracks(Track::Subtitle).is_empty(), "nothing plays");
+        backend.open(&clip()).unwrap();
+        passes(&mut backend, Duration::from_secs(2), |_, _| false);
+
+        let sound = backend.tracks(Track::Audio);
+        assert_eq!(sound.len(), 1);
+        assert_eq!((sound[0].id, sound[0].selected), (1, true));
+        let subtitles = backend.tracks(Track::Subtitle);
+        let labels: Vec<&str> = subtitles.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["1 (deu)", "2 (eng)"]);
+        assert!(subtitles.iter().all(|track| !track.selected));
+
+        // The second one by its number, without stepping through the first.
+        assert_eq!(
+            backend.select_track(Track::Subtitle, Some(2)).unwrap(),
+            "subtitles: 2 (eng)"
+        );
+        let chosen: Vec<bool> = backend
+            .tracks(Track::Subtitle)
+            .iter()
+            .map(|track| track.selected)
+            .collect();
+        assert_eq!(chosen, [false, true]);
+        // A number the file does not have changes nothing.
+        assert!(backend.select_track(Track::Subtitle, Some(7)).is_err());
+        assert!(backend.select_track(Track::Subtitle, Some(-1)).is_err());
+        assert_eq!(backend.mpv.string(c"sid").as_deref(), Some("2"));
+        // None of them.
+        assert_eq!(
+            backend.select_track(Track::Subtitle, None).unwrap(),
+            "subtitles: off"
+        );
+        assert!(backend.tracks(Track::Subtitle).iter().all(|t| !t.selected));
+        // The sound track off and on again.
+        assert_eq!(
+            backend.select_track(Track::Audio, None).unwrap(),
+            "audio: off"
+        );
+        assert!(
+            backend
+                .select_track(Track::Audio, Some(1))
+                .unwrap()
+                .starts_with("audio: 1")
+        );
+
+        // A subtitle file that was added is a track of the list.
+        let folder = Folder::new("track-list");
+        let added = folder.write("extra.srt", &srt("added"));
+        backend.add_subtitles(&added).unwrap();
+        let subtitles = backend.tracks(Track::Subtitle);
+        assert_eq!(subtitles.len(), 3);
+        assert_eq!((subtitles[2].id, subtitles[2].selected), (3, true));
     }
 
     #[test]

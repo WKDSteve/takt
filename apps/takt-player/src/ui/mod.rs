@@ -90,7 +90,7 @@ struct PlayerApp {
     /// taken last.
     overlay_lines: Vec<diagnostics::Line>,
     overlay_cursor: usize,
-    /// The target of the last jump, until the first frame after it is shown.
+    /// The target of the last jump, until it is known where it landed.
     seek_probe: Option<i64>,
     /// The last jump: its target and the timestamp of the first frame shown
     /// after it, in milliseconds.
@@ -187,26 +187,14 @@ impl PlayerApp {
                     .accept(self.session.clock(), frame.as_ref(), eof),
                 Presentation::Shown { .. }
             ) {
+                self.probe_seek(None);
                 return;
             }
         }
+        self.probe_seek(frame.as_ref());
         // While paused nothing is counted: a frame that comes all the same
         // (the picture of a jump) is shown.
         if let Some(frame) = frame {
-            // The first frame once the source has arrived at the target; one
-            // that was on its way before the jump does not count.
-            if self.seek_probe.is_some()
-                && self.session.seek_settled()
-                && let Some(target) = self.seek_probe.take()
-            {
-                let landed = frame
-                    .get()
-                    .meta()
-                    .pts
-                    .rescale(Rational::MILLIS)
-                    .map_or(target, Timestamp::ticks);
-                self.last_seek = Some((target, landed));
-            }
             // The frame itself goes to the renderer; it returns to the pool
             // of its source when the next picture has replaced it.
             match Picture::from_frame(frame) {
@@ -454,11 +442,58 @@ impl PlayerApp {
         }
     }
 
+    /// A button of the bar that opens the list of the tracks of `kind`:
+    /// the one that plays is marked, a click plays another one or none. The
+    /// list is read from the source while the menu is open, not otherwise.
+    fn track_menu(&mut self, ui: &mut egui::Ui, title: &str, hint: &str, kind: TrackKind) {
+        let mut chosen = None;
+        ui.menu_button(title, |ui| {
+            let tracks = self.session.tracks(kind);
+            let none = tracks.iter().all(|track| !track.selected);
+            if ui.radio(none, "off").clicked() {
+                chosen = Some(None);
+            }
+            for track in &tracks {
+                if ui.radio(track.selected, &track.label).clicked() {
+                    chosen = Some(Some(track.id));
+                }
+            }
+            if chosen.is_some() {
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text(hint);
+        if let Some(id) = chosen {
+            self.notice = self.session.select_track(kind, id);
+        }
+    }
+
     /// Jumps to `millis`: clock, source and scheduler.
     fn seek_to(&mut self, millis: i64) {
         self.session.seek_to(millis);
         self.scheduler.reset();
         self.seek_probe = Some(millis);
+    }
+
+    /// One pass of the measurement of the last jump: `shown` is the frame
+    /// this pass shows, if it shows one ([`Session::seek_landed`]).
+    fn probe_seek(&mut self, shown: Option<&takt_core::PooledFrame>) {
+        let Some(target) = self.seek_probe else {
+            return;
+        };
+        let millis = shown.and_then(|frame| {
+            frame
+                .get()
+                .meta()
+                .pts
+                .rescale(Rational::MILLIS)
+                .map(Timestamp::ticks)
+        });
+        if let Some(landed) = self.session.seek_landed(millis) {
+            self.last_seek = Some((target, landed));
+            self.seek_probe = None;
+        }
     }
 
     fn now_millis(&self) -> i64 {
@@ -754,6 +789,16 @@ impl eframe::App for PlayerApp {
                 {
                     self.state.set_volume(volume);
                     self.session.set_volume(self.state.effective_volume());
+                }
+                if self.session.is_file() {
+                    ui.separator();
+                    self.track_menu(ui, "Audio", "# steps through them", TrackKind::Audio);
+                    self.track_menu(
+                        ui,
+                        "Subtitles",
+                        "j steps through them, z and x move them",
+                        TrackKind::Subtitle,
+                    );
                 }
                 if let Some(entry) = &self.opening {
                     ui.separator();

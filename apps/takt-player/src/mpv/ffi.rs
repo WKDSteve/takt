@@ -78,6 +78,8 @@ const EVENT_START_FILE: c_int = 6;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_FILE_LOADED: c_int = 8;
 const EVENT_VIDEO_RECONFIG: c_int = 17;
+const EVENT_SEEK: c_int = 20;
+const EVENT_PLAYBACK_RESTART: c_int = 21;
 const EVENT_HOOK: c_int = 25;
 
 const END_FILE_REASON_ERROR: c_int = 4;
@@ -215,6 +217,11 @@ pub enum Event {
         /// What `hook_continue` takes.
         id: u64,
     },
+    /// mpv begins a jump it was asked for.
+    Seek,
+    /// Playback goes on after a jump (or starts, after a file was loaded):
+    /// the position of mpv is that of the frame it shows again.
+    PlaybackRestart,
     /// The core shuts down.
     Shutdown,
     /// Any other event.
@@ -443,6 +450,8 @@ impl Mpv {
                 }
                 EVENT_FILE_LOADED => Event::FileLoaded,
                 EVENT_VIDEO_RECONFIG => Event::VideoReconfig,
+                EVENT_SEEK => Event::Seek,
+                EVENT_PLAYBACK_RESTART => Event::PlaybackRestart,
                 EVENT_HOOK => {
                     let hook = event.data.cast::<RawHook>();
                     if hook.is_null() {

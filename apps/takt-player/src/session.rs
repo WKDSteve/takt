@@ -51,6 +51,17 @@ pub enum TrackKind {
     Subtitle,
 }
 
+/// A track of what plays, for a list to choose from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackChoice {
+    /// What [`Session::select_track`] takes.
+    pub id: i64,
+    /// Its number, language and title, as far as the file names them.
+    pub label: String,
+    /// It is the one that plays.
+    pub selected: bool,
+}
+
 /// The test picture: the moving block of `NullBackend`, 1920x1080 NV12 at
 /// the NTSC rate, one hour long.
 fn test_source() -> NullBackend {
@@ -431,14 +442,27 @@ impl Session {
         }
     }
 
-    /// Whether the source has arrived at the target of the last jump: a
-    /// frame that comes before may be one from before the jump (mpv jumps
-    /// on its own thread; the test picture is there at once).
-    pub fn seek_settled(&mut self) -> bool {
+    /// Where the last jump landed, in milliseconds, once that is known;
+    /// asked once a pass after a jump, with the time of the frame the pass
+    /// shows, if it shows one.
+    ///
+    /// The test picture is there at once: the frame it shows next is where
+    /// it landed. mpv jumps on its own thread, and while it is on its way
+    /// its position is the target and the frames carry that
+    /// (`MpvBackend::next_frame`): where it landed is its position once it
+    /// has arrived, whether a frame comes in that pass or not (paused, the
+    /// picture of the jump came before).
+    pub fn seek_landed(&mut self, shown_millis: Option<i64>) -> Option<i64> {
         match &mut self.kind {
-            Kind::Test(_) => true,
+            Kind::Test(_) => shown_millis,
             #[cfg(takt_libmpv)]
-            Kind::File(file) => !file.source.seeking(),
+            Kind::File(file) => {
+                if file.source.seeking() {
+                    None
+                } else {
+                    file.source.position_millis()
+                }
+            }
         }
     }
 
@@ -479,17 +503,50 @@ impl Session {
                 None
             }
             #[cfg(takt_libmpv)]
-            Kind::File(file) => {
-                let track = match kind {
-                    TrackKind::Audio => Track::Audio,
-                    TrackKind::Subtitle => Track::Subtitle,
-                };
-                Some(
-                    file.source
-                        .cycle_track(track)
-                        .unwrap_or_else(|e| e.to_string()),
-                )
+            Kind::File(file) => Some(
+                file.source
+                    .cycle_track(track_of(kind))
+                    .unwrap_or_else(|e| e.to_string()),
+            ),
+        }
+    }
+
+    /// The tracks of `kind` to choose from; empty for the test picture.
+    pub fn tracks(&mut self, kind: TrackKind) -> Vec<TrackChoice> {
+        match &mut self.kind {
+            Kind::Test(_) => {
+                let _ = kind;
+                Vec::new()
             }
+            #[cfg(takt_libmpv)]
+            Kind::File(file) => file
+                .source
+                .tracks(track_of(kind))
+                .into_iter()
+                .map(|track| TrackChoice {
+                    id: track.id,
+                    label: track.label,
+                    selected: track.selected,
+                })
+                .collect(),
+        }
+    }
+
+    /// Plays the track `id` of `kind` (one of [`Session::tracks`]), or none
+    /// of that kind, and names the one that plays now; `None` when what
+    /// plays has no tracks to choose (the test picture).
+    pub fn select_track(&mut self, kind: TrackKind, id: Option<i64>) -> Option<String> {
+        match &mut self.kind {
+            Kind::Test(_) => {
+                let _ = (kind, id);
+                None
+            }
+            #[cfg(takt_libmpv)]
+            Kind::File(file) => Some(
+                file.source
+                    .select_track(track_of(kind), id)
+                    .unwrap_or_else(|e| e.to_string()),
+            ),
         }
     }
 
@@ -639,6 +696,14 @@ impl Session {
     }
 }
 
+#[cfg(takt_libmpv)]
+const fn track_of(kind: TrackKind) -> Track {
+    match kind {
+        TrackKind::Audio => Track::Audio,
+        TrackKind::Subtitle => Track::Subtitle,
+    }
+}
+
 /// What the file says about its colour, and what that means on this
 /// path, for the diagnostics: mpv converts every picture to BT.709, and it
 /// does not tone-map, so HDR is cut off at white.
@@ -727,6 +792,11 @@ mod tests {
         assert_eq!(session.pool().1, TEST_POOL_FRAMES);
         assert!(session.audio_line().starts_with("SIMULATED"));
         assert_eq!(session.cycle_track(TrackKind::Subtitle), None);
+        assert!(session.tracks(TrackKind::Audio).is_empty());
+        assert_eq!(session.select_track(TrackKind::Subtitle, Some(1)), None);
+        // A jump of the test picture landed where its next frame is.
+        assert_eq!(session.seek_landed(None), None);
+        assert_eq!(session.seek_landed(Some(90_000)), Some(90_000));
         assert_eq!(session.shift_subtitles(100), None);
         assert_eq!(
             session.add_subtitles(Path::new("film.srt")),
@@ -860,6 +930,47 @@ mod tests {
         assert!(!session.is_file());
         assert_eq!(std::ptr::from_ref(session.master()), first);
         assert!(session.next_frame().is_ok());
+    }
+
+    /// A jump in a file landed on the keyframe before its target (the test
+    /// file has one every second), and the tracks are there to choose from.
+    #[cfg(takt_libmpv)]
+    #[test]
+    fn a_jump_in_a_file_is_measured_and_its_tracks_are_listed() {
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pattern-3s.mkv");
+        let mut session = session();
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+
+        let labels: Vec<String> = session
+            .tracks(TrackKind::Subtitle)
+            .into_iter()
+            .map(|track| track.label)
+            .collect();
+        assert_eq!(labels, ["1 (deu)", "2 (eng)"]);
+        assert_eq!(
+            session
+                .select_track(TrackKind::Subtitle, Some(2))
+                .as_deref(),
+            Some("subtitles: 2 (eng)")
+        );
+        assert_eq!(
+            session
+                .select_track(TrackKind::Subtitle, Some(9))
+                .as_deref(),
+            Some("Quelle nicht verfuegbar: no such track")
+        );
+
+        session.seek_to(2_500);
+        let started = std::time::Instant::now();
+        let mut landed = None;
+        while landed.is_none() && started.elapsed() < std::time::Duration::from_secs(5) {
+            let shown = session.next_frame().unwrap().map(|_| 0);
+            // What the frame says is not asked: mpv names where it is.
+            landed = session.seek_landed(shown);
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+        assert_eq!(landed, Some(2_000));
     }
 
     /// A film dropped together with its subtitle file: the subtitles are
