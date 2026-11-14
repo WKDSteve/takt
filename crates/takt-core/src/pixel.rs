@@ -28,6 +28,15 @@ pub enum PixelFormat {
     Yuv444P,
     /// 8 Bit pro Kanal, RGBA verschachtelt. Ziel der Compositing-Stufe.
     Rgba8,
+    /// 8 Bit pro Kanal, vier Bytes je Pixel in der Reihenfolge R, G, B, X.
+    ///
+    /// Das vierte Byte ist Fuellung und **kein Alpha**: sein Inhalt ist
+    /// unbestimmt, wer das Bild zeichnet, behandelt es als deckend. Das ist
+    /// `rgb0` von FFmpeg und mpv, das Format, in dem ein Software-Renderer
+    /// ein fertig gewandeltes Bild (samt eingezeichneter Untertitel) abgibt.
+    /// Vier Bytes statt drei, weil Zeilen und Pixel dann auf Wortgrenzen
+    /// liegen und eine GPU-Textur (`Rgba8`) sie ohne Umpacken annimmt.
+    Rgb0,
     /// 16 Bit Gleitkomma pro Kanal. Zwischenformat fuer HDR-Compositing.
     Rgba16F,
 }
@@ -39,7 +48,7 @@ impl PixelFormat {
         match self {
             Self::Nv12 | Self::P010 => 2,
             Self::Yuv420P | Self::Yuv420P10 | Self::Yuv444P => 3,
-            Self::Rgba8 | Self::Rgba16F => 1,
+            Self::Rgba8 | Self::Rgb0 | Self::Rgba16F => 1,
         }
     }
 
@@ -47,7 +56,7 @@ impl PixelFormat {
     #[must_use]
     pub const fn bit_depth(self) -> u8 {
         match self {
-            Self::Nv12 | Self::Yuv420P | Self::Yuv444P | Self::Rgba8 => 8,
+            Self::Nv12 | Self::Yuv420P | Self::Yuv444P | Self::Rgba8 | Self::Rgb0 => 8,
             Self::P010 | Self::Yuv420P10 => 10,
             Self::Rgba16F => 16,
         }
@@ -65,7 +74,33 @@ impl PixelFormat {
     /// Ob das Format bereits im RGB-Raum liegt.
     #[must_use]
     pub const fn is_rgb(self) -> bool {
+        matches!(self, Self::Rgba8 | Self::Rgb0 | Self::Rgba16F)
+    }
+
+    /// Ob das Format einen Alphakanal traegt.
+    ///
+    /// [`PixelFormat::Rgb0`] hat vier Bytes je Pixel, aber keinen: sein
+    /// viertes Byte darf nie als Deckkraft gelesen werden.
+    #[must_use]
+    pub const fn has_alpha(self) -> bool {
         matches!(self, Self::Rgba8 | Self::Rgba16F)
+    }
+
+    /// Komponenten je Pixel in der Ebene `plane`, Fuellbytes mitgezaehlt;
+    /// 0 fuer eine Ebene, die das Format nicht hat.
+    ///
+    /// Zusammen mit [`PixelFormat::bit_depth`] ergibt das die Bytes je Pixel
+    /// einer Zeile: 4 bei [`PixelFormat::Rgba8`] und [`PixelFormat::Rgb0`],
+    /// 2 in der Chroma-Ebene von [`PixelFormat::Nv12`].
+    #[must_use]
+    pub const fn components(self, plane: usize) -> usize {
+        match (self, plane) {
+            // Verschachteltes Chroma haelt U und V nebeneinander.
+            (Self::Nv12 | Self::P010, 1) => 2,
+            (Self::Rgba8 | Self::Rgb0 | Self::Rgba16F, 0) => 4,
+            (_, p) if p < self.planes() => 1,
+            _ => 0,
+        }
     }
 }
 
@@ -140,6 +175,31 @@ mod tests {
         assert_eq!(PixelFormat::Yuv420P.planes(), 3);
         assert_eq!(PixelFormat::Rgba8.planes(), 1);
         assert_eq!(PixelFormat::P010.bit_depth(), 10);
+    }
+
+    #[test]
+    fn rgb0_ist_rgb_mit_fuellbyte_statt_alpha() {
+        let f = PixelFormat::Rgb0;
+        assert_eq!(f.planes(), 1);
+        assert_eq!(f.bit_depth(), 8);
+        assert!(f.is_rgb());
+        assert!(!f.is_subsampled_420());
+        // Vier Bytes je Pixel wie Rgba8, aber das vierte ist keine Deckkraft.
+        assert_eq!(f.components(0), 4);
+        assert_eq!(f.components(0), PixelFormat::Rgba8.components(0));
+        assert!(!f.has_alpha());
+        assert!(PixelFormat::Rgba8.has_alpha());
+        assert!(!PixelFormat::Nv12.has_alpha());
+    }
+
+    #[test]
+    fn komponenten_je_ebene() {
+        assert_eq!(PixelFormat::Nv12.components(0), 1);
+        assert_eq!(PixelFormat::Nv12.components(1), 2);
+        assert_eq!(PixelFormat::Nv12.components(2), 0, "NV12 hat zwei Ebenen");
+        assert_eq!(PixelFormat::Yuv420P.components(2), 1);
+        assert_eq!(PixelFormat::Rgba16F.components(0), 4);
+        assert_eq!(PixelFormat::Rgb0.components(1), 0);
     }
 
     #[test]

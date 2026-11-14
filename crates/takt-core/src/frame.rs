@@ -81,7 +81,7 @@ impl VideoFrame {
         for plane in 0..planes {
             let (pw, ph) = plane_dims(meta.format, plane, w, h)?;
             let bytes_per_sample = usize::from(meta.format.bit_depth() > 8) + 1;
-            let components = plane_components(meta.format, plane);
+            let components = meta.format.components(plane);
             let stride = pw * bytes_per_sample * components;
             data.push(vec![0_u8; stride * ph]);
             strides.push(stride);
@@ -149,16 +149,6 @@ fn plane_dims(
         (PixelFormat::Yuv444P, 1 | 2) => (width, height),
         _ => return None,
     })
-}
-
-/// Komponenten pro Pixel in der angegebenen Ebene.
-const fn plane_components(format: PixelFormat, plane: usize) -> usize {
-    match (format, plane) {
-        // Verschachteltes Chroma haelt U und V nebeneinander.
-        (PixelFormat::Nv12 | PixelFormat::P010, 1) => 2,
-        (PixelFormat::Rgba8 | PixelFormat::Rgba16F, 0) => 4,
-        _ => 1,
-    }
 }
 
 /// Ein Frame, das bei `Drop` in seinen Pool zurueckkehrt.
@@ -294,6 +284,30 @@ mod tests {
         assert!(f.plane(2).is_none());
         // 1,5 Bytes pro Pixel bei 4:2:0.
         assert_eq!(f.byte_size(), 1920 * 1080 * 3 / 2);
+    }
+
+    #[test]
+    fn rgb0_hat_eine_ebene_mit_vier_bytes_je_pixel() {
+        let mut f = VideoFrame::alloc(meta(PixelFormat::Rgb0)).unwrap();
+        assert_eq!(f.stride(0), Some(1920 * 4));
+        assert_eq!(f.plane(0).unwrap().len(), 1920 * 1080 * 4);
+        assert!(f.plane(1).is_none());
+        assert!(f.stride(1).is_none());
+        assert_eq!(f.byte_size(), 1920 * 1080 * 4);
+        // Dieselbe Groesse wie Rgba8: nur die Bedeutung des vierten Bytes
+        // unterscheidet die beiden.
+        let rgba = VideoFrame::alloc(meta(PixelFormat::Rgba8)).unwrap();
+        assert_eq!(f.byte_size(), rgba.byte_size());
+        f.plane_mut(0).unwrap()[4..8].copy_from_slice(&[10, 20, 30, 0]);
+        assert_eq!(&f.plane(0).unwrap()[4..7], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn ein_pool_fuer_rgb0_gibt_rgb0_aus() {
+        let mut pool = FramePool::new(meta(PixelFormat::Rgb0), 1);
+        let frame = pool.acquire(Timestamp::from_millis(40)).unwrap();
+        assert_eq!(frame.get().meta().format, PixelFormat::Rgb0);
+        assert_eq!(frame.get().stride(0), Some(1920 * 4));
     }
 
     #[test]

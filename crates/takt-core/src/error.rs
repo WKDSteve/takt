@@ -32,6 +32,13 @@ pub enum Error {
     },
     /// Eine Funktion wurde fuer eine noch nicht gebaute Plattform aufgerufen.
     Unsupported(&'static str),
+    /// Eine Quelle liess sich nicht oeffnen: nicht vorhanden, nicht lesbar,
+    /// kein Medium, oder nicht erlaubt. Der Text nennt den Grund und ist fuer
+    /// die Anzeige gedacht; der Name der Quelle ist fremder Text.
+    SourceUnavailable(String),
+    /// Ein Backend hat einen Aufruf abgelehnt (dekodieren, rendern,
+    /// positionieren). Der Text nennt den Aufruf und den Grund.
+    Backend(String),
 }
 
 impl fmt::Display for Error {
@@ -46,6 +53,8 @@ impl fmt::Display for Error {
                 write!(f, "Frame-Pool erschoepft (Kapazitaet {capacity})")
             }
             Self::Unsupported(what) => write!(f, "nicht unterstuetzt: {what}"),
+            Self::SourceUnavailable(why) => write!(f, "Quelle nicht verfuegbar: {why}"),
+            Self::Backend(why) => write!(f, "Backend: {why}"),
         }
     }
 }
@@ -69,6 +78,14 @@ mod tests {
         assert_eq!(
             Error::PoolExhausted { capacity: 4 }.to_string(),
             "Frame-Pool erschoepft (Kapazitaet 4)"
+        );
+        assert_eq!(
+            Error::SourceUnavailable("film.mkv: keine Datei".to_owned()).to_string(),
+            "Quelle nicht verfuegbar: film.mkv: keine Datei"
+        );
+        assert_eq!(
+            Error::Backend("seek: abgelehnt".to_owned()).to_string(),
+            "Backend: seek: abgelehnt"
         );
     }
 }
