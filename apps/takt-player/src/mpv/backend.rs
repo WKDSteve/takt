@@ -36,6 +36,27 @@
 //!   differ in their tags alone; they fail on a libmpv that converts
 //!   otherwise (one built without zimg applies the matrix only).
 //!
+//! # One thread renders and asks
+//!
+//! The render API of mpv wants a thread of its own that never waits for the
+//! core (`render.h`, "Threading"): while the core waits for a frame to be
+//! rendered (after a jump, a load, a change of the subtitles), a question to
+//! the core from the thread that should render blocks both, until mpv gives
+//! up after 200 ms. This backend renders and asks on one thread, the one
+//! that calls it. What it does about it: before it asks mpv anything, it
+//! renders the frame that waits ([`MpvBackend::render_waiting`]) into a
+//! pooled frame it keeps until [`VideoBackend::next_frame`] hands it out, or
+//! tells mpv to count the frame as shown when there is no place for it
+//! (nothing loaded yet). A frame that starts to wait between the check and
+//! the question still costs up to 200 ms. Rendering on a thread of its own,
+//! with the properties observed and not asked, is what removes it.
+//!
+//! Commands that answer later (`mpv_command_async`) are not used: reading
+//! subtitle files that way froze the core of mpv 0.41 for good in about one
+//! run of nine when several ended at the same time, and always when a file
+//! was loaded while one was being read. `sub-add` therefore waits for mpv
+//! (a local file: milliseconds).
+//!
 //! # What may be opened
 //!
 //! [`Sources::Files`] takes a file that exists and nothing else: a text that
@@ -250,6 +271,9 @@ pub struct MpvBackend {
     /// Width and height of the picture, `None` without video.
     size: Option<(u32, u32)>,
     pool: Option<FramePool>,
+    /// The frame rendered since the last call of
+    /// [`VideoBackend::next_frame`], until that hands it out.
+    ready: Option<PooledFrame>,
     /// The video changed: look at its size again before the next frame.
     refit: bool,
     /// The jump that is on its way.
@@ -504,6 +528,7 @@ impl MpvBackend {
             time,
             size: None,
             pool: None,
+            ready: None,
             refit: false,
             jump: Jump::Done,
             loading: None,
@@ -603,6 +628,7 @@ impl MpvBackend {
     ///
     /// [`Error::Backend`] when mpv refuses.
     pub fn set_paused(&mut self, paused: bool) -> takt_core::Result<()> {
+        self.settle();
         self.mpv
             .set(c"pause", if paused { "yes" } else { "no" })
             .map_err(backend_error)?;
@@ -654,6 +680,7 @@ impl MpvBackend {
     /// most [`LISTED_TRACKS`]; empty when nothing plays. A subtitle file
     /// that was added counts as a track.
     pub fn tracks(&mut self, kind: Track) -> Vec<TrackEntry> {
+        self.settle();
         let wanted = match kind {
             Track::Audio => "audio",
             Track::Subtitle => "sub",
@@ -762,6 +789,7 @@ impl MpvBackend {
             return Err(Error::SourceUnavailable("no file plays".to_owned()));
         }
         let path = self.checked(path)?;
+        self.settle();
         self.mpv
             .command("sub-add", &["sub-add", &path, "select"])
             .map_err(|_| Error::SourceUnavailable("mpv cannot read it as subtitles".to_owned()))?;
@@ -852,6 +880,8 @@ impl MpvBackend {
     /// command; nothing is loading then.
     pub fn begin_open(&mut self, source: &str) -> takt_core::Result<()> {
         let source = self.checked(source)?;
+        self.settle();
+        self.ready = None;
         self.loaded = false;
         self.eof = true;
         self.jump = Jump::Done;
@@ -872,6 +902,7 @@ impl MpvBackend {
     /// is still opening (or nothing was asked), then once the description of
     /// the file or why it does not play. Never waits.
     pub fn poll_open(&mut self) -> Option<takt_core::Result<MediaInfo>> {
+        self.settle();
         self.pump();
         let limit = self.open_timeout;
         if self
@@ -990,6 +1021,77 @@ impl MpvBackend {
         Ok(())
     }
 
+    /// Renders the frame that waits at mpv, if one does, into a pooled
+    /// frame kept in `ready` (a frame that was kept and not handed out is
+    /// replaced). Without a place for it (nothing loaded, no picture) mpv
+    /// is told to count it as shown. Either way the core of mpv no longer
+    /// waits for this thread (module documentation).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PoolExhausted`] when every frame is out: the picture of mpv
+    /// keeps waiting and is rendered by the call that finds a frame again.
+    fn render_waiting(&mut self) -> takt_core::Result<()> {
+        let (Some((width, height)), Some(pool), true) =
+            (self.size, self.pool.as_mut(), self.loaded)
+        else {
+            if self.mpv.frame_ready() {
+                self.mpv.discard_frame().map_err(backend_error)?;
+            }
+            return Ok(());
+        };
+        // The frame first, then the question whether mpv has a picture
+        // (the question takes the picture off the list of mpv). With every
+        // frame out, the one that was kept and not handed out is the place:
+        // it is the frame this render replaces anyway.
+        let fresh = pool.acquire(self.clock.now());
+        let reused = fresh.is_none();
+        let Some(mut frame) = fresh.or_else(|| self.ready.take()) else {
+            return Err(Error::PoolExhausted {
+                capacity: pool.capacity(),
+            });
+        };
+        if !self.mpv.frame_ready() {
+            // Nothing new: what was kept stays kept.
+            if reused {
+                self.ready = Some(frame);
+            }
+            return Ok(());
+        }
+
+        let before = Instant::now();
+        let geometry = Error::InvalidGeometry { width, height };
+        let picture = frame.get_mut();
+        let stride = picture.stride(0).ok_or(geometry.clone())?;
+        // mpv writes into the plane of the frame itself: it starts aligned
+        // and its stride is aligned (`takt_core::VideoFrame`).
+        let target = picture
+            .plane_mut(0)
+            .and_then(|rows| Target::new(rows, width, height, stride))
+            .ok_or(geometry)?;
+        self.mpv.render(target).map_err(backend_error)?;
+        // The position of the frame just rendered; without one (the very
+        // first frame of some files) the clock itself, an error of zero.
+        let position = self
+            .mpv
+            .double(c"time-pos")
+            .and_then(micros)
+            .map_or_else(|| self.clock.now(), |t| Timestamp::new(t, Rational::MICROS));
+        picture.set_pts(position);
+        self.render
+            .record(u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        self.stats.decoded += 1;
+        self.stats.queued = pool.in_flight();
+        self.ready = Some(frame);
+        Ok(())
+    }
+
+    /// [`MpvBackend::render_waiting`] before mpv is asked something, where
+    /// a frame that finds no place is not the caller's business.
+    fn settle(&mut self) {
+        let _ = self.render_waiting();
+    }
+
     /// Takes what mpv reported since the last pass. While a load is on its
     /// way, the events of its entry decide how it ends; the events of the
     /// file it replaces are not its own.
@@ -1093,6 +1195,7 @@ impl VideoBackend for MpvBackend {
     }
 
     fn seek(&mut self, to: Timestamp, mode: SeekMode) -> takt_core::Result<()> {
+        self.settle();
         let micros = to
             .rescale(Rational::MICROS)
             .ok_or(Error::TimeOverflow)?
@@ -1121,6 +1224,8 @@ impl VideoBackend for MpvBackend {
     /// due at once, which is what a jump wants, and where the jump landed
     /// is read from [`MpvBackend::position_millis`] once mpv has arrived.
     fn next_frame(&mut self, _clock: &dyn Clock) -> takt_core::Result<Option<PooledFrame>> {
+        // The frame that waits first: only then is mpv asked anything.
+        let rendered = self.render_waiting();
         self.pump();
         self.publish_position();
         self.passes += 1;
@@ -1128,48 +1233,16 @@ impl VideoBackend for MpvBackend {
             self.read_counters();
         }
         if !self.loaded {
+            self.ready = None;
             return Ok(None);
         }
         if self.refit {
+            // The next frame is rendered at the new size; one that was
+            // rendered at the old one is still a whole picture.
             self.fit()?;
         }
-        let (Some((width, height)), Some(pool)) = (self.size, self.pool.as_mut()) else {
-            return Ok(None);
-        };
-        // The frame first, then the question whether mpv has a picture: with
-        // every frame out (`PoolExhausted`) the picture of mpv keeps waiting
-        // and is rendered in the pass that finds a frame again.
-        let mut frame = pool.acquire(self.clock.now()).ok_or(Error::PoolExhausted {
-            capacity: pool.capacity(),
-        })?;
-        if !self.mpv.frame_ready() {
-            return Ok(None);
-        }
-
-        let before = Instant::now();
-        let geometry = Error::InvalidGeometry { width, height };
-        let picture = frame.get_mut();
-        let stride = picture.stride(0).ok_or(geometry.clone())?;
-        // mpv writes into the plane of the frame itself: it starts aligned
-        // and its stride is aligned (`takt_core::VideoFrame`).
-        let target = picture
-            .plane_mut(0)
-            .and_then(|rows| Target::new(rows, width, height, stride))
-            .ok_or(geometry)?;
-        self.mpv.render(target).map_err(backend_error)?;
-        // The position of the frame just rendered; without one (the very
-        // first frame of some files) the clock itself, an error of zero.
-        let position = self
-            .mpv
-            .double(c"time-pos")
-            .and_then(micros)
-            .map_or_else(|| self.clock.now(), |t| Timestamp::new(t, Rational::MICROS));
-        picture.set_pts(position);
-        self.render
-            .record(u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX));
-        self.stats.decoded += 1;
-        self.stats.queued = pool.in_flight();
-        Ok(Some(frame))
+        rendered?;
+        Ok(self.ready.take())
     }
 
     /// Half the period becomes the lead of the frames
@@ -1995,6 +2068,28 @@ mod tests {
         drop(slow);
     }
 
+    /// Giving a backend up while mpv opens a source that never answers
+    /// does not wait for that source: the window does it in its own thread
+    /// when the playlist is emptied.
+    #[test]
+    fn a_backend_that_opens_a_source_that_never_answers_is_dropped_at_once() {
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = slow.local_addr().unwrap().port();
+        let mut opening = backend(Sources::Any);
+        opening
+            .begin_open(&format!("http://127.0.0.1:{port}/slow.mkv"))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(opening.poll_open().is_none(), "still opening");
+        let before = Instant::now();
+        drop(opening);
+        let took = before.elapsed();
+        // For the task and docs/reviews/phase-0.md (`--nocapture`).
+        println!("dropping a backend that opens: {took:?}");
+        assert!(took < Duration::from_millis(500), "{took:?}");
+        drop(slow);
+    }
+
     #[test]
     fn a_file_plays_pauses_jumps_and_ends() {
         let mut backend = backend(Sources::Files);
@@ -2078,6 +2173,8 @@ mod tests {
             if !backend.seeking()
                 && let Some(landed) = backend.position_millis()
             {
+                // For docs/reviews/phase-0.md (`--nocapture`).
+                println!("jump to {target} ms arrived after {:?}", started.elapsed());
                 return landed;
             }
             std::thread::sleep(Duration::from_millis(4));

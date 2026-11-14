@@ -87,6 +87,7 @@ const END_FILE_REASON_ERROR: c_int = 4;
 const RENDER_PARAM_INVALID: c_int = 0;
 const RENDER_PARAM_API_TYPE: c_int = 1;
 const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
+const RENDER_PARAM_SKIP_RENDERING: c_int = 13;
 const RENDER_PARAM_SW_SIZE: c_int = 17;
 const RENDER_PARAM_SW_FORMAT: c_int = 18;
 const RENDER_PARAM_SW_STRIDE: c_int = 19;
@@ -531,6 +532,38 @@ impl Mpv {
         // a `Target` and refuses a slice shorter than that or a stride below
         // four bytes a pixel. The slice is borrowed exclusively until the
         // call returns, and mpv writes no further and keeps no pointer.
+        let code = unsafe { mpv_render_context_render(self.render.as_ptr(), params.as_mut_ptr()) };
+        check("mpv_render_context_render", code)
+    }
+
+    /// Tells mpv the frame that waits was shown, without rendering it
+    /// (`MPV_RENDER_PARAM_SKIP_RENDERING`): for a frame there is no place
+    /// for. mpv goes on as if it had been rendered.
+    ///
+    /// # Errors
+    ///
+    /// [`MpvError`] when mpv refuses.
+    pub fn discard_frame(&mut self) -> Result<(), MpvError> {
+        let mut skip: c_int = 1;
+        let mut no_wait: c_int = 0;
+        let mut params = [
+            RenderParam {
+                kind: RENDER_PARAM_SKIP_RENDERING,
+                data: (&raw mut skip).cast(),
+            },
+            RenderParam {
+                kind: RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                data: (&raw mut no_wait).cast(),
+            },
+            RenderParam {
+                kind: RENDER_PARAM_INVALID,
+                data: ptr::null_mut(),
+            },
+        ];
+        // SAFETY: the render context is live. Both parameters point at an
+        // int, the type render.h names for them, that lives until the call
+        // returns; with rendering skipped mpv needs no target and is given
+        // none (render.h, MPV_RENDER_PARAM_SKIP_RENDERING).
         let code = unsafe { mpv_render_context_render(self.render.as_ptr(), params.as_mut_ptr()) };
         check("mpv_render_context_render", code)
     }
