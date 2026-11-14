@@ -14,9 +14,15 @@
 //! or with `TAKT_AUDIO=sim`, a thread stands in for the callback and the
 //! player says so. For a file, mpv plays the sound and the clock follows it
 //! (`session`).
+//!
+//! A release build for Windows is a window program: started from the Start
+//! menu it opens no console window next to the player. Started from a
+//! terminal it writes there all the same (`console`).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod audio;
+mod console;
 mod diagnostics;
 mod headless;
 #[cfg(takt_libmpv)]
@@ -61,6 +67,8 @@ fn files(args: &[String]) -> Vec<PathBuf> {
 }
 
 fn main() -> ExitCode {
+    // Before the first line is written: a window program has no console of its own.
+    console::attach_parent();
     // `--keys`: the list of keys as Markdown (the text of docs/KEYS.md).
     if std::env::args().skip(1).any(|arg| arg == "--keys") {
         print!("{}", app::keys_markdown());

@@ -19,7 +19,9 @@ checks:
   else's refused; a Claude session refused; then the installed uninstall.ps1, twice.
 
 With -Zip the zip of a real build is checked too, against the takt-player.exe of -BuildDir (the
-rolling workflow checks the zip it is about to publish this way).
+rolling workflow checks the zip it is about to publish this way), and that program must be a window
+program: a console program opens a console window next to the player when it is started from the
+Start menu.
 
 Exit 0 when all checks pass.
 
@@ -59,6 +61,13 @@ function Write-Check([bool] $Passed, [string] $Name) {
 }
 
 function Get-Sha([string] $Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
+# The subsystem of a program of Windows, from its header: 2 is a window program, 3 a console program.
+function Get-Subsystem([string] $Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+    return [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+}
 
 # A script in a child PowerShell; the child runs without CLAUDECODE (all its places are temp places).
 function Invoke-Child([string] $Script, [string[]] $Arguments, [string] $Shell = 'pwsh') {
@@ -192,6 +201,7 @@ try {
         if (-not $BuildDir) { throw 'test-release.ps1: -Zip needs -BuildDir' }
         $want = if ($Label) { $Label } else { ([IO.File]::ReadAllText((Join-Path (Expand-Zip $Zip) 'VERSION'))).Trim() }
         $null = Test-Zip (Resolve-Path -LiteralPath $Zip).ProviderPath (Join-Path $BuildDir 'takt-player.exe') $want 'the build'
+        Write-Check ((Get-Subsystem (Join-Path $BuildDir 'takt-player.exe')) -eq 2) 'the build: takt-player.exe is a window program (no console window at its start)'
     }
 }
 finally {
