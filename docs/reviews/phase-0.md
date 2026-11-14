@@ -63,11 +63,78 @@ Derselbe Push deckte einen zweiten, unabhängigen Fehler auf: `AudioClockWriter`
 
 **Festgelegt:** `cargo doc --no-deps` mit `-D warnings` bleibt ein Pflichtschritt der CI, nicht nur eine Empfehlung. Es ist die billigste automatisierte Prüfung dafür, dass die öffentliche API in sich konsistent ist — deutlich billiger als der Moment, in dem ein externer Nutzer versucht, einen Typ zu benennen, den er nur indirekt aus einer Signatur kennt.
 
+### A/B-Messprotokoll — Präsentationsfehler je Pfad
+
+Die Zahlen, an denen Phase 1 gemessen wird (Leitprinzip 6, libmpv als Referenz-Orakel): dasselbe Testbild (1920×1080, bewegtes Muster), je Bildrate fünf Minuten, je Pfad eine Zeile. Wiederholbar mit `scripts/ab-measure.py`:
+
+```sh
+cargo build --release -p takt-player
+python scripts/ab-measure.py --device "<stummes Ausgabegerät>"   # NullBackend, kopflos
+python scripts/ab-measure.py --mpv-sw                            # libmpv über den Software-Renderer, kopflos
+python scripts/ab-measure.py --mpv                               # mpv selbst, braucht einen echten Bildschirm
+```
+
+Die Pfade messen nicht dasselbe, deshalb steht bei jedem, was seine Zahl bedeutet:
+
+* **NullBackend, kopflos** (`takt-player --headless --fps … --hz … --seconds …`): der Scheduler von Takt gegen die Audio-Master-Uhr, die der cpal-Callback des genannten Geräts stellt. Die Anzeige ist simuliert: ein Durchlauf je Periode auf festem Raster, kein vsync. Der Fehler ist der Abstand zwischen dem Zeitstempel des Frames und der Uhr in dem Durchlauf, der es nimmt. Das p99 ist die Obergrenze seiner Histogrammklasse (die Klassen verdoppeln sich, die Grenze ist höchstens doppelt so groß wie der wahre Wert) und nie größer als der größte Fehler des Laufs.
+* **libmpv, Software-Renderer, kopflos** (`--headless --mpv QUELLE`, nur in einem Build mit `TAKT_LIBMPV_DIR`): libmpv dekodiert dasselbe Muster (aus lavfi, mit stummer Tonspur, `ao=null`) und hält seine eigene Uhr; Takt fragt je Durchlauf, ob ein Frame wartet, und rendert es in den Speicher (`rgb0`). Der Fehler ist `audio-pts − time-pos` von mpv in diesem Durchlauf, exakt aus allen Werten nach der ersten Sekunde (mpv beginnt eine Datei mit rund 30 ms Vorlauf des Bilds und schließt die Lücke über etwa 20 Frames).
+* **mpv selbst** (`mpv --video-sync=display-resample` und `--video-sync=audio`, `scripts/ab-mpv-stats.lua`): mpv im Vollbild gegen die echte Bildwiederholung. mpv führt kein Histogramm der Präsentationsfehler; die Zeile nennt stattdessen `vsync-jitter` und die Zähler `vo-delayed-frame-count`, `mistimed-frame-count` und `frame-drop-count`.
+
+„wiederholt/min“ sind Durchläufe ohne neues Frame. „erwartet/min“ ist (Hz − fps) · 60: der Anteil, der aus dem Verhältnis von Bildrate und Bildwiederholung folgt und kein Fehler ist.
+
+| Datum | Hardware | Quelle | Pfad | Anzeige | Mittel | p99 | wiederholt/min | erwartet/min | verworfen/min |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 23,976 fps, 300 s | NullBackend, kopflos (Gerät) | 60 Hz simuliert | 4,19 ms | < 10,40 ms | 2161,5 | 2161,4 | 0,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 25,000 fps, 300 s | NullBackend, kopflos (Gerät) | 60 Hz simuliert | 4,10 ms | < 8,19 ms | 2098,8 | 2100,0 | 0,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 50,000 fps, 300 s | NullBackend, kopflos (Gerät) | 60 Hz simuliert | 4,11 ms | < 8,19 ms | 600,0 | 600,0 | 0,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 60,000 fps, 300 s | NullBackend, kopflos (Gerät) | 60 Hz simuliert | 3,42 ms | < 8,19 ms | 0,4 | 0,0 | 0,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 23,976 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 0,00 ms; Rendern p99 < 1,79 ms) | 60 Hz simuliert | 9,53 ms | 17,89 ms | 2162,0 | 2161,4 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 25,000 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 0,00 ms; Rendern p99 < 2,56 ms) | 60 Hz simuliert | 9,70 ms | 16,78 ms | 2101,0 | 2100,0 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 50,000 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 0,00 ms; Rendern p99 < 2,56 ms) | 60 Hz simuliert | 10,53 ms | 17,50 ms | 601,0 | 600,0 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 60,000 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 0,00 ms; Rendern p99 < 3,58 ms) | 60 Hz simuliert | 3,45 ms | 5,63 ms | 2,0 | 0,0 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 23,976 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 8,33 ms; Rendern p99 < 2,05 ms) | 60 Hz simuliert | 4,25 ms | 9,32 ms | 2161,0 | 2161,4 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 25,000 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 8,33 ms; Rendern p99 < 1,54 ms) | 60 Hz simuliert | 4,29 ms | 8,51 ms | 2100,0 | 2100,0 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 50,000 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 8,33 ms; Rendern p99 < 1,79 ms) | 60 Hz simuliert | 4,38 ms | 9,80 ms | 600,0 | 600,0 | 1,0 |
+| 2026-11-14 | STEVESPC (i5-12400F, RTX 4070 SUPER) | Testbild 60,000 fps, 60 s | libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf 8,33 ms; Rendern p99 < 1,54 ms) | 60 Hz simuliert | 3,67 ms | 4,07 ms | 0,0 | 0,0 | 13,0 |
+
+Was die Zahlen sagen:
+
+* **Der Scheduler von Takt trifft die Theorie.** Geht jedes Frame an die Bildwiederholung, die seinem Zeitstempel am nächsten liegt, ist der Fehler gleichverteilt zwischen 0 und einer halben Periode: im Mittel ein Viertel von 16,67 ms, also 4,17 ms. Gemessen 4,1 bis 4,2 ms bei 23,976, 25 und 50 fps; das p99 liegt bei der halben Periode (8,3 ms; die Tabelle nennt eine Obergrenze). Bei 60 fps auf 60 Hz gibt es keine Schwebung mehr, der Fehler ist die (langsam wandernde) Phase zwischen Geräteuhr und Anzeige.
+* **Keine versteckten Wiederholungen.** „wiederholt/min“ liegt in jeder Zeile innerhalb von 2 je Minute am Erwartungswert; verworfen wird beim NullBackend nichts.
+* **libmpv ohne Vorlauf ist eine halbe Periode schlechter**, 9,5 bis 10,5 ms im Mittel bei 23,976, 25 und 50 fps: mpv gibt ein Frame erst zu seinem Zeitstempel heraus, und es wartet dann auf den nächsten Durchlauf (im Mittel 8,3 ms, dazu rund 1 ms Rendern). **Mit einer halben Anzeigeperiode Vorlauf (`video-timing-offset`) sind es 4,3 bis 4,4 ms**, derselbe Wert wie beim Scheduler von Takt. Das `MpvBackend` stellt also den Vorlauf auf die halbe gemessene Anzeigeperiode.
+* **60 fps auf 60 Hz mit Vorlauf: 13 verworfene Frames in einer Minute.** Bildrate und Raster sind fast gleich, die Phase wandert, und gelegentlich sind zwei Frames in einem Durchlauf fertig; mpv verwirft dann eines. Das ist der Fall, für den mpv `display-resample` hat (die Tonrate folgt der Bildwiederholung), und der Grund, warum der Lauf mit mpv selbst auf einem echten Bildschirm noch daneben gehört.
+* **Die Messung braucht eine ruhige Maschine.** Ein erster Durchgang, während dessen auf demselben Rechner gebaut wurde (auch mit niedrigster Priorität), zählte bei 25, 50 und 60 fps 56 bis 175 Xruns in fünf Minuten und Ausreißer bis 47 ms; diese Zeilen sind verworfen und ohne Nebenlast wiederholt (0 Xruns). Der Audio-Callback selbst hat Echtzeitpriorität (in einem ruhigen Lauf p99,99 unter 192 µs bei 10 ms Periode); leer lief der Ring vermutlich, weil der Thread, der ihn füllt, normale Priorität hat. Belegt ist nur der Zusammenhang mit der Nebenlast, nicht die Ursache. Das wird ein Punkt für Phase 1 (unten, Punkt 6).
+
+### Spike: mpv über den Software-Renderer
+
+`MpvBackend` hat zwei Wege zum Bild (`takt/mpv-backend-hinter-videobackend`): (a) mpv zeichnet per OpenGL in ein Ziel, das wgpu importiert, oder (b) mpv rendert in den Speicher und Takt lädt das Bild hoch. (b) ist einfach, aber `render.h` nennt den Software-Renderer selbst „extremely simple (but slow)“. Der Spike (`apps/takt-player/src/mpv`, `--headless --mpv`) beantwortet deshalb zwei Fragen, bevor das Backend gebaut wird.
+
+**Frage 1: Trägt (b) 1080p bei 60 fps?** Abbruchkriterium: liegt das p99 der Render-Zeit je Frame über der halben Frame-Dauer bei 60 fps (8,3 ms), ist (b) kein Weg und das Backend braucht (a).
+
+Gemessen (STEVESPC, Release, 1920×1080, acht Läufe à 60 s über vier Bildraten): Rendern je Frame p50 unter 0,9 bis 1,0 ms, p99 unter 1,5 bis 3,6 ms, größter Einzelwert 5,7 bis 9,2 ms. Das Kriterium ist um mehr als den Faktor zwei unterschritten: **(b) trägt 1080p**, Phase 0 nimmt diesen Weg. Die Grenze ist absehbar: das Testbild wird nur von YUV nach `rgb0` gewandelt, nicht skaliert; 4K hat viermal so viele Pixel, ein p99 um 10 ms hielte 60 fps nicht mehr. Zero-Copy über (a) bleibt damit Stoff für Phase 1 und wird für 4K gebraucht, nicht für 1080p.
+
+**Frage 2: Wer entscheidet die Fälligkeit, mpv oder Takt?** mpv. Über die Render-API gibt es kein Frame mit Zeitstempel heraus, sondern meldet „ein Frame wartet“ (`mpv_render_context_update`), und zwar zu dessen Zeit auf mpvs eigener Uhr. `VideoBackend::set_display_period` hat für diesen Pfad nichts zu stellen. Ohne weiteres Zutun wartet ein Frame damit im Mittel eine halbe Anzeigeperiode auf den nächsten Durchlauf. Die Regel des `NullBackend` (ein Frame geht an die Bildwiederholung, die seinem Zeitstempel am nächsten liegt) lässt sich nachbilden: `video-timing-offset` auf die halbe Anzeigeperiode gibt jedes Frame so viel früher heraus (`--mpv-early MIKROSEKUNDEN`).
+
+Gemessen (dieselben Läufe, Tabelle oben; 23,976, 25 und 50 fps): ohne Vorlauf im Mittel 9,5 bis 10,5 ms hinter mpvs Tonposition, mit 8,333 ms Vorlauf (halbe Periode bei 60 Hz) 4,3 bis 4,4 ms, bei unveränderter Zahl gezeigter Frames. Bei 60 fps auf 60 Hz steht die Phase fast fest, der Fehler ist dort mit und ohne Vorlauf rund 3,5 ms.
+
+Was der Spike nicht beantwortet: den Upload des `rgb0`-Bilds in eine wgpu-Textur (ein zweiter Texturpfad neben NV12), Ton über ein echtes Gerät (die Uhr ist hier `ao=null`), Seek und Spurwahl, und Material, das teurer ist als das Testbild (HDR, 4K, Untertitel: `render.h` warnt, dass der Software-Renderer dort zu langsam werden kann).
+
+### A/V-Sync von Hand
+
+Die Audio-Master-Uhr zieht die Latenz ab, die cpal für das Gerät vorhersagt; Wandler, Lautsprecher, Bluetooth und die Anzeige-Latenz des Monitors kennt sie nicht. Ob Bild und Ton zusammenfallen, sagt nur eine Messung von außen. Die Testdatei dafür:
+
+```sh
+python scripts/make-sync-clip.py            # takt-sync-clip.mkv im Temp-Verzeichnis, 60 s, 1920x1080, 60 fps
+```
+
+Das Bild ist schwarz und in den ersten zwei Frames jeder Sekunde weiß; der Ton ist still und spielt in den ersten 10 ms jeder Sekunde 1 kHz. Blitz und Klick beginnen auf demselben Zeitstempel. Gemessen wird mit einer Handykamera in Zeitlupe (240 fps: ein Bild sind 4,2 ms), die Bildschirm und Lautsprecher zugleich aufnimmt: in der Aufnahme die Bilder zwischen dem ersten weißen Bild und dem Einsatz des Klicks in der Tonspur zählen, über zehn Sekunden mitteln. Genauer geht es mit Mikrofon und Fotodiode an zwei Kanälen einer Soundkarte. Die Messung steht aus (`takt/a-v-sync-von-hand-messen-klick-und-blitz-lippensynchronitaet`); sie braucht das `MpvBackend`, weil erst das eine Datei spielt.
+
 ### Was noch nicht gemessen ist
 
-* CPU-Last und Speicherbandbreite unter echter Last — es gibt noch keine echte Dekodierung.
-* Callback-Laufzeit als Perzentile. **Der Median ist bedeutungslos; das 99,99. Perzentil entscheidet.** Braucht `takt-audio`.
+* CPU-Last und Speicherbandbreite unter echter Last — es gibt noch keine echte Dekodierung im Fenster; der Spike oben misst nur das Rendern in den Speicher.
+* ~~Callback-Laufzeit als Perzentile.~~ Gemessen seit `takt-audio`: der kopflose Lauf und das Overlay nennen p50, p99 und p99,99 des Callbacks (STEVESPC, WASAPI shared auf einem virtuellen Gerät, 480 Frames, 60 s: p50 unter 2 µs, p99 unter 5 µs, p99,99 unter 192 µs, Maximum 166 µs bei 10 ms Periode). **Der Median ist bedeutungslos; das 99,99. Perzentil entscheidet.**
 * Startzeit der Anwendung. Der Player-Modus soll schlank starten; das ist derzeit eine Absicht ohne Zahl.
+* mpv selbst auf einem echten Bildschirm (dritte Zeilengruppe des A/B-Protokolls) und der A/V-Versatz von Hand.
 
 ---
 
@@ -86,6 +153,7 @@ Ein Player ist damit sicherheitstechnisch näher an einem Browser als an einem T
 * **Überlaufsicherheit durchgehend.** Zeitumrechnungen laufen über `i128`, Additionen über `checked_add`, Histogramm-Zähler über `saturating_add`. Ein absichtlich absurder Zeitstempel in einer Datei darf keine arithmetische Panik auslösen.
 * **Geometrie wird validiert.** `VideoFrame::alloc` lehnt Nullgrößen ab und rechnet Chroma-Ebenen mit `div_ceil`, statt ungerade Abmessungen falsch zu runden. Falsch berechnete Ebenengrößen sind die Standardquelle für Pufferüberläufe in Videocode.
 * **`cargo-deny` in der CI** — auch als Sicherheitsprüfung, nicht nur für Lizenzen: `advisories` fängt bekannte Verwundbarkeiten in Abhängigkeiten.
+* **Die Bildgröße aus der Datei ist begrenzt, bevor Speicher angefordert wird.** Der Messlauf über libmpv (`--headless --mpv`) legt seine Zielfläche nach der Größe an, die mpv für die Datei nennt; mehr als 8K (8192 × 4320) lehnt er ab, sonst ließe eine Datei, die nur ein riesiges Bild behauptet, den Player Gigabytes anfordern. Dieselbe Grenze gehört ins `MpvBackend`.
 
 ### Der Prozessschnitt fällt mit dem Lizenzschnitt zusammen
 
@@ -109,7 +177,7 @@ Für Phase 0 ist das nur eine Notiz. Aber die `VideoBackend`-Schnittstelle ist b
 ### Was noch nicht adressiert ist
 
 * **Untertitel.** `.ass`-Dateien sind ein eigener Angriffsvektor mit eigener Skriptsprache. Wenn libass eingebunden wird, gehört es in dieselbe Sandbox wie der Demuxer.
-* **Netzwerkquellen.** Ab HTTP, HLS oder RTSP kommt TLS-Zertifikatsprüfung dazu, plus die Frage, welche Protokolle überhaupt erlaubt sind. FFmpeg unterstützt mehr Protokolle als man einem Player geben will — eine Allowlist ist Pflicht.
+* **Netzwerkquellen.** Ab HTTP, HLS oder RTSP kommt TLS-Zertifikatsprüfung dazu, plus die Frage, welche Protokolle überhaupt erlaubt sind. FFmpeg unterstützt mehr Protokolle als man einem Player geben will — eine Allowlist ist Pflicht. Der Messlauf `--headless --mpv QUELLE` reicht seine Quelle ungefiltert an mpv (`loadfile`), also auch URLs und `av://`; das ist ein Werkzeug auf der Kommandozeile, kein Weg für Dateien aus dem Fenster. Skripte, Konfiguration des Nutzers und der ytdl-Helfer sind dabei abgeschaltet (`config=no`, `load-scripts=no`, `ytdl=no`); das `MpvBackend` braucht darüber hinaus die Allowlist (`demuxer-lavf-o=protocol_whitelist` oder ein Pfad-Check vor `loadfile`).
 * **Pfadbehandlung.** Playlisten mit relativen Pfaden dürfen nicht aus dem erwarteten Verzeichnis herausführen.
 * **Fuzzing.** Sobald ein echter Demuxer existiert, gehört `cargo-fuzz` auf die Parser-Schicht. Vorher gibt es nichts zu fuzzen.
 
@@ -137,4 +205,5 @@ Für Phase 0 ist das nur eine Notiz. Aber die `VideoBackend`-Schnittstelle ist b
 2. **Der Software-Pfad wird zuerst gebaut.** Er ist der Fallback, er läuft auf dem zehn Jahre alten Testgerät, und er ist die Referenz für die Korrektheit des Hardware-Pfads.
 3. **Zero-Copy messen, nicht behaupten.** Zielgröße ist CPU-Last bei 4K60 AV1 gegen `mpv --hwdec=auto`. Ohne diese Zahl ist „Zero-Copy" eine Absichtserklärung.
 4. **`assert_no_alloc` in den Audio-Callback**, sobald `takt-audio` existiert. Danach nie wieder entfernen.
-5. **Erste `unsafe`-Blöcke werden kommen** — FFI ist ohne sie nicht möglich. Jeder braucht einen `// SAFETY:`-Kommentar, der die Invariante benennt, nicht die Absicht wiederholt.
+5. **Erste `unsafe`-Blöcke werden kommen** — FFI ist ohne sie nicht möglich. Jeder braucht einen `// SAFETY:`-Kommentar, der die Invariante benennt, nicht die Absicht wiederholt. Der erste Fall ist da: `apps/takt-player/src/mpv/ffi.rs` (libmpv), das einzige Modul des Players mit `unsafe`, dahinter ein sicherer Typ.
+6. **Wer den Audio-Ring füllt, darf nicht verhungern.** Der Callback hat Echtzeitpriorität, der Thread, der ihm die Daten bringt, nicht. Unter Last auf der Maschine lief der Ring im A/B-Protokoll leer (bis 175 Xruns in fünf Minuten); ohne Last kein einziger, bei einem Callback, der im p99,99 unter 192 µs bleibt. Für die eigene Pipeline heißt das: der Decoder-Thread braucht entweder eine erhöhte Priorität oder einen Vorrat im Ring, der eine verlorene Zeitscheibe überbrückt (heute 100 ms), und der Füllstand gehört ins Overlay.
