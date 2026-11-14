@@ -256,6 +256,8 @@ pub struct MpvBackend {
     jump: Jump,
     /// The file mpv was asked for and has not opened yet.
     loading: Option<Loading>,
+    /// How long a load may take ([`OPEN_TIMEOUT`]; a test shortens it).
+    open_timeout: Duration,
     /// How the last load ended, until [`MpvBackend::poll_open`] takes it.
     opened: Option<takt_core::Result<MediaInfo>>,
     loaded: bool,
@@ -505,6 +507,7 @@ impl MpvBackend {
             refit: false,
             jump: Jump::Done,
             loading: None,
+            open_timeout: OPEN_TIMEOUT,
             opened: None,
             loaded: false,
             eof: false,
@@ -870,13 +873,14 @@ impl MpvBackend {
     /// the file or why it does not play. Never waits.
     pub fn poll_open(&mut self) -> Option<takt_core::Result<MediaInfo>> {
         self.pump();
+        let limit = self.open_timeout;
         if self
             .loading
             .as_ref()
-            .is_some_and(|load| load.asked.elapsed() > OPEN_TIMEOUT)
+            .is_some_and(|load| load.asked.elapsed() > limit)
         {
             self.fail_open(Error::SourceUnavailable(format!(
-                "not open after {OPEN_TIMEOUT:?}"
+                "not open after {limit:?}"
             )));
         }
         self.opened.take()
@@ -1925,6 +1929,72 @@ mod tests {
         drop(slow);
     }
 
+    /// A source that never answers is given up after the time limit: the
+    /// reason comes once, mpv is told to stop, and the backend opens the
+    /// next file. The limit is ten seconds; the test shortens it.
+    #[test]
+    fn a_source_that_never_answers_is_given_up_after_the_time_limit() {
+        assert_eq!(OPEN_TIMEOUT, Duration::from_secs(10));
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = slow.local_addr().unwrap().port();
+        let mut backend = backend(Sources::Any);
+        assert_eq!(backend.open_timeout, OPEN_TIMEOUT);
+        backend.open_timeout = Duration::from_millis(300);
+
+        let asked = Instant::now();
+        backend
+            .begin_open(&format!("http://127.0.0.1:{port}/slow.mkv"))
+            .unwrap();
+        let ended = loop {
+            if let Some(ended) = backend.poll_open() {
+                break ended;
+            }
+            assert!(asked.elapsed() < Duration::from_secs(5), "never given up");
+            std::thread::sleep(Duration::from_millis(4));
+        };
+        assert!(
+            asked.elapsed() >= Duration::from_millis(300),
+            "not before the limit: {:?}",
+            asked.elapsed()
+        );
+        let error = ended.unwrap_err();
+        assert!(matches!(error, Error::SourceUnavailable(_)), "{error}");
+        assert!(
+            error.to_string().contains("not open after 300ms"),
+            "{error}"
+        );
+        assert!(backend.poll_open().is_none(), "the reason comes once");
+        assert!(backend.is_eof() && !backend.loaded);
+
+        // mpv gave the source up as well: it is idle, with nothing to play.
+        let started = Instant::now();
+        while backend.mpv.flag(c"idle-active") != Some(true) {
+            assert!(started.elapsed() < Duration::from_secs(5), "mpv goes on");
+            let _ = backend.poll_open();
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert_eq!(backend.mpv.int(c"playlist-count"), Some(0));
+
+        // The blocking open has the same limit.
+        let asked = Instant::now();
+        assert!(
+            backend
+                .open(&format!("http://127.0.0.1:{port}/slow.mkv"))
+                .is_err()
+        );
+        assert!(asked.elapsed() < Duration::from_secs(5));
+
+        // And the next file plays.
+        backend.open(&clip()).unwrap();
+        let mut frames = 0;
+        passes(&mut backend, Duration::from_secs(2), |_, _| {
+            frames += 1;
+            frames < 3
+        });
+        assert_eq!(frames, 3);
+        drop(slow);
+    }
+
     #[test]
     fn a_file_plays_pauses_jumps_and_ends() {
         let mut backend = backend(Sources::Files);
@@ -2075,6 +2145,62 @@ mod tests {
                 .all(|&ms| ms == 6_500 || ms == 4_000 || ms < 1_200),
             "{on_the_way:?}"
         );
+    }
+
+    /// The containers and codecs next to H.264 in Matroska
+    /// (`scripts/make-format-clips.py`): each opens, names its length and
+    /// rate, and plays; the picture of every frame is the frame its time
+    /// names (the grey is the frame number), and a jump lands on a frame.
+    #[test]
+    fn av1_hevc_vp9_and_mp4_play_with_the_right_frame_at_the_right_time() {
+        for name in [
+            "format-av1.mkv",
+            "format-h264.mp4",
+            "format-hevc.mp4",
+            "format-vp9.webm",
+        ] {
+            let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+            let mut backend = backend(Sources::Files);
+            let info = backend
+                .open(&path)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(
+                info.video.map(|v| (v.width, v.height)),
+                Some((64, 64)),
+                "{name}"
+            );
+            assert_eq!(info.frame_rate, Rational::new(25, 1), "{name}");
+            assert_eq!(
+                info.duration.map(|d| d.ticks() / 100_000),
+                Some(20),
+                "{name}: 2.0 s"
+            );
+            assert!(info.seekable, "{name}");
+
+            let mut seen = 0;
+            passes(&mut backend, Duration::from_secs(3), |_, frame| {
+                let picture = frame.get();
+                let rows = picture.plane(0).unwrap();
+                let at = 32 * picture.stride(0).unwrap() + 32 * 4;
+                let held = (i64::from(rows[at]) - 16 + 4) / 8;
+                let stamped = picture.meta().pts.ticks() / 40_000 % 25;
+                assert_eq!(held, stamped, "{name}: frame {seen}");
+                seen += 1;
+                seen < 20
+            });
+            assert_eq!(seen, 20, "{name}");
+            // A keyframe every second: the jump lands on the one at 1 s.
+            assert_eq!(
+                lands_at(&mut backend, 1_500, SeekMode::Keyframe),
+                1_000,
+                "{name}"
+            );
+            assert_eq!(
+                lands_at(&mut backend, 1_480, SeekMode::Exact),
+                1_480,
+                "{name}"
+            );
+        }
     }
 
     /// The jump of the window (`SeekMode::Keyframe`) in a file whose
