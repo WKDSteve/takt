@@ -34,6 +34,10 @@ use crate::mpv::{Config, Early, MpvBackend, Sound, Sources, Track};
 
 /// Length of the test picture.
 const TEST_MILLIS: i64 = 3_600_000;
+/// The most subtitle files kept for a film that is still being opened.
+#[cfg(takt_libmpv)]
+const WANTED_SUBTITLES: usize = 8;
+
 /// Frames of the pool of the test picture: the one the renderer holds, the
 /// one being painted, and room.
 const TEST_POOL_FRAMES: usize = 6;
@@ -110,6 +114,10 @@ pub struct Session {
     kind: Kind,
     #[cfg(takt_libmpv)]
     pending: Option<Pending>,
+    /// Subtitle files asked for while their film was still being opened:
+    /// shown once it is open, forgotten when it does not open.
+    #[cfg(takt_libmpv)]
+    wanted_subtitles: Vec<std::path::PathBuf>,
     /// How the last open ended, where it ends at once (a build without
     /// libmpv), until [`Session::poll_open`] takes it.
     #[cfg(not(takt_libmpv))]
@@ -142,6 +150,8 @@ impl Session {
             kind,
             #[cfg(takt_libmpv)]
             pending: None,
+            #[cfg(takt_libmpv)]
+            wanted_subtitles: Vec::new(),
             #[cfg(not(takt_libmpv))]
             finished: None,
             silent,
@@ -187,6 +197,8 @@ impl Session {
         #[cfg(takt_libmpv)]
         {
             let name = path.to_string_lossy();
+            // Subtitles that waited belong to the file asked for before.
+            self.wanted_subtitles.clear();
             match (&mut self.kind, &mut self.pending) {
                 (Kind::File(file), _) => {
                     file.source.begin_open(&name).map_err(|e| e.to_string())?;
@@ -273,8 +285,14 @@ impl Session {
                 // Nothing of a file is left to wait for.
                 (Pending::Same, Kind::Test(_)) => return None,
             };
+            let wanted = std::mem::take(&mut self.wanted_subtitles);
             if ended.is_ok() {
                 self.apply();
+                for file in wanted {
+                    if let Err(e) = self.add_subtitles(&file) {
+                        eprintln!("takt-player: subtitles {}: {e}", file.display());
+                    }
+                }
             }
             Some(ended)
         }
@@ -302,8 +320,9 @@ impl Session {
     pub fn show_test_picture(&mut self) {
         #[cfg(takt_libmpv)]
         {
-            // A file that was on its way is given up.
+            // A file that was on its way is given up, with its subtitles.
             self.pending = None;
+            self.wanted_subtitles.clear();
         }
         if self.is_file() {
             self.kind = Self::test_kind(&self.time, self.silent);
@@ -470,13 +489,23 @@ impl Session {
     }
 
     /// Shows the subtitle file `path` with the file that plays and names
-    /// the track.
+    /// the track. While a file is being opened (a film dropped together
+    /// with its subtitles) the subtitle file waits and is shown once the
+    /// film is open; the line says so.
     ///
     /// # Errors
     ///
     /// A text for the user: the test picture takes no subtitles, or why the
     /// file is not shown.
     pub fn add_subtitles(&mut self, path: &Path) -> Result<String, String> {
+        #[cfg(takt_libmpv)]
+        if self.opening() {
+            if self.wanted_subtitles.len() >= WANTED_SUBTITLES {
+                return Err("too many subtitle files at once".to_owned());
+            }
+            self.wanted_subtitles.push(path.to_path_buf());
+            return Ok("subtitles: shown when the file is open".to_owned());
+        }
         match &mut self.kind {
             Kind::Test(_) => {
                 let _ = path;
@@ -784,6 +813,62 @@ mod tests {
         assert!(!session.is_file());
         assert_eq!(std::ptr::from_ref(session.master()), first);
         assert!(session.next_frame().is_ok());
+    }
+
+    /// A film dropped together with its subtitle file: the subtitles are
+    /// asked for while the film still opens, and show once it is open.
+    #[cfg(takt_libmpv)]
+    #[test]
+    fn subtitles_that_come_with_their_film_wait_until_it_is_open() {
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pattern-3s.mkv");
+        let subtitles =
+            std::env::temp_dir().join(format!("takt-with-film-{}.srt", std::process::id()));
+        std::fs::write(
+            &subtitles,
+            "1\n00:00:00,000 --> 00:00:03,000\nwith the film\n",
+        )
+        .unwrap();
+        let shows = |session: &mut Session| match &mut session.kind {
+            Kind::File(file) => file.source.shows_subtitles_of_a_file(),
+            Kind::Test(_) => false,
+        };
+
+        let mut session = session();
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(
+            session.add_subtitles(&subtitles),
+            Ok("subtitles: shown when the file is open".to_owned())
+        );
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(shows(&mut session), "shown once the film is open");
+
+        // Asked for with a film that does not open: forgotten, and not
+        // shown with the film that comes after.
+        let junk = junk("with-subtitles");
+        session.open_file(&junk).unwrap();
+        assert!(session.add_subtitles(&subtitles).is_ok());
+        assert!(opened(&mut session).is_err());
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(!shows(&mut session), "the film alone");
+
+        // And another film asked for meanwhile takes over without them.
+        session.open_file(Path::new(clip)).unwrap();
+        assert!(session.add_subtitles(&subtitles).is_ok());
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(!shows(&mut session));
+
+        // No more than a few wait.
+        session.open_file(Path::new(clip)).unwrap();
+        for _ in 0..WANTED_SUBTITLES {
+            assert!(session.add_subtitles(&subtitles).is_ok());
+        }
+        assert!(session.add_subtitles(&subtitles).is_err());
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(shows(&mut session));
+        let _ = std::fs::remove_file(&subtitles);
+        let _ = std::fs::remove_file(&junk);
     }
 
     /// The next entry while one is still being opened: the answer is the

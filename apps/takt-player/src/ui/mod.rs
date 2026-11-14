@@ -321,6 +321,11 @@ impl PlayerApp {
             .iter()
             .cloned()
             .partition(|path| playlist::is_subtitles(path));
+        if !paths.is_empty() {
+            self.take_entries(&paths, &base, append);
+        }
+        // After the entries: subtitles that come with their film are for
+        // that film, which is being opened now.
         for file in subtitles {
             let file = playlist::normalise(&file, &base);
             self.notice = Some(match self.session.add_subtitles(&file) {
@@ -328,10 +333,11 @@ impl PlayerApp {
                 Err(e) => format!("cannot show {}: {e}", Playlist::label(&file)),
             });
         }
-        if paths.is_empty() {
-            return;
-        }
-        let (entries, problems) = playlist::expand(&paths, &base);
+    }
+
+    /// The part of a drop that is for the playlist.
+    fn take_entries(&mut self, paths: &[PathBuf], base: &Path, append: bool) {
+        let (entries, problems) = playlist::expand(paths, base);
         self.drop_problems = problems;
         let start = if append {
             self.playlist.append(entries)

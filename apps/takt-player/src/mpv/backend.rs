@@ -574,6 +574,12 @@ impl MpvBackend {
         Ok(self.track_label(Track::Subtitle))
     }
 
+    /// Whether the subtitles that show come from a file of their own.
+    #[cfg(test)]
+    pub fn shows_subtitles_of_a_file(&mut self) -> bool {
+        self.mpv.flag(c"current-tracks/sub/external") == Some(true)
+    }
+
     /// The track of `kind` that plays now, for a label: its number, and its
     /// language and title when the file names them. The text of the file is
     /// foreign: cut to a line, shown, never interpreted.
