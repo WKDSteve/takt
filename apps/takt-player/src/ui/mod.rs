@@ -48,7 +48,7 @@ use crate::audio::{self, AudioPath};
 use crate::diagnostics::{self, AudioCounters, ProcessMeter, Snapshot};
 use crate::playlist::{self, Playlist};
 use crate::refresh::RefreshMeter;
-use crate::render::{self, Shown, gpu::Nv12Image};
+use crate::render::{self, Picture, Shown};
 
 /// Length of the test source.
 const SOURCE_MILLIS: i64 = 3_600_000;
@@ -202,7 +202,7 @@ impl PlayerApp {
                     .map_or(target, Timestamp::ticks);
                 self.last_seek = Some((target, landed));
             }
-            match Nv12Image::from_frame(frame.get()) {
+            match Picture::from_frame(frame.get()) {
                 Ok(image) => {
                     let generation = self.shown.as_ref().map_or(0, |s| s.generation + 1);
                     self.shown = Some(Shown {

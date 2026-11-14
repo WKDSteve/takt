@@ -14,7 +14,8 @@ use egui_wgpu::wgpu;
 use takt_audio::{DurationHistogram, DurationSnapshot};
 use takt_core::{PixelFormat, VideoFrame};
 
-/// Why a set of planes is not an NV12 picture.
+/// Why a set of planes is not the picture a texture path takes (NV12 here, `rgb0` in
+/// [`super::gpu_rgb`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum LayoutError {
     /// Width or height is zero.
@@ -29,7 +30,7 @@ pub enum LayoutError {
         /// 0 for Y, 1 for UV.
         plane: usize,
     },
-    /// The frame is not NV12.
+    /// The frame has another pixel format than the path takes.
     Format,
 }
 
@@ -39,7 +40,7 @@ impl fmt::Display for LayoutError {
             Self::Empty => write!(f, "empty picture"),
             Self::Stride { plane } => write!(f, "plane {plane}: stride shorter than a row"),
             Self::Short { plane } => write!(f, "plane {plane}: fewer bytes than its rows"),
-            Self::Format => write!(f, "not NV12"),
+            Self::Format => write!(f, "another pixel format than this path takes"),
         }
     }
 }
@@ -57,7 +58,7 @@ pub struct Nv12View<'a> {
 
 /// Bytes a plane of `rows` rows of `row` bytes at `stride` needs: the last
 /// row needs no padding after it.
-fn needed(stride: usize, row: usize, rows: usize) -> usize {
+pub(super) fn needed(stride: usize, row: usize, rows: usize) -> usize {
     stride * (rows - 1) + row
 }
 
@@ -198,7 +199,7 @@ pub struct Nv12Renderer {
     uploads: DurationHistogram,
 }
 
-fn texture(
+pub(super) fn texture(
     device: &wgpu::Device,
     label: &str,
     size: (u32, u32),
@@ -220,7 +221,7 @@ fn texture(
     })
 }
 
-fn write_plane(
+pub(super) fn write_plane(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     data: &[u8],
@@ -403,8 +404,118 @@ impl Nv12Renderer {
     }
 }
 
+/// What the GPU tests of both texture paths share: the adapter, and a target
+/// that is drawn into and read back.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::wgpu;
+
+    /// The format of the target: not sRGB, so the bytes come back as drawn.
+    pub const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    /// Whether the GPU tests are asked for; says SKIP when not.
+    pub fn gpu_wanted() -> bool {
+        if std::env::var("TAKT_GPU_TESTS").as_deref() == Ok("1") {
+            return true;
+        }
+        println!("SKIP gpu test: set TAKT_GPU_TESTS=1 to render on a GPU adapter");
+        false
+    }
+
+    /// The adapter of the test. `TAKT_GPU_ADAPTER=fallback` asks for the software adapter (WARP of
+    /// DX12 on Windows): the CI runners have no GPU, and WARP renders the shader exactly enough.
+    pub fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let options = wgpu::RequestAdapterOptions {
+            force_fallback_adapter: std::env::var("TAKT_GPU_ADAPTER").as_deref() == Ok("fallback"),
+            ..Default::default()
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options)).ok()?;
+        println!("gpu test on {:?}", adapter.get_info().name);
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    }
+
+    /// Lets `draw` draw into a target of `size` (cleared to red) and reads
+    /// it back, four bytes per pixel.
+    pub fn read_back(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: (u32, u32),
+        draw: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    ) -> Vec<u8> {
+        let (w, h) = size;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TARGET_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: u64::from(row * h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("texture path test"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let start = (y * row) as usize;
+            out.extend_from_slice(&data[start..start + (w * 4) as usize]);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::{gpu, gpu_wanted, read_back};
     use super::*;
     use crate::render::colour::bt709_limited_8bit;
 
@@ -492,92 +603,13 @@ mod tests {
         Nv12View::new(p.0, p.1, &p.2, p.3, &p.4, p.5).unwrap()
     }
 
-    /// The adapter of the test. `TAKT_GPU_ADAPTER=fallback` asks for the software adapter (WARP of
-    /// DX12 on Windows): the CI runners have no GPU, and WARP renders the shader exactly enough.
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::default();
-        let options = wgpu::RequestAdapterOptions {
-            force_fallback_adapter: std::env::var("TAKT_GPU_ADAPTER").as_deref() == Ok("fallback"),
-            ..Default::default()
-        };
-        let adapter = pollster::block_on(instance.request_adapter(&options)).ok()?;
-        println!("gpu test on {:?}", adapter.get_info().name);
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-    }
-
     /// Renders `picture` at its own size into an `Rgba8Unorm` target and
     /// reads it back, four bytes per pixel.
     fn render(device: &wgpu::Device, queue: &wgpu::Queue, picture: &Nv12View<'_>) -> Vec<u8> {
-        let (w, h) = picture.size();
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let mut renderer = Nv12Renderer::new(device, format, wgpu::FilterMode::Nearest);
+        let mut renderer =
+            Nv12Renderer::new(device, testing::TARGET_FORMAT, wgpu::FilterMode::Nearest);
         renderer.upload(device, queue, picture);
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("target"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&Default::default());
-        let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: u64::from(row * h),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("nv12 test"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            renderer.draw(&mut pass);
-        }
-        encoder.copy_texture_to_buffer(
-            target.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([encoder.finish()]);
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let data = slice.get_mapped_range();
-        let mut out = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            let start = (y * row) as usize;
-            out.extend_from_slice(&data[start..start + (w * 4) as usize]);
-        }
-        out
+        read_back(device, queue, picture.size(), |pass| renderer.draw(pass))
     }
 
     /// The CPU reference of every pixel (nearest chroma: pixel x, y uses the
@@ -593,14 +625,6 @@ mod tests {
             }
         }
         out
-    }
-
-    fn gpu_wanted() -> bool {
-        if std::env::var("TAKT_GPU_TESTS").as_deref() == Ok("1") {
-            return true;
-        }
-        println!("SKIP gpu test: set TAKT_GPU_TESTS=1 to render on a GPU adapter");
-        false
     }
 
     #[test]
