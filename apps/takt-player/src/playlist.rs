@@ -33,6 +33,22 @@ pub fn is_media(path: &Path) -> bool {
         .is_some_and(|e| MEDIA_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// File extensions of a still picture (lower case). Takt plays video and
+/// sound: a picture is no entry of the playlist (decided on 2026-11-14; it
+/// would be shown and never end). GIF is not among them: it has frames and
+/// a length.
+pub const PICTURE_EXTENSIONS: [&str; 11] = [
+    "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff", "avif", "heic", "jxl", "svg",
+];
+
+/// Whether `path` names a still picture by its extension.
+#[must_use]
+pub fn is_picture(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PICTURE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 /// File extensions of a subtitle file (lower case): text formats that
 /// are one file. A dropped one is not an entry of the playlist; it is shown
 /// with the file that plays.
@@ -78,15 +94,18 @@ pub enum Skipped {
     /// junction): where that leads is not in the folder of the list by
     /// anything the list says.
     Link,
+    /// It is a still picture: Takt plays video and sound.
+    Picture,
 }
 
 impl Skipped {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Address,
         Self::Absolute,
         Self::Outside,
         Self::List,
         Self::Link,
+        Self::Picture,
     ];
 
     const fn what(self) -> &'static str {
@@ -96,6 +115,7 @@ impl Skipped {
             Self::Outside => "outside the folder of the list",
             Self::List => "lists themselves",
             Self::Link => "reached through a link",
+            Self::Picture => "pictures, not played",
         }
     }
 }
@@ -139,6 +159,9 @@ pub fn list_entry(line: &str, dir: &Path) -> Result<PathBuf, Skipped> {
     }
     if is_list(&path) {
         return Err(Skipped::List);
+    }
+    if is_picture(&path) {
+        return Err(Skipped::Picture);
     }
     Ok(path)
 }
@@ -313,8 +336,9 @@ pub fn media_in(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// The dropped `paths` as playlist entries: files as they are, folders as
-/// their media files, a playlist file as its entries ([`read_list`]). What
-/// cannot be read is reported, not dropped silently.
+/// their media files, a playlist file as its entries ([`read_list`]). A
+/// still picture is no entry. What cannot be read or is not taken is
+/// reported, not dropped silently.
 #[must_use]
 pub fn expand(paths: &[PathBuf], base: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let mut entries = Vec::new();
@@ -333,6 +357,8 @@ pub fn expand(paths: &[PathBuf], base: &Path) -> (Vec<PathBuf>, Vec<String>) {
             let (files, skipped) = read_list(&path);
             entries.extend(files);
             problems.extend(skipped);
+        } else if is_picture(&path) {
+            problems.push(format!("{}: a picture, not played", Playlist::label(&path)));
         } else {
             entries.push(path);
         }
@@ -648,6 +674,48 @@ mod tests {
         let _ = std::fs::remove_dir(dir.join("away"));
         let _ = std::fs::remove_dir_all(&base);
         assert!(!outside.exists() || std::fs::remove_dir_all(&outside).is_ok());
+    }
+
+    /// A still picture is no entry: not dropped, not from a list, and a
+    /// folder never offered one.
+    #[test]
+    fn a_picture_is_no_entry() {
+        for name in ["a.png", "b.JPG", "c.jpeg", "d.webp", "e.tiff", "f.avif"] {
+            assert!(is_picture(Path::new(name)), "{name}");
+            assert!(!is_media(Path::new(name)), "{name}");
+        }
+        for name in ["film.mkv", "loop.gif", "png", "a.png.mkv", "cover"] {
+            assert!(!is_picture(Path::new(name)), "{name}");
+        }
+
+        let base = std::env::temp_dir().join(format!("takt-pictures-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        for name in ["film.mkv", "cover.png", "shot.jpg"] {
+            std::fs::write(base.join(name), b"x").unwrap();
+        }
+        std::fs::write(base.join("list.m3u"), "cover.png\nfilm.mkv\nshot.JPG\n").unwrap();
+
+        // Dropped: the film is taken, each picture is named.
+        let dropped = [base.join("cover.png"), base.join("film.mkv")];
+        let (entries, problems) = expand(&dropped, &base);
+        assert_eq!(entries, [base.join("film.mkv")]);
+        assert_eq!(problems, ["cover.png: a picture, not played".to_owned()]);
+        // From a list: counted with what else was skipped.
+        let (entries, problems) = expand(&[base.join("list.m3u")], &base);
+        assert_eq!(entries, [base.join("film.mkv")]);
+        assert_eq!(
+            problems,
+            ["list.m3u: 2 skipped (pictures, not played)".to_owned()]
+        );
+        assert_eq!(
+            list_entry("cover.png", &base).unwrap_err(),
+            Skipped::Picture
+        );
+        // A folder: only its media files, as before.
+        let (entries, problems) = expand(std::slice::from_ref(&base), &base);
+        assert_eq!(entries, [base.join("film.mkv")]);
+        assert!(problems.is_empty(), "{problems:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
