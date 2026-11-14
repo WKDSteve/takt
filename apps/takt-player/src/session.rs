@@ -101,8 +101,12 @@ struct File {
     duration_millis: i64,
     /// Size of the picture, for the diagnostics.
     size: Option<(u32, u32)>,
-    /// What the file says about its colour, for the diagnostics.
+    /// What the file says about its colour, for the diagnostics. Read when
+    /// the file opens, and again with its first frame when mpv did not
+    /// know it by then.
     color: Option<takt_core::ColorDescription>,
+    /// [`Session::take_limit_note`] has said what there is to say.
+    limit_told: bool,
 }
 
 enum Kind {
@@ -218,6 +222,7 @@ impl Session {
                     file.duration_millis = 0;
                     file.size = None;
                     file.color = None;
+                    file.limit_told = false;
                     self.pending = Some(Pending::Same);
                 }
                 // The backend that is opening already takes the new file: it
@@ -292,6 +297,7 @@ impl Session {
                             duration_millis: duration_millis(&info),
                             size: info.video.map(|v| (v.width, v.height)),
                             color: info.source_color,
+                            limit_told: false,
                             source: *source,
                         }));
                         Ok(())
@@ -390,7 +396,15 @@ impl Session {
         match &mut self.kind {
             Kind::Test(test) => test.source.next_frame(&test.clock),
             #[cfg(takt_libmpv)]
-            Kind::File(file) => file.source.next_frame(file.clock.as_ref()),
+            Kind::File(file) => {
+                let frame = file.source.next_frame(file.clock.as_ref())?;
+                // mpv may name the colour of a file only once it has
+                // decoded a frame of it.
+                if frame.is_some() && file.color.is_none() {
+                    file.color = file.source.source_color();
+                }
+                Ok(frame)
+            }
         }
     }
 
@@ -636,8 +650,28 @@ impl Session {
         }
     }
 
-    /// What the person should know about how the file that plays is shown,
-    /// said once when it opens; `None` when there is nothing to say.
+    /// [`Session::limit_note`], once for each file that is opened: asked
+    /// every pass, it answers as soon as the colour of the file is known
+    /// (when it opens, or with its first frame) and `None` from then on.
+    pub fn take_limit_note(&mut self) -> Option<&'static str> {
+        let note = self.limit_note();
+        match &mut self.kind {
+            Kind::Test(_) => {
+                let _ = note;
+                None
+            }
+            #[cfg(takt_libmpv)]
+            Kind::File(file) => {
+                let note = note?;
+                let news = !file.limit_told;
+                file.limit_told = true;
+                news.then_some(note)
+            }
+        }
+    }
+
+    /// What the person should know about how the file that plays is shown;
+    /// `None` when there is nothing to say.
     ///
     /// HDR: mpv brings the picture to BT.709 on this path and does not
     /// tone-map, so what is brighter than SDR white is cut off. Decided on
@@ -975,8 +1009,41 @@ mod tests {
             );
         }
         assert!(session.source_line().contains("shown as bt.709"));
+        // Said once for a file: HLG was the last HDR file opened, NTSC came
+        // after it and has nothing to say.
+        assert_eq!(session.take_limit_note(), None);
+        session
+            .open_file(&Path::new(data).join("colour-hdr10.mkv"))
+            .unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(session.take_limit_note().is_some());
+        assert_eq!(session.take_limit_note(), None, "once");
+        assert!(session.limit_note().is_some(), "still true");
+
+        // mpv did not know the colour when the file opened: it is read
+        // again with the first frame, and the note comes then.
+        session
+            .open_file(&Path::new(data).join("colour-hlg.mkv"))
+            .unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        match &mut session.kind {
+            Kind::File(file) => file.color = None,
+            Kind::Test(_) => panic!("a file plays"),
+        }
+        assert_eq!(session.take_limit_note(), None, "not known yet");
+        let started = std::time::Instant::now();
+        let mut note = None;
+        while note.is_none() && started.elapsed() < std::time::Duration::from_secs(5) {
+            let _ = session.next_frame().unwrap();
+            note = session.take_limit_note();
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+        assert!(note.is_some(), "said with the first frame");
+        assert_eq!(session.take_limit_note(), None);
+
         session.show_test_picture();
         assert_eq!(session.limit_note(), None);
+        assert_eq!(session.take_limit_note(), None);
     }
 
     /// A jump in a file landed on the keyframe before its target (the test

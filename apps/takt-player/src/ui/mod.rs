@@ -171,6 +171,11 @@ impl PlayerApp {
         if frame.is_some() {
             self.source_fault.clear();
         }
+        // What the person should know about this file, once: when it opens,
+        // or with its first frame when mpv names its colour only then.
+        if let Some(note) = self.session.take_limit_note() {
+            self.notice = Some(note.to_owned());
+        }
         if self.state.playing() {
             // While a file is being opened nothing has ended: the source
             // that is on its way has no frames yet.
@@ -255,10 +260,6 @@ impl PlayerApp {
                 self.seek_probe = None;
                 self.last_seek = None;
                 self.shown = None;
-                // What the person should know about this file, once.
-                if let Some(note) = self.session.limit_note() {
-                    self.notice = Some(note.to_owned());
-                }
             }
             Err(e) => {
                 self.cannot_play(&label, &e);
