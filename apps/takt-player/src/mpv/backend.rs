@@ -1045,12 +1045,13 @@ mod tests {
     fn reaches_the_network(backend: &mut MpvBackend) -> bool {
         connects_during(|port| {
             let _ = backend.open(&format!("http://127.0.0.1:{port}/film.mkv"));
-            std::thread::sleep(Duration::from_millis(300));
         })
     }
 
-    /// Listens on a local port while `act` runs (it gets the port) and says
-    /// whether a connection reached it.
+    /// Listens on a local port while `act` runs (it gets the port) and for
+    /// 300 ms after it, and says whether a connection reached it. One that
+    /// arrives at the very end still counts: the port is asked once more
+    /// after the last wait.
     fn connects_during(act: impl FnOnce(u16)) -> bool {
         use std::sync::atomic::{AtomicBool, Ordering};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1070,9 +1071,13 @@ mod tests {
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
+                if listener.accept().is_ok() {
+                    reached.store(true, Ordering::Relaxed);
+                }
             })
         };
         act(port);
+        std::thread::sleep(Duration::from_millis(300));
         done.store(true, Ordering::Relaxed);
         server.join().unwrap();
         reached.load(Ordering::Relaxed)
