@@ -7,6 +7,13 @@
 //! shown as text. A folder stands for the media files directly in it, sorted
 //! by name with numbers compared as numbers (`2` before `10`), as a file
 //! manager shows them.
+//!
+//! A playlist file (`.m3u`, `.m3u8`) stands for its entries ([`read_list`]).
+//! It is read here, as text, and never handed to a backend: a backend that
+//! reads lists (mpv does) would play their entries on its own, past the
+//! window, addresses included. Only what lies in the folder of the list gets
+//! in; an address, an absolute path and a path that leaves the folder are
+//! named and skipped.
 
 use std::cmp::Ordering;
 use std::path::{Component, Path, PathBuf};
@@ -24,6 +31,151 @@ pub fn is_media(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| MEDIA_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// File extensions of a playlist file (lower case).
+pub const LIST_EXTENSIONS: [&str; 2] = ["m3u", "m3u8"];
+
+/// The largest playlist file that is read: a megabyte of text.
+const LIST_BYTES: u64 = 1 << 20;
+
+/// The most entries taken from one playlist file.
+const LIST_ENTRIES: usize = 10_000;
+
+/// Whether `path` names a playlist file by its extension.
+#[must_use]
+pub fn is_list(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| LIST_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Why a line of a playlist file is no entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skipped {
+    /// It names a protocol (`http://`, `edl://`, `data:`): not a file.
+    Address,
+    /// It is an absolute path (a drive, a root, a network share).
+    Absolute,
+    /// It leaves the folder of the list through `..`.
+    Outside,
+    /// It is a playlist file itself: lists are not followed.
+    List,
+}
+
+impl Skipped {
+    const ALL: [Self; 4] = [Self::Address, Self::Absolute, Self::Outside, Self::List];
+
+    const fn what(self) -> &'static str {
+        match self {
+            Self::Address => "addresses, not files",
+            Self::Absolute => "absolute paths",
+            Self::Outside => "outside the folder of the list",
+            Self::List => "lists themselves",
+        }
+    }
+}
+
+/// Whether `line` starts like an address: a scheme of two or more characters
+/// and a colon (`http:`, `data:`). One letter and a colon is a drive.
+fn names_a_protocol(line: &str) -> bool {
+    let Some((scheme, _)) = line.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    scheme.len() >= 2
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// One line of a playlist file as an entry: a path relative to `dir`, the
+/// folder of the list, that stays in it.
+///
+/// # Errors
+///
+/// [`Skipped`] for everything else. Nothing is opened to decide this.
+pub fn list_entry(line: &str, dir: &Path) -> Result<PathBuf, Skipped> {
+    if names_a_protocol(line) {
+        return Err(Skipped::Address);
+    }
+    let entry = Path::new(line);
+    // A root or a drive, with either separator and also without a root after
+    // the drive (`C:film.mkv`): none of these is relative to the list.
+    let rooted = line.starts_with(['/', '\\']) || line.as_bytes().get(1) == Some(&b':');
+    if rooted || entry.is_absolute() || entry.has_root() {
+        return Err(Skipped::Absolute);
+    }
+    // A backslash separates on Windows only; a list written there is read
+    // the same way everywhere.
+    let relative: PathBuf = line.split(['/', '\\']).collect();
+    let dir = normalise(dir, dir);
+    let path = normalise(&relative, &dir);
+    if !path.starts_with(&dir) || path == dir {
+        return Err(Skipped::Outside);
+    }
+    if is_list(&path) {
+        return Err(Skipped::List);
+    }
+    Ok(path)
+}
+
+/// The entries of the playlist file `list`, and what was not taken.
+///
+/// The file is read as text and nothing else: lines that are empty or start
+/// with `#` are skipped, every other line is judged by [`list_entry`]. A file
+/// larger than a megabyte is not read, and entries beyond the first ten
+/// thousand are left out; both are reported.
+#[must_use]
+pub fn read_list(list: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    use std::io::Read as _;
+    let name = Playlist::label(list);
+    let dir = list.parent().unwrap_or_else(|| Path::new("."));
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(list)
+        .and_then(|file| file.take(LIST_BYTES + 1).read_to_end(&mut bytes));
+    if let Err(e) = read {
+        return (Vec::new(), vec![format!("{name}: {e}")]);
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LIST_BYTES {
+        return (
+            Vec::new(),
+            vec![format!("{name}: larger than a megabyte, not read")],
+        );
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut entries = Vec::new();
+    let mut skipped = [0_usize; Skipped::ALL.len()];
+    let mut beyond = 0_usize;
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match list_entry(line, dir) {
+            Ok(_) if entries.len() >= LIST_ENTRIES => beyond += 1,
+            Ok(path) => entries.push(path),
+            Err(why) => {
+                if let Some(at) = Skipped::ALL.iter().position(|&s| s == why) {
+                    skipped[at] += 1;
+                }
+            }
+        }
+    }
+    let mut problems: Vec<String> = Skipped::ALL
+        .iter()
+        .zip(skipped)
+        .filter(|&(_, count)| count > 0)
+        .map(|(why, count)| format!("{name}: {count} skipped ({})", why.what()))
+        .collect();
+    if beyond > 0 {
+        problems.push(format!(
+            "{name}: {beyond} beyond the first {LIST_ENTRIES} left out"
+        ));
+    }
+    if entries.is_empty() && problems.is_empty() {
+        problems.push(format!("{name}: no entries"));
+    }
+    (entries, problems)
 }
 
 /// `path` absolute (against `base` when relative) with `.` and `..` resolved
@@ -111,7 +263,8 @@ pub fn media_in(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// The dropped `paths` as playlist entries: files as they are, folders as
-/// their media files. What cannot be read is reported, not dropped silently.
+/// their media files, a playlist file as its entries ([`read_list`]). What
+/// cannot be read is reported, not dropped silently.
 #[must_use]
 pub fn expand(paths: &[PathBuf], base: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let mut entries = Vec::new();
@@ -126,6 +279,10 @@ pub fn expand(paths: &[PathBuf], base: &Path) -> (Vec<PathBuf>, Vec<String>) {
                 Ok(files) => entries.extend(files),
                 Err(e) => problems.push(format!("{}: {e}", path.display())),
             }
+        } else if is_list(&path) {
+            let (files, skipped) = read_list(&path);
+            entries.extend(files);
+            problems.extend(skipped);
         } else {
             entries.push(path);
         }
@@ -314,6 +471,131 @@ mod tests {
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].starts_with("no media files in"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_of_a_list_is_a_file_in_its_folder_or_nothing() {
+        let dir = std::env::temp_dir().join("takt-lists");
+        let ok = |line: &str| list_entry(line, &dir).unwrap();
+        assert_eq!(ok("a.mkv"), dir.join("a.mkv"));
+        assert_eq!(
+            ok("season 1/ep 2.mkv"),
+            dir.join("season 1").join("ep 2.mkv")
+        );
+        assert_eq!(
+            ok("season 1\\ep 2.mkv"),
+            dir.join("season 1").join("ep 2.mkv")
+        );
+        assert_eq!(
+            ok("./x/../b.mkv"),
+            dir.join("b.mkv"),
+            "dots that stay inside"
+        );
+
+        let no = |line: &str| list_entry(line, &dir).unwrap_err();
+        for address in [
+            "http://127.0.0.1/a.mkv",
+            "https://example.org/a.mkv",
+            "edl://a.mkv",
+            "memory://x",
+            "av://lavfi:testsrc",
+            "file:///C:/a.mkv",
+            "data:text/plain,x",
+            "smb://server/share/a.mkv",
+        ] {
+            assert_eq!(no(address), Skipped::Address, "{address}");
+        }
+        for absolute in [
+            "/etc/passwd",
+            "\\\\server\\share\\a.mkv",
+            "//server/share/a.mkv",
+            "\\a.mkv",
+            "C:\\films\\a.mkv",
+            "C:/films/a.mkv",
+            "C:a.mkv",
+        ] {
+            assert_eq!(no(absolute), Skipped::Absolute, "{absolute}");
+        }
+        for outside in ["../a.mkv", "x/../../a.mkv", "..\\a.mkv", "..", ".", "x/.."] {
+            assert_eq!(no(outside), Skipped::Outside, "{outside}");
+        }
+        assert_eq!(no("more.m3u"), Skipped::List);
+        assert_eq!(no("sub/MORE.M3U8"), Skipped::List);
+    }
+
+    #[test]
+    fn a_list_file_is_read_as_text_and_stands_for_its_entries() {
+        let dir = std::env::temp_dir().join(format!("takt-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = dir.join("Evening.M3U8");
+        std::fs::write(
+            &list,
+            "\u{feff}#EXTM3U\r\n#EXTINF:10,One\r\n  one.mkv  \r\n\r\nsub/two.mp4\r\n\
+             http://127.0.0.1:9/three.mkv\r\nedl://four.mkv\r\n../five.mkv\r\n\
+             C:\\six.mkv\r\nother.m3u\r\n",
+        )
+        .unwrap();
+        assert!(is_list(&list) && !is_list(&dir.join("one.mkv")));
+
+        // Dropped next to a plain file: the list stands for its entries.
+        let (entries, problems) = expand(&[list.clone(), dir.join("zero.mkv")], &dir);
+        assert_eq!(
+            entries,
+            [
+                dir.join("one.mkv"),
+                dir.join("sub").join("two.mp4"),
+                dir.join("zero.mkv")
+            ],
+            "the list itself is no entry"
+        );
+        assert_eq!(
+            problems,
+            [
+                "Evening.M3U8: 2 skipped (addresses, not files)",
+                "Evening.M3U8: 1 skipped (absolute paths)",
+                "Evening.M3U8: 1 skipped (outside the folder of the list)",
+                "Evening.M3U8: 1 skipped (lists themselves)",
+            ]
+        );
+
+        // Not text, empty, missing, too large: reported, never an entry.
+        let odd = dir.join("odd.m3u");
+        std::fs::write(&odd, [0xff, 0xfe, b'\n', b'#', b'x']).unwrap();
+        let (entries, problems) = read_list(&odd);
+        // The first line is no valid text; it is still only a name in the
+        // folder of the list, which nothing has to open.
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].starts_with(&dir) && problems.is_empty());
+        std::fs::write(&odd, "# nothing\n\n").unwrap();
+        assert_eq!(
+            read_list(&odd),
+            (vec![], vec!["odd.m3u: no entries".to_owned()])
+        );
+        let (entries, problems) = read_list(&dir.join("missing.m3u"));
+        assert!(entries.is_empty() && problems.len() == 1, "{problems:?}");
+        assert!(problems[0].starts_with("missing.m3u: "));
+
+        let line = "a.mkv\n";
+        let too_many = LIST_ENTRIES + 3;
+        std::fs::write(&odd, line.repeat(too_many)).unwrap();
+        let (entries, problems) = read_list(&odd);
+        assert_eq!(entries.len(), LIST_ENTRIES);
+        assert_eq!(
+            problems,
+            [format!(
+                "odd.m3u: 3 beyond the first {LIST_ENTRIES} left out"
+            )]
+        );
+        std::fs::write(&odd, "a".repeat(usize::try_from(LIST_BYTES).unwrap() + 1)).unwrap();
+        assert_eq!(
+            read_list(&odd),
+            (
+                vec![],
+                vec!["odd.m3u: larger than a megabyte, not read".to_owned()]
+            )
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
