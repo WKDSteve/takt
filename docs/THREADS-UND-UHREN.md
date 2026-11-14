@@ -117,6 +117,15 @@ pub trait Clock: Send + Sync {
 | `WallClock` | Studio | monotone Systemuhr | `true` |
 | `TimelineClock` | Editor | explizit gesetzte Position | **`false`** |
 
+Im Player hat die `AudioMasterClock` zwei mögliche Ankerquellen, je nachdem, was spielt ([`apps/takt-player/src/session.rs`](../apps/takt-player/src/session.rs)):
+
+| Was spielt | Wer den Ton ausgibt | Anker der Uhr |
+|---|---|---|
+| Testbild (`NullBackend`) | `takt-audio` über cpal | abgespielte Samples aus dem Audio-Callback, in einer `SeekableClock` für Sprünge und Pause |
+| Datei (`MpvBackend`) | mpv auf seinem eigenen Gerät | mpvs Tonposition (`audio-pts`) in Mikrosekunden, einmal je Durchlauf der Anzeige veröffentlicht; Sprung und Pause macht mpv, die Uhr folgt |
+
+Beides ist dieselbe Uhr mit demselben Seqlock-Anker, nur der Schreiber ist ein anderer: der Audio-Callback oder der Render-Thread, der mpv fragt. Die beiden Fälle sind die Varianten eines Enums. Eine `Session` hält also genau eine Uhr und einen Tonpfad; eine Datei zu öffnen ersetzt die Variante, und die alte Uhr samt Gerät endet mit ihr (Invariante 3). Dass der Anker im zweiten Fall nicht aus dem Audio-Callback kommt, ist die Grenze von Phase 0: mpv ist hier der Tonpfad, und zwischen zwei Durchläufen rechnet die Uhr mit der Systemuhr weiter, höchstens 100 ms.
+
 `may_drop` ist die eigentliche Trennlinie. Sie unterscheidet nicht Taktquellen, sondern **Datenflussrichtungen**:
 
 * Player und Studio **schieben** Frames. Die Uhr läuft weiter, ob der Renderer fertig ist oder nicht. Wer zu spät kommt, fällt weg. Latenz schlägt Qualität.
@@ -179,7 +188,7 @@ Die Punkte, die ohne Diskussion gelten und in Reviews geprüft werden:
 
 1. **Genau ein hart-echtzeitfähiger Thread.** Er wird vom Betriebssystem erzeugt, nicht von uns.
 2. **Im Audio-Callback:** keine Allokation, kein Lock, kein Datei- oder Netzwerkzugriff, kein Logging, kein `panic!`. `assert_no_alloc` bleibt aktiv, auch im Release-Build der Entwicklungsversionen: `takt-player` setzt `AllocDisabler` als globalen Allokator, und `OutputCallback::fill` ([`crates/takt-audio/src/callback.rs`](../crates/takt-audio/src/callback.rs)) läuft unter dem Wächter; das Crate ist ohne `disable_release` eingebunden.
-3. **Genau eine Uhr ist aktiv.** Der Moduswechsel tauscht die Uhr, er startet keine zweite.
+3. **Genau eine Uhr ist aktiv.** Der Moduswechsel tauscht die Uhr, er startet keine zweite. Im Player ist das die `Session`: Testbild oder Datei, ein Enum, eine Uhr (Test `a_file_swaps_the_clock_and_the_test_picture_swaps_it_back`).
 4. **Zeitstempel sind niemals `f64`.** Immer `Timestamp` mit rationaler Basis. Gleitkomma ausschließlich zur Anzeige, und das Ergebnis fließt nie in eine Rechnung zurück.
 5. **Kommunikation zum Audio-Thread ausschließlich wartefrei:** Atomics, Seqlock, lock-freie SPSC-Ringpuffer. Der Ring für die Samples: [`crates/takt-audio/src/ring.rs`](../crates/takt-audio/src/ring.rs) (eigene Umsetzung statt `rtrb`, die Slots sind `AtomicU32`, damit kein `unsafe` nötig ist).
 6. **Zähler statt Protokoll.** Der Audio-Thread schreibt Zahlen, die ein anderer Thread ausliest und ausgibt.
