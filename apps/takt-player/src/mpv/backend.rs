@@ -81,6 +81,8 @@ const MAX_EXTRAPOLATION_NANOS: u64 = 100_000_000;
 /// a second one meanwhile: two are needed. The other two are room for a
 /// consumer that keeps a frame a pass longer.
 const POOL_FRAMES: usize = 4;
+/// The furthest the subtitles are moved against the picture: a minute.
+const MAX_SUBTITLE_SHIFT_MILLIS: i32 = 60_000;
 /// How long a source may take to open.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest lead mpv is asked for: a tenth of a second.
@@ -198,6 +200,9 @@ pub struct MpvBackend {
     early: Early,
     /// The lead mpv has now, in microseconds.
     early_micros: u32,
+    /// How much later than the file says the subtitles are shown, in
+    /// milliseconds (negative: earlier).
+    subtitle_shift: i32,
     sound_line: String,
     clock: Arc<AudioMasterClock>,
     writer: AudioClockWriter,
@@ -226,6 +231,13 @@ fn backend_error(error: super::ffi::MpvError) -> Error {
 
 /// Whole microseconds as seconds with six decimals, from integers: no float
 /// is formatted. Negative values are zero.
+/// Milliseconds as the seconds mpv reads, with a sign: `-0.100`.
+fn signed_seconds_text(millis: i32) -> String {
+    let size = millis.unsigned_abs();
+    let sign = if millis < 0 { "-" } else { "" };
+    format!("{sign}{}.{:03}", size / 1_000, size % 1_000)
+}
+
 fn seconds_text(micros: i64) -> String {
     let micros = micros.max(0);
     format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
@@ -403,6 +415,7 @@ impl MpvBackend {
             sources: config.sources,
             early: config.early,
             early_micros: fixed,
+            subtitle_shift: 0,
             sound_line,
             clock: Arc::new(clock),
             writer,
@@ -516,6 +529,49 @@ impl MpvBackend {
             .command("cycle", &["cycle", property])
             .map_err(backend_error)?;
         Ok(self.track_label(kind))
+    }
+
+    /// Shows the subtitles `by_millis` later than now (negative: earlier)
+    /// and returns the shift against the file that holds from here on, at
+    /// most a minute either way. It stays for the files that follow.
+    ///
+    /// # Errors
+    ///
+    /// When mpv refuses the value; the shift is unchanged then.
+    pub fn shift_subtitles(&mut self, by_millis: i32) -> takt_core::Result<i32> {
+        let wanted = self
+            .subtitle_shift
+            .saturating_add(by_millis)
+            .clamp(-MAX_SUBTITLE_SHIFT_MILLIS, MAX_SUBTITLE_SHIFT_MILLIS);
+        self.mpv
+            .set(c"sub-delay", &signed_seconds_text(wanted))
+            .map_err(backend_error)?;
+        self.subtitle_shift = wanted;
+        Ok(wanted)
+    }
+
+    /// Adds the subtitle file `path` to the file that plays, shows it, and
+    /// names the track. The file is judged like a source ([`Sources`]): for
+    /// the window it has to be a file that exists. What it may hold is the
+    /// same as for a subtitle file next to the film (module documentation):
+    /// formatting, but no way to another file or into the network.
+    ///
+    /// mpv reads the file before this returns: a local file takes
+    /// milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// When nothing plays, the file may not be opened, or mpv cannot read
+    /// it as subtitles.
+    pub fn add_subtitles(&mut self, path: &str) -> takt_core::Result<String> {
+        if !self.loaded {
+            return Err(Error::SourceUnavailable("no file plays".to_owned()));
+        }
+        let path = self.checked(path)?;
+        self.mpv
+            .command("sub-add", &["sub-add", &path, "select"])
+            .map_err(|_| Error::SourceUnavailable("mpv cannot read it as subtitles".to_owned()))?;
+        Ok(self.track_label(Track::Subtitle))
     }
 
     /// The track of `kind` that plays now, for a label: its number, and its
@@ -962,6 +1018,16 @@ mod tests {
     }
 
     #[test]
+    fn milliseconds_as_signed_seconds_without_a_float() {
+        assert_eq!(signed_seconds_text(0), "0.000");
+        assert_eq!(signed_seconds_text(100), "0.100");
+        assert_eq!(signed_seconds_text(-100), "-0.100");
+        assert_eq!(signed_seconds_text(-60_000), "-60.000");
+        assert_eq!(signed_seconds_text(1_005), "1.005");
+        assert_eq!(signed_seconds_text(i32::MIN), "-2147483.648");
+    }
+
+    #[test]
     fn microseconds_as_seconds_without_a_float() {
         assert_eq!(seconds_text(0), "0.000000");
         assert_eq!(seconds_text(8_333), "0.008333");
@@ -1013,6 +1079,31 @@ mod tests {
         assert_eq!(
             devices(&escaped)[0],
             ("a\u{e4}\n".to_owned(), "b\\c".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_subtitles_move_against_the_picture_by_steps_up_to_a_minute() {
+        let mut backend = backend(Sources::Files);
+        assert_eq!(backend.shift_subtitles(100).unwrap(), 100);
+        assert_eq!(backend.shift_subtitles(100).unwrap(), 200);
+        assert_eq!(
+            backend.mpv.string(c"sub-delay").as_deref(),
+            Some("0.200000")
+        );
+        assert_eq!(backend.shift_subtitles(-300).unwrap(), -100);
+        assert_eq!(
+            backend.mpv.string(c"sub-delay").as_deref(),
+            Some("-0.100000")
+        );
+        assert_eq!(backend.shift_subtitles(i32::MAX).unwrap(), 60_000);
+        assert_eq!(backend.shift_subtitles(i32::MIN).unwrap(), -60_000);
+        assert_eq!(backend.shift_subtitles(i32::MIN).unwrap(), -60_000);
+        // It holds for the file that is opened next.
+        backend.open(&clip()).unwrap();
+        assert_eq!(
+            backend.mpv.string(c"sub-delay").as_deref(),
+            Some("-60.000000")
         );
     }
 
@@ -1313,6 +1404,64 @@ mod tests {
         // is what keeps it out, and this test would notice its loss.
         let (_, texts) = external_subtitles(&folder, true);
         assert!(shows(&texts, "TAKT-CANARY"), "the control: {texts:?}");
+
+        // And it is the track mpv shows without being asked, although this
+        // film has two subtitle tracks of its own.
+        let mut chosen = backend(Sources::Files);
+        chosen.open(&plain.film()).unwrap();
+        assert_eq!(
+            chosen.mpv.flag(c"current-tracks/sub/external"),
+            Some(true),
+            "sid {:?}",
+            chosen.mpv.string(c"sid")
+        );
+        drop(chosen);
+
+        // The same rule for a subtitle file dropped on the window.
+        let dropped = Folder::new("sub-dropped");
+        let good = dropped.write("later.srt", &srt("{\\an8}TAKT-DROPPED"));
+        let other = dropped.write("other.txt", &srt("TAKT-CANARY"));
+        let hostile = dropped.write("hostile.srt", &edl(&other));
+        let mut backend = self::backend(Sources::Files);
+        // Nothing plays: nothing to add it to.
+        assert!(backend.add_subtitles(&good).is_err());
+        backend.open(&dropped.film()).unwrap();
+        let before = backend.mpv.int(c"track-list/count");
+        assert!(
+            backend.add_subtitles(&hostile).is_err(),
+            "a list is no subtitles"
+        );
+        assert!(backend.add_subtitles("takt-no-such-file.srt").is_err());
+        assert!(
+            backend.add_subtitles("http://127.0.0.1:9/a.srt").is_err(),
+            "an address is no file"
+        );
+        assert_eq!(
+            backend.mpv.int(c"track-list/count"),
+            before,
+            "none was added"
+        );
+        let label = backend.add_subtitles(&good).unwrap();
+        assert!(label.starts_with("subtitles: "), "{label}");
+        assert_eq!(
+            backend.mpv.int(c"track-list/count"),
+            before.map(|n| n + 1),
+            "the dropped file is a track, and the one that shows"
+        );
+        assert_eq!(backend.mpv.flag(c"current-tracks/sub/external"), Some(true));
+        let clock = backend.clock();
+        let started = Instant::now();
+        let mut texts = Vec::new();
+        while started.elapsed() < Duration::from_millis(800) {
+            let _ = backend.next_frame(clock.as_ref());
+            texts.extend(backend.mpv.string(c"sub-text").filter(|t| !t.is_empty()));
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(shows(&texts, "TAKT-DROPPED"), "{texts:?}");
+        assert!(
+            !shows(&texts, "an8") && !shows(&texts, "TAKT-CANARY"),
+            "{texts:?}"
+        );
 
         // And it does not make mpv connect anywhere, whatever it holds.
         for kind in ["edl", "m3u", "ass"] {

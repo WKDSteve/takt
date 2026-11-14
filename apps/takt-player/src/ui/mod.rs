@@ -314,11 +314,24 @@ impl PlayerApp {
     /// Makes `paths` (files, or folders of media files) the playlist, or
     /// appends them, and plays the entry the playlist starts with.
     fn take_paths(&mut self, paths: &[PathBuf], append: bool) {
+        let base = std::env::current_dir().unwrap_or_default();
+        // A subtitle file is no entry of the playlist: it is shown with the
+        // file that plays.
+        let (subtitles, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
+            .iter()
+            .cloned()
+            .partition(|path| playlist::is_subtitles(path));
+        for file in subtitles {
+            let file = playlist::normalise(&file, &base);
+            self.notice = Some(match self.session.add_subtitles(&file) {
+                Ok(track) => track,
+                Err(e) => format!("cannot show {}: {e}", Playlist::label(&file)),
+            });
+        }
         if paths.is_empty() {
             return;
         }
-        let base = std::env::current_dir().unwrap_or_default();
-        let (entries, problems) = playlist::expand(paths, &base);
+        let (entries, problems) = playlist::expand(&paths, &base);
         self.drop_problems = problems;
         let start = if append {
             self.playlist.append(entries)
@@ -467,6 +480,13 @@ impl PlayerApp {
                     self.session
                         .cycle_track(kind)
                         .unwrap_or_else(|| "the test picture has no tracks".to_owned()),
+                );
+            }
+            Command::ShiftSubtitles(by) => {
+                self.notice = Some(
+                    self.session
+                        .shift_subtitles(by)
+                        .unwrap_or_else(|| "the test picture has no subtitles".to_owned()),
                 );
             }
             Command::Next => {
@@ -636,6 +656,8 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     egui::Key::M => Some(command_for(Key::M)),
                     egui::Key::F8 => Some(command_for(Key::F8)),
                     egui::Key::J => Some(command_for(Key::J)),
+                    egui::Key::Z => Some(command_for(Key::Z)),
+                    egui::Key::X => Some(command_for(Key::X)),
                     _ => None,
                 },
                 // Characters that sit on different keys per layout come as text.

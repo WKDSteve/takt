@@ -33,6 +33,19 @@ pub fn is_media(path: &Path) -> bool {
         .is_some_and(|e| MEDIA_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// File extensions of a subtitle file (lower case): text formats that
+/// are one file. A dropped one is not an entry of the playlist; it is shown
+/// with the file that plays.
+pub const SUBTITLE_EXTENSIONS: [&str; 4] = ["srt", "ass", "ssa", "vtt"];
+
+/// Whether `path` names a subtitle file by its extension.
+#[must_use]
+pub fn is_subtitles(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| SUBTITLE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 /// File extensions of a playlist file (lower case).
 pub const LIST_EXTENSIONS: [&str; 2] = ["m3u", "m3u8"];
 
@@ -538,6 +551,9 @@ mod tests {
         )
         .unwrap();
         assert!(is_list(&list) && !is_list(&dir.join("one.mkv")));
+        assert!(is_subtitles(Path::new("film.SRT")) && is_subtitles(Path::new("a/b.ass")));
+        assert!(!is_subtitles(&list) && !is_subtitles(Path::new("film.mkv")));
+        assert!(!is_subtitles(Path::new("srt")), "a name, not an extension");
 
         // Dropped next to a plain file: the list stands for its entries.
         let (entries, problems) = expand(&[list.clone(), dir.join("zero.mkv")], &dir);

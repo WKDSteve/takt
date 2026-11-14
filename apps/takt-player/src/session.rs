@@ -469,6 +469,46 @@ impl Session {
         }
     }
 
+    /// Shows the subtitle file `path` with the file that plays and names
+    /// the track.
+    ///
+    /// # Errors
+    ///
+    /// A text for the user: the test picture takes no subtitles, or why the
+    /// file is not shown.
+    pub fn add_subtitles(&mut self, path: &Path) -> Result<String, String> {
+        match &mut self.kind {
+            Kind::Test(_) => {
+                let _ = path;
+                Err("no file plays".to_owned())
+            }
+            #[cfg(takt_libmpv)]
+            Kind::File(file) => file
+                .source
+                .add_subtitles(&path.to_string_lossy())
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Shows the subtitles `by_millis` later (negative: earlier) and says
+    /// in a line where they stand now; `None` when what plays has no
+    /// subtitles to move (the test picture).
+    pub fn shift_subtitles(&mut self, by_millis: i32) -> Option<String> {
+        match &mut self.kind {
+            Kind::Test(_) => {
+                let _ = by_millis;
+                None
+            }
+            #[cfg(takt_libmpv)]
+            Kind::File(file) => Some(match file.source.shift_subtitles(by_millis) {
+                Ok(0) => "subtitles: as the file says".to_owned(),
+                Ok(shift) if shift > 0 => format!("subtitles: {shift} ms later"),
+                Ok(shift) => format!("subtitles: {} ms earlier", shift.unsigned_abs()),
+                Err(e) => e.to_string(),
+            }),
+        }
+    }
+
     /// Length of what plays, in milliseconds; 0 when a file does not say.
     #[must_use]
     pub fn duration_millis(&self) -> i64 {
@@ -618,6 +658,11 @@ mod tests {
         assert_eq!(session.pool().1, TEST_POOL_FRAMES);
         assert!(session.audio_line().starts_with("SIMULATED"));
         assert_eq!(session.cycle_track(TrackKind::Subtitle), None);
+        assert_eq!(session.shift_subtitles(100), None);
+        assert_eq!(
+            session.add_subtitles(Path::new("film.srt")),
+            Err("no file plays".to_owned())
+        );
         session.set_paused(true);
         session.seek_to(90_000);
         assert_eq!(session.now_millis(), 90_000, "held at the target");
@@ -679,6 +724,24 @@ mod tests {
         }
         assert_eq!(frames, 3);
         assert!(session.cycle_track(TrackKind::Subtitle).is_some());
+        let line = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            session.shift_subtitles(100),
+            line("subtitles: 100 ms later")
+        );
+        assert_eq!(
+            session.shift_subtitles(-200),
+            line("subtitles: 100 ms earlier")
+        );
+        assert_eq!(
+            session.shift_subtitles(100),
+            line("subtitles: as the file says")
+        );
+        assert!(
+            session
+                .add_subtitles(Path::new("takt-no-such.srt"))
+                .is_err()
+        );
 
         // The next file plays on the same backend and the same clock.
         session.open_file(Path::new(clip)).unwrap();

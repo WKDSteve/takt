@@ -38,7 +38,13 @@ pub enum Command {
     CycleSubtitles,
     /// The next sound track of the file.
     CycleAudio,
+    /// Show the subtitles this many milliseconds later (negative: earlier).
+    ShiftSubtitles(i32),
 }
+
+/// How far a subtitle key moves the subtitles against the picture, as in
+/// mpv.
+pub const SUBTITLE_STEP_MILLIS: i32 = 100;
 
 /// How far the volume keys move the volume.
 pub const VOLUME_STEP: f32 = 0.05;
@@ -81,11 +87,15 @@ pub enum Key {
     J,
     /// `#`, the next sound track (as in mpv).
     Hash,
+    /// `z`, subtitles earlier (as in mpv).
+    Z,
+    /// `x`, subtitles later (as in mpv).
+    X,
 }
 
 /// Every key with its label and what it does: the one table the help overlay
 /// and `docs/KEYS.md` are made from (a test holds the file to it).
-pub const BINDINGS: [(Key, &str, &str); 16] = [
+pub const BINDINGS: [(Key, &str, &str); 18] = [
     (Key::Space, "Space", "play / pause"),
     (Key::Left, "Left", "jump back 5 s"),
     (Key::Right, "Right", "jump forward 5 s"),
@@ -95,6 +105,8 @@ pub const BINDINGS: [(Key, &str, &str); 16] = [
     (Key::M, "m", "mute / unmute"),
     (Key::J, "j", "next subtitle track of the file (then none)"),
     (Key::Hash, "#", "next sound track of the file"),
+    (Key::Z, "z", "subtitles 100 ms earlier"),
+    (Key::X, "x", "subtitles 100 ms later"),
     (Key::Greater, ">", "next entry of the playlist"),
     (Key::Less, "<", "entry before in the playlist"),
     (Key::F8, "F8", "show / hide the playlist"),
@@ -105,13 +117,17 @@ pub const BINDINGS: [(Key, &str, &str); 16] = [
 ];
 
 /// What the mouse does, for the same list.
-pub const MOUSE: [(&str, &str); 3] = [
+pub const MOUSE: [(&str, &str); 4] = [
     ("Click / drag on the timeline", "jump there"),
     (
         "Drop files or folders",
         "play them (a folder: its media files by name)",
     ),
     ("Drop with Shift held", "append them to the playlist"),
+    (
+        "Drop a subtitle file (.srt, .ass, .ssa, .vtt)",
+        "show it with the file that plays",
+    ),
 ];
 
 /// `docs/KEYS.md`, made from [`BINDINGS`] and [`MOUSE`].
@@ -155,6 +171,8 @@ pub fn command_for(key: Key) -> Command {
         Key::Question => Command::ToggleHelp,
         Key::J => Command::CycleSubtitles,
         Key::Hash => Command::CycleAudio,
+        Key::Z => Command::ShiftSubtitles(-SUBTITLE_STEP_MILLIS),
+        Key::X => Command::ShiftSubtitles(SUBTITLE_STEP_MILLIS),
     }
 }
 
@@ -286,6 +304,7 @@ impl PlayerState {
             | Command::Previous
             | Command::CycleSubtitles
             | Command::CycleAudio
+            | Command::ShiftSubtitles(_)
             | Command::SaveDiagnostics => false,
         }
     }
@@ -407,7 +426,9 @@ mod tests {
             | Key::F8
             | Key::Question
             | Key::J
-            | Key::Hash => (),
+            | Key::Hash
+            | Key::Z
+            | Key::X => (),
         };
         for (key, _, _) in BINDINGS {
             all(key);
@@ -417,7 +438,7 @@ mod tests {
                 "{key:?}"
             );
         }
-        assert_eq!(BINDINGS.len(), 16, "every variant of Key, once");
+        assert_eq!(BINDINGS.len(), 18, "every variant of Key, once");
     }
 
     #[test]
@@ -439,6 +460,9 @@ mod tests {
         let before = state.clone();
         assert!(!state.apply(Command::CycleSubtitles));
         assert!(!state.apply(Command::CycleAudio));
+        assert_eq!(command_for(Key::Z), Command::ShiftSubtitles(-100));
+        assert_eq!(command_for(Key::X), Command::ShiftSubtitles(100));
+        assert!(!state.apply(command_for(Key::Z)) && !state.apply(command_for(Key::X)));
         assert_eq!(state, before);
     }
 

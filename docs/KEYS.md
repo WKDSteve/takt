@@ -13,6 +13,8 @@ Erzeugt aus `BINDINGS` in `apps/takt-player/src/app.rs`; der Test `docs_keys_md_
 | `m` | mute / unmute |
 | `j` | next subtitle track of the file (then none) |
 | `#` | next sound track of the file |
+| `z` | subtitles 100 ms earlier |
+| `x` | subtitles 100 ms later |
 | `>` | next entry of the playlist |
 | `<` | entry before in the playlist |
 | `F8` | show / hide the playlist |
@@ -26,3 +28,4 @@ Erzeugt aus `BINDINGS` in `apps/takt-player/src/app.rs`; der Test `docs_keys_md_
 | Click / drag on the timeline | jump there |
 | Drop files or folders | play them (a folder: its media files by name) |
 | Drop with Shift held | append them to the playlist |
+| Drop a subtitle file (.srt, .ass, .ssa, .vtt) | show it with the file that plays |
