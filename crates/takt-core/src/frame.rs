@@ -49,7 +49,68 @@ impl FrameMeta {
     }
 }
 
+/// Ausrichtung der Ebenen eines [`VideoFrame`] in Bytes: eine Cache-Zeile,
+/// und genug fuer jede SIMD-Breite bis AVX-512.
+pub const PLANE_ALIGN: usize = 64;
+
+/// Eine Ebene: ihre Zeilen liegen ab `start` in `data`.
+#[derive(Debug)]
+struct Plane {
+    /// `len + PLANE_ALIGN` Bytes; der Vorrat erlaubt, den Anfang auf die
+    /// naechste ausgerichtete Adresse zu schieben. Wird nie in der Groesse
+    /// geaendert, die Adresse bleibt also ueber die Lebenszeit dieselbe.
+    data: Vec<u8>,
+    start: usize,
+    /// `stride * Zeilen`.
+    len: usize,
+    stride: usize,
+    /// Genutzte Bytes je Zeile, ohne Padding.
+    row: usize,
+}
+
+impl Plane {
+    fn alloc(row: usize, rows: usize) -> Option<Self> {
+        let stride = row.checked_next_multiple_of(PLANE_ALIGN)?;
+        let len = stride.checked_mul(rows)?;
+        let data = vec![0_u8; len.checked_add(PLANE_ALIGN)?];
+        // `align_offset` darf laut Doku ablehnen (`usize::MAX`); dann beginnt
+        // die Ebene unausgerichtet. Das kostet Verbraucher hoechstens Zeit,
+        // nie Korrektheit: niemand darf sich fuer die Sicherheit darauf
+        // verlassen.
+        let offset = data.as_ptr().align_offset(PLANE_ALIGN);
+        let start = if offset < PLANE_ALIGN { offset } else { 0 };
+        Some(Self {
+            data,
+            start,
+            len,
+            stride,
+            row,
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.data[self.start..self.start + self.len]
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data[self.start..self.start + self.len]
+    }
+}
+
 /// Ein Frame samt Bilddaten im Hauptspeicher.
+///
+/// # Ausrichtung
+///
+/// Jede Ebene beginnt an einer durch [`PLANE_ALIGN`] (64) teilbaren Adresse,
+/// und ihre Zeilenlaenge ([`VideoFrame::stride`]) ist ein Vielfaches davon.
+/// Ein Decoder oder Renderer mit SIMD-Schleifen (FFmpeg, mpv) kann damit
+/// direkt in das Frame schreiben, ohne eigene Zwischenflaeche und ohne Kopie.
+///
+/// Die Folge fuer jeden Leser: **eine Zeile ist `stride` Bytes lang, nicht
+/// `width` mal Bytes je Pixel.** Die genutzten Bytes nennt
+/// [`VideoFrame::row_bytes`]; was dahinter bis zur naechsten Zeile liegt, ist
+/// Padding mit unbestimmtem Inhalt (ein Frame aus dem Pool wird nicht
+/// geloescht).
 ///
 /// Ab Phase 1 tritt daneben eine Variante, die nur ein Handle auf eine
 /// GPU-Textur haelt. Die Rueckgabemechanik ist fuer beide dieselbe.
@@ -57,9 +118,7 @@ impl FrameMeta {
 pub struct VideoFrame {
     meta: FrameMeta,
     /// Eine Ebene pro [`PixelFormat::planes`].
-    planes: Vec<Vec<u8>>,
-    /// Bytes pro Zeile je Ebene. Kann groesser als `width` sein (Padding).
-    strides: Vec<usize>,
+    planes: Vec<Plane>,
 }
 
 impl VideoFrame {
@@ -70,7 +129,6 @@ impl VideoFrame {
     pub fn alloc(meta: FrameMeta) -> Option<Self> {
         let planes = meta.format.planes();
         let mut data = Vec::with_capacity(planes);
-        let mut strides = Vec::with_capacity(planes);
 
         let w = usize::try_from(meta.width).ok()?;
         let h = usize::try_from(meta.height).ok()?;
@@ -82,16 +140,11 @@ impl VideoFrame {
             let (pw, ph) = plane_dims(meta.format, plane, w, h)?;
             let bytes_per_sample = usize::from(meta.format.bit_depth() > 8) + 1;
             let components = meta.format.components(plane);
-            let stride = pw * bytes_per_sample * components;
-            data.push(vec![0_u8; stride * ph]);
-            strides.push(stride);
+            let row = pw.checked_mul(bytes_per_sample * components)?;
+            data.push(Plane::alloc(row, ph)?);
         }
 
-        Some(Self {
-            meta,
-            planes: data,
-            strides,
-        })
+        Some(Self { meta, planes: data })
     }
 
     /// Beschreibung dieses Frames.
@@ -106,28 +159,38 @@ impl VideoFrame {
         self.meta.pts = pts;
     }
 
-    /// Lesezugriff auf eine Ebene.
+    /// Lesezugriff auf eine Ebene: `stride` mal Zeilen Bytes ab einer
+    /// ausgerichteten Adresse (siehe [`VideoFrame`]).
     #[must_use]
     pub fn plane(&self, index: usize) -> Option<&[u8]> {
-        self.planes.get(index).map(Vec::as_slice)
+        self.planes.get(index).map(Plane::bytes)
     }
 
-    /// Schreibzugriff auf eine Ebene.
+    /// Schreibzugriff auf eine Ebene, dieselben Bytes wie
+    /// [`VideoFrame::plane`].
     #[must_use]
     pub fn plane_mut(&mut self, index: usize) -> Option<&mut [u8]> {
-        self.planes.get_mut(index).map(Vec::as_mut_slice)
+        self.planes.get_mut(index).map(Plane::bytes_mut)
     }
 
-    /// Bytes pro Zeile in der angegebenen Ebene.
+    /// Bytes von einer Zeile zur naechsten in der angegebenen Ebene: ein
+    /// Vielfaches von [`PLANE_ALIGN`], also oft mehr als die Zeile nutzt.
     #[must_use]
     pub fn stride(&self, index: usize) -> Option<usize> {
-        self.strides.get(index).copied()
+        self.planes.get(index).map(|p| p.stride)
     }
 
-    /// Gesamter belegter Speicher in Bytes.
+    /// Genutzte Bytes je Zeile in der angegebenen Ebene (Breite der Ebene
+    /// mal Bytes je Pixel), ohne das Padding bis [`VideoFrame::stride`].
+    #[must_use]
+    pub fn row_bytes(&self, index: usize) -> Option<usize> {
+        self.planes.get(index).map(|p| p.row)
+    }
+
+    /// Gesamter Speicher der Ebenen in Bytes, samt Zeilen-Padding.
     #[must_use]
     pub fn byte_size(&self) -> usize {
-        self.planes.iter().map(Vec::len).sum()
+        self.planes.iter().map(|p| p.len).sum()
     }
 }
 
@@ -323,8 +386,83 @@ mod tests {
         m.width = 1281;
         m.height = 721;
         let f = VideoFrame::alloc(m).unwrap();
-        assert_eq!(f.stride(1), Some(641));
-        assert_eq!(f.plane(1).unwrap().len(), 641 * 361);
+        assert_eq!(f.row_bytes(1), Some(641));
+        // 641 auf das naechste Vielfache von 64.
+        assert_eq!(f.stride(1), Some(704));
+        assert_eq!(f.plane(1).unwrap().len(), 704 * 361);
+    }
+
+    fn aligned(f: &VideoFrame, plane: usize) -> bool {
+        f.plane(plane).unwrap().as_ptr().align_offset(PLANE_ALIGN) == 0
+            && f.stride(plane).unwrap().is_multiple_of(PLANE_ALIGN)
+    }
+
+    #[test]
+    fn nv12_ebenen_beginnen_ausgerichtet_mit_ausgerichteter_zeilenlaenge() {
+        let mut m = meta(PixelFormat::Nv12);
+        // Eine Breite, die kein Vielfaches von 64 ist, und eine ungerade.
+        for (width, luma, chroma) in [
+            (1920_usize, 1920, 1920),
+            (1280, 1280, 1280),
+            (1001, 1024, 1024),
+        ] {
+            m.width = u32::try_from(width).unwrap();
+            let f = VideoFrame::alloc(m).unwrap();
+            assert!(aligned(&f, 0) && aligned(&f, 1), "width {width}");
+            assert_eq!(f.stride(0), Some(luma));
+            assert_eq!(f.stride(1), Some(chroma));
+            assert_eq!(f.row_bytes(0), Some(width));
+            assert_eq!(f.row_bytes(1), Some(width.div_ceil(2) * 2));
+            assert_eq!(f.plane(0).unwrap().len(), luma * 1080);
+            assert_eq!(f.plane(1).unwrap().len(), chroma * 540);
+        }
+    }
+
+    #[test]
+    fn rgb0_ebene_beginnt_ausgerichtet_mit_ausgerichteter_zeilenlaenge() {
+        let mut m = meta(PixelFormat::Rgb0);
+        m.width = 1921;
+        let mut f = VideoFrame::alloc(m).unwrap();
+        assert!(aligned(&f, 0));
+        assert_eq!(f.row_bytes(0), Some(7_684));
+        assert_eq!(
+            f.stride(0),
+            Some(7_744),
+            "1921 * 4 auf ein Vielfaches von 64"
+        );
+        assert_eq!(f.plane(0).unwrap().len(), 7_744 * 1080);
+        assert_eq!(f.byte_size(), 7_744 * 1080);
+        // Lese- und Schreibzugriff zeigen auf dieselben Bytes.
+        let at = f.plane_mut(0).unwrap().as_ptr();
+        assert_eq!(f.plane(0).unwrap().as_ptr(), at);
+        assert!(f.row_bytes(1).is_none());
+    }
+
+    #[test]
+    fn die_ausrichtung_ueberlebt_umzug_und_pool() {
+        // Das Frame zieht um (in eine Box, in den Pool und zurueck); die
+        // Bytes der Ebene bleiben, wo sie sind.
+        let f = VideoFrame::alloc(meta(PixelFormat::Rgb0)).unwrap();
+        let at = f.plane(0).unwrap().as_ptr();
+        let moved = Box::new(f);
+        assert_eq!(moved.plane(0).unwrap().as_ptr(), at);
+
+        let mut pool = FramePool::new(meta(PixelFormat::Nv12), 1);
+        let first = pool.acquire(Timestamp::from_millis(0)).unwrap();
+        let at = first.get().plane(0).unwrap().as_ptr();
+        assert!(aligned(first.get(), 0) && aligned(first.get(), 1));
+        drop(first);
+        let again = pool.acquire(Timestamp::from_millis(40)).unwrap();
+        assert_eq!(again.get().plane(0).unwrap().as_ptr(), at);
+        assert!(aligned(again.get(), 0) && aligned(again.get(), 1));
+    }
+
+    #[test]
+    fn eine_groesse_die_ueberlaeuft_wird_abgelehnt() {
+        let mut m = meta(PixelFormat::Rgb0);
+        m.width = u32::MAX;
+        m.height = u32::MAX;
+        assert!(VideoFrame::alloc(m).is_none());
     }
 
     #[test]

@@ -330,7 +330,7 @@ mod tests {
         let image = Rgb0Image::from_frame(&rgb).unwrap();
         assert_eq!(image.view().size(), (6, 2));
         assert_eq!(&image.view().pixels[..4], &[1, 2, 3, 0]);
-        assert_eq!(image.view().stride, 24);
+        assert_eq!(image.view().stride, 64);
         // The same bytes with another meaning are not taken by guessing.
         assert_eq!(
             Rgb0Image::from_frame(&frame(PixelFormat::Rgba8)).unwrap_err(),
