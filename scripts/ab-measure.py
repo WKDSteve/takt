@@ -8,7 +8,8 @@ table row per run:
     cargo build --release -p takt-player
     python scripts/ab-measure.py                      # NullBackend, headless: 23.976, 25, 50, 60 fps on 60 Hz, 5 min each
     python scripts/ab-measure.py --hz 60 120          # the same on two simulated displays
-    python scripts/ab-measure.py --mpv-sw             # libmpv through its software renderer, headless (needs libmpv)
+    python scripts/ab-measure.py --mpv-sw             # MpvBackend (libmpv, software renderer), headless (needs libmpv)
+    python scripts/ab-measure.py --mpv-sw --mpv-early 0   # the same without the lead of the backend
     python scripts/ab-measure.py --mpv                # mpv itself, display-resample and audio: needs a real screen
 
 Paths:
@@ -17,10 +18,12 @@ Paths:
          simulated (one pass per period, no vsync), so the numbers say what the scheduler decides, not what a screen
          shows. `--device NAME` plays the silence of the run on that output device (TAKT_AUDIO_DEVICE); without a
          device the clock is simulated and the row says so.
-  mpv-sw `takt-player --headless --mpv`: libmpv decodes the same pattern (from lavfi, with a silent sound track) and
-         renders it into memory; the error is `audio-pts - time-pos` of mpv at the pass that takes the frame, and the
-         row names what rendering a frame costs. Needs a player built with TAKT_LIBMPV_DIR (docs/BUILD.md) and the
-         libmpv library in PATH.
+  mpv-sw `takt-player --headless --mpv`: the MpvBackend on the same pattern (from lavfi, with a silent sound track).
+         libmpv decodes and renders into memory; the error is the clock of the backend (the sound position of mpv)
+         minus the timestamp of the frame at the pass that takes it, and the row names what rendering a frame and
+         copying it into a pooled frame costs. mpv hands a frame out half a display period early unless
+         `--mpv-early MICROS` names another lead. Silent (ao=null) unless `--device NAME` names a device. Needs a
+         player built with TAKT_LIBMPV_DIR (docs/BUILD.md) and the libmpv library in PATH.
   mpv    `mpv --video-sync=<mode>` on the same pattern from lavfi, with scripts/ab-mpv-stats.lua. mpv opens a window
          and measures against the real refresh of the screen it is on; `--ao=null` keeps it silent. mpv has no
          histogram of presentation errors: its row holds the vsync jitter and its own counters instead.
@@ -90,8 +93,8 @@ def null_row(result, date, hardware):
         # The quantile of this path is exact, the render time an upper bound of its class.
         lead = millis(result.get("offset_us", "0"))
         path = (
-            f"libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf {lead}; "
-            f"Rendern p99 < {millis(result['render_p99_us'])})"
+            f"MpvBackend, kopflos (Uhr von mpv, Vorlauf {lead}; "
+            f"Rendern und Kopie p99 < {millis(result['render_p99_us'])})"
         )
         bound = ""
     else:
@@ -156,7 +159,9 @@ def main():
     parser.add_argument("--mpv", action="store_true", help="measure mpv itself instead (opens a window)")
     parser.add_argument("--mpv-sw", action="store_true", help="measure libmpv through takt-player --headless --mpv")
     parser.add_argument(
-        "--mpv-early", type=int, default=0, help="mpv-sw: microseconds mpv hands a frame out before its time"
+        "--mpv-early",
+        type=int,
+        help="mpv-sw: microseconds mpv hands a frame out before its time (default: half the display period)",
     )
     parser.add_argument("--mpv-path", default="mpv", help="mpv binary (default: from PATH)")
     parser.add_argument("--no-header", action="store_true", help="rows only")
@@ -207,7 +212,9 @@ def main():
             for fps in args.fps:
                 command = [args.player, "--headless", "--fps", fps, "--hz", hz, "--seconds", str(args.seconds)]
                 if args.mpv_sw:
-                    command += ["--mpv", pattern(fps), "--mpv-early", str(args.mpv_early)]
+                    command += ["--mpv", pattern(fps)]
+                    if args.mpv_early is not None:
+                        command += ["--mpv-early", str(args.mpv_early)]
                 result, why = run(command, env)
                 if result is None:
                     print(f"ab-measure: null {fps} at {hz} Hz: {why}", file=sys.stderr)

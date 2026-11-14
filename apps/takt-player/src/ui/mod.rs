@@ -96,6 +96,9 @@ struct PlayerApp {
     playlist: Playlist,
     /// What the last drop could not take (folders without media, errors).
     drop_problems: Vec<String>,
+    /// The upload times of the texture path used last, as read in the last
+    /// pass: the window is gone when the run prints its numbers.
+    uploads: Option<takt_audio::DurationSnapshot>,
 }
 
 impl PlayerApp {
@@ -134,6 +137,7 @@ impl PlayerApp {
             scrub: None,
             playlist: Playlist::default(),
             drop_problems: Vec::new(),
+            uploads: None,
         };
         app.take_paths(files, false);
         app
@@ -595,6 +599,7 @@ impl eframe::App for PlayerApp {
             self.help_window(ctx);
         }
         let uploads = frame.wgpu_render_state().and_then(render::uploads);
+        self.uploads.clone_from(&uploads);
 
         egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -705,6 +710,15 @@ impl Drop for PlayerApp {
         println!("takt-player: {}", self.summary());
         println!("takt-player: source {}", self.session.source_line());
         println!("takt-player: audio {}", self.session.audio_line());
+        if let Some(u) = self.uploads.as_ref().filter(|u| u.total() > 0) {
+            println!(
+                "takt-player: upload p50 <{} us, p99 <{} us, max {} us over {} frames",
+                u.quantile_micros(1, 2).unwrap_or(0),
+                u.quantile_micros(99, 100).unwrap_or(0),
+                u.max_nanos() / 1_000,
+                u.total()
+            );
+        }
         let cost = self.overlay_cost.snapshot();
         if let Some((p50, max)) = diagnostics::overlay_cost(&cost) {
             println!(
