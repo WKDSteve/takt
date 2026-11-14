@@ -8,7 +8,7 @@
 //! rest of the program sees.
 #![allow(unsafe_code)]
 
-use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_double, c_int, c_ulong, c_void};
 use std::fmt;
 use std::marker::{PhantomData, PhantomPinned};
 use std::ptr::{self, NonNull};
@@ -47,7 +47,7 @@ struct RawEvent {
 /// The head of `mpv_event_end_file`, the data of [`EVENT_END_FILE`]. Only
 /// these fields are read, so fields a newer libmpv adds behind do not
 /// matter. `playlist_entry_id` is there since client API 1.108 (mpv 0.33);
-/// the player asks for 2.x.
+/// [`Mpv::new`] refuses a library older than 2.0 ([`supported`]).
 #[repr(C)]
 struct RawEndFile {
     reason: c_int,
@@ -95,6 +95,8 @@ const RENDER_UPDATE_FRAME: u64 = 1;
 
 /// `MPV_ERROR_NOMEM`, what a null handle of `mpv_create` is reported as.
 const ERROR_NOMEM: c_int = -1;
+/// `MPV_ERROR_UNSUPPORTED`, what a libmpv that is too old is reported as.
+const ERROR_UNSUPPORTED: c_int = -18;
 /// `MPV_ERROR_INVALID_PARAMETER`, for a text that cannot be a C string.
 const ERROR_INVALID_PARAMETER: c_int = -4;
 
@@ -105,6 +107,9 @@ pub const MAX_HEIGHT: u32 = 4_320;
 
 #[link(name = "mpv")]
 unsafe extern "C" {
+    /// `MPV_CLIENT_API_VERSION` of the library that is loaded: the major
+    /// number in the upper 16 bits, the minor one below.
+    safe fn mpv_client_api_version() -> c_ulong;
     /// Returns a new handle, or null on OOM or if `LC_NUMERIC` is not "C".
     safe fn mpv_create() -> *mut Handle;
     fn mpv_initialize(ctx: *mut Handle) -> c_int;
@@ -248,9 +253,18 @@ impl Mpv {
     ///
     /// # Errors
     ///
-    /// [`MpvError`] with the call that failed: an unknown option, a value
-    /// mpv refuses, or a libmpv built without the software renderer.
+    /// [`MpvError`] with the call that failed: a libmpv older than client
+    /// API 2.0, an unknown option, a value mpv refuses, or a libmpv built
+    /// without the software renderer.
     pub fn new(options: &[(&CStr, &CStr)]) -> Result<Self, MpvError> {
+        // Before anything of the library is read: the structs in here are
+        // those of client API 2.x.
+        if !supported(mpv_client_api_version()) {
+            return Err(MpvError {
+                step: "mpv_client_api_version (2.0 or newer is needed)",
+                code: ERROR_UNSUPPORTED,
+            });
+        }
         let core = Core(NonNull::new(mpv_create()).ok_or(MpvError {
             step: "mpv_create",
             code: ERROR_NOMEM,
@@ -590,6 +604,14 @@ impl<'a> Target<'a> {
     }
 }
 
+/// Whether the structs of this module fit a library of this
+/// `MPV_CLIENT_API_VERSION`: major number 2 or newer (mpv 0.35, 2022). The
+/// events read here got their entry numbers with 1.108 and the software
+/// renderer came with 1.109; a newer major number only adds behind them.
+pub const fn supported(version: c_ulong) -> bool {
+    version >> 16 >= 2
+}
+
 /// Whether a picture of this size is rendered at all: not empty, at most 8K.
 pub const fn fits(width: u32, height: u32) -> bool {
     width != 0 && height != 0 && width <= MAX_WIDTH && height <= MAX_HEIGHT
@@ -614,6 +636,19 @@ mod tests {
         assert!(Target::new(&mut rows, 1, 3, usize::MAX).is_none());
         assert!(Target::new(&mut rows, 0, 3, 64).is_none());
         assert!(Target::new(&mut rows, 16, 0, 64).is_none());
+    }
+
+    #[test]
+    fn a_library_older_than_client_api_2_is_refused() {
+        assert!(!supported(0));
+        assert!(!supported((1 << 16) | 107), "mpv 0.32: no entry numbers");
+        assert!(!supported((1 << 16) | 109), "mpv 0.33 and 0.34");
+        assert!(supported(2 << 16), "mpv 0.35");
+        assert!(supported((2 << 16) | 5));
+        assert!(supported(3 << 16));
+        // The library these tests run against is one of them.
+        assert!(supported(mpv_client_api_version()));
+        assert!(Mpv::new(&[(c"vo", c"libmpv"), (c"ao", c"null")]).is_ok());
     }
 
     #[test]
