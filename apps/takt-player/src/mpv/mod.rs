@@ -296,12 +296,15 @@ mod tests {
         // A loaded machine shows fewer; none at all would be the fault.
         assert!((10..=51).contains(&report.shown), "{report:?}");
         assert_eq!(report.passes, report.shown + report.repeated);
-        assert_eq!(
+        // Every frame that was shown was rendered; the render thread may
+        // have rendered one more that no pass took.
+        assert!(
             report
                 .render
                 .as_ref()
-                .map(takt_audio::DurationSnapshot::total),
-            Some(report.shown)
+                .map(takt_audio::DurationSnapshot::total)
+                .is_some_and(|rendered| rendered >= report.shown),
+            "{report:?}"
         );
         // The frames go to the pass nearest their time: within a period.
         assert!(

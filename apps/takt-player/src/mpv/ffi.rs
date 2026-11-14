@@ -4,14 +4,24 @@
 //! calls.
 //!
 //! The one module of the player with `unsafe` (KONZEPT, unsafe policy):
-//! declarations and calls stay in here, [`Mpv`] and [`Target`] are what the
-//! rest of the program sees.
+//! declarations and calls stay in here; [`Mpv`], [`Renderer`] and [`Target`]
+//! are what the rest of the program sees.
+//!
+//! Two types for two threads, as `render.h` asks ("Threading"): [`Mpv`] is
+//! the core as a client sees it (commands, properties, events) and stays
+//! with the thread that steers; [`Renderer`] is the render context and goes
+//! to a thread that does nothing but render. That thread must never wait
+//! for the core while a frame waits for it, so a `Renderer` offers the
+//! render calls and, to stamp and size a frame, the two property reads its
+//! owner makes right around a render.
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_ulong, c_void};
 use std::fmt;
 use std::marker::{PhantomData, PhantomPinned};
 use std::ptr::{self, NonNull};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 /// Opaque `mpv_handle`. The marker keeps it from being `Send`, `Sync` or
 /// `Unpin` by accident (Nomicon pattern).
@@ -150,6 +160,13 @@ unsafe extern "C" {
         mpv: *mut Handle,
         params: *mut RenderParam,
     ) -> c_int;
+    /// `callback` is called from any thread of mpv with `callback_ctx` when
+    /// a frame may wait; it must not call into mpv. `None` removes it.
+    fn mpv_render_context_set_update_callback(
+        ctx: *mut RenderContext,
+        callback: Option<unsafe extern "C" fn(*mut c_void)>,
+        callback_ctx: *mut c_void,
+    );
     fn mpv_render_context_update(ctx: *mut RenderContext) -> u64;
     fn mpv_render_context_render(ctx: *mut RenderContext, params: *mut RenderParam) -> c_int;
     fn mpv_render_context_free(ctx: *mut RenderContext);
@@ -235,25 +252,114 @@ struct Core(NonNull<Handle>);
 impl Drop for Core {
     fn drop(&mut self) {
         // SAFETY: the handle came from mpv_create and is destroyed exactly
-        // once, here. A render context of this core is freed before (see
-        // the drop of `Mpv`), as render.h asks.
+        // once, here. A render context of this core is freed before: the
+        // `Renderer` holds a share of this core and frees its context in
+        // its own drop, before it lets go of the share (render.h asks for
+        // that order).
         unsafe { mpv_terminate_destroy(self.0.as_ptr()) }
     }
 }
 
-/// An mpv core that renders into memory ([`Target`]) instead of a window.
-pub struct Mpv {
-    render: NonNull<RenderContext>,
-    // Dropped after `render` was freed in `drop`.
-    core: Core,
+// SAFETY: the handle binds to no thread and client.h calls the client API
+// thread-safe ("generally fully thread-safe"), so the core may be reached
+// from the steering thread and the render thread at once. The one call
+// that is for a single thread, mpv_wait_event, is made only by `Mpv::poll`,
+// which takes `&mut Mpv`, and an `Mpv` is not cloned.
+unsafe impl Send for Core {}
+// SAFETY: as above.
+unsafe impl Sync for Core {}
+
+impl Core {
+    /// A property as a floating point number, `None` while mpv has none.
+    fn double(&self, name: &CStr) -> Option<f64> {
+        let mut value = 0.0_f64;
+        // SAFETY: the handle is live, the name NUL-terminated, and `value`
+        // is the double FORMAT_DOUBLE asks for.
+        let code = unsafe {
+            mpv_get_property(
+                self.0.as_ptr(),
+                name.as_ptr(),
+                FORMAT_DOUBLE,
+                (&raw mut value).cast(),
+            )
+        };
+        (code >= 0).then_some(value)
+    }
+
+    /// A property as an integer, `None` while mpv has none.
+    fn int(&self, name: &CStr) -> Option<i64> {
+        let mut value = 0_i64;
+        // SAFETY: as in `double`, with the int64_t FORMAT_INT64 asks for.
+        let code = unsafe {
+            mpv_get_property(
+                self.0.as_ptr(),
+                name.as_ptr(),
+                FORMAT_INT64,
+                (&raw mut value).cast(),
+            )
+        };
+        (code >= 0).then_some(value)
+    }
 }
 
-// SAFETY: the two pointers are handles of libmpv, which binds them to no
-// thread: client.h calls the client API thread-safe, and render.h allows the
-// render calls of the software renderer on any thread as long as they do not
-// run at the same time. Every method takes `&mut self`, so a moved `Mpv` is
-// still used by one thread at a time. It is not `Sync`.
-unsafe impl Send for Mpv {}
+/// What wakes the render thread: mpv says a frame may wait, or the owner
+/// of the thread wants it to look up.
+struct Wake {
+    pending: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Wake {
+    fn signal(&self) {
+        // A poisoned lock still holds the flag; a wake must not be lost.
+        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_one();
+    }
+}
+
+/// The update callback of mpv (`mpv_render_context_set_update_callback`).
+/// It only raises the flag: render.h forbids calls into mpv from here.
+unsafe extern "C" fn on_update(context: *mut c_void) {
+    // SAFETY: `context` is the pointer `Mpv::new` took from the `Arc<Wake>`
+    // of the `Renderer`. The renderer removes this callback before it frees
+    // the context and lets go of the `Wake` only after that, so the `Wake`
+    // is alive whenever mpv calls. `Wake` is `Sync` (a mutex and a
+    // condition variable), so a shared reference from any thread is sound.
+    let wake = unsafe { &*context.cast::<Wake>() };
+    wake.signal();
+}
+
+/// Wakes the thread that waits in [`Renderer::wait`], from any thread.
+#[derive(Clone)]
+pub struct Waker(Arc<Wake>);
+
+impl Waker {
+    /// Makes [`Renderer::wait`] return now.
+    pub fn wake(&self) {
+        self.0.signal();
+    }
+}
+
+/// The render context of an [`Mpv`]: what renders its frames into memory
+/// ([`Target`]). For a thread of its own.
+pub struct Renderer {
+    context: NonNull<RenderContext>,
+    wake: Arc<Wake>,
+    // After `context` is freed in `drop`, this share of the core goes.
+    core: Arc<Core>,
+}
+
+// SAFETY: the context is a handle of libmpv bound to no thread: render.h
+// allows the render calls on any thread as long as they do not run at the
+// same time, and every method takes `&mut self` or only waits on the `Wake`.
+// The shared core is `Send` and `Sync`. A `Renderer` is not `Sync`.
+unsafe impl Send for Renderer {}
+
+/// An mpv core as a client sees it: commands, properties, events. Its
+/// frames are rendered by the [`Renderer`] that [`Mpv::new`] returns with it.
+pub struct Mpv {
+    core: Arc<Core>,
+}
 
 impl Mpv {
     /// A core with `options` set before it starts (`mpv_set_option_string`,
@@ -264,7 +370,7 @@ impl Mpv {
     /// [`MpvError`] with the call that failed: a libmpv older than client
     /// API 2.0, an unknown option, a value mpv refuses, or a libmpv built
     /// without the software renderer.
-    pub fn new(options: &[(&CStr, &CStr)]) -> Result<Self, MpvError> {
+    pub fn new(options: &[(&CStr, &CStr)]) -> Result<(Self, Renderer), MpvError> {
         // Before anything of the library is read: the structs in here are
         // those of client API 2.x.
         if !supported(mpv_client_api_version()) {
@@ -273,10 +379,10 @@ impl Mpv {
                 code: ERROR_UNSUPPORTED,
             });
         }
-        let core = Core(NonNull::new(mpv_create()).ok_or(MpvError {
+        let core = Arc::new(Core(NonNull::new(mpv_create()).ok_or(MpvError {
             step: "mpv_create",
             code: ERROR_NOMEM,
-        })?);
+        })?));
         let handle = core.0.as_ptr();
         for (name, value) in options {
             // SAFETY: the handle is live (owned by `core`), name and value
@@ -304,11 +410,30 @@ impl Mpv {
         let code =
             unsafe { mpv_render_context_create(&raw mut render, handle, params.as_mut_ptr()) };
         check("mpv_render_context_create", code)?;
-        let render = NonNull::new(render).ok_or(MpvError {
+        let context = NonNull::new(render).ok_or(MpvError {
             step: "mpv_render_context_create",
             code: ERROR_NOMEM,
         })?;
-        Ok(Self { render, core })
+        let wake = Arc::new(Wake {
+            pending: Mutex::new(false),
+            changed: Condvar::new(),
+        });
+        // SAFETY: the context is live. The callback gets a pointer to the
+        // `Wake` the renderer owns a share of; `Renderer::drop` removes the
+        // callback before that share goes (see `on_update`).
+        unsafe {
+            mpv_render_context_set_update_callback(
+                context.as_ptr(),
+                Some(on_update),
+                Arc::as_ptr(&wake).cast_mut().cast(),
+            );
+        }
+        let renderer = Renderer {
+            context,
+            wake,
+            core: Arc::clone(&core),
+        };
+        Ok((Self { core }, renderer))
     }
 
     /// Starts playing `source`: a path, or anything else mpv opens. The
@@ -481,10 +606,46 @@ impl Mpv {
         }
     }
 
+    /// A property as a floating point number, `None` while mpv has none
+    /// (no file, no video).
+    pub fn double(&mut self, name: &CStr) -> Option<f64> {
+        self.core.double(name)
+    }
+
+    /// A property as an integer, `None` while mpv has none.
+    pub fn int(&mut self, name: &CStr) -> Option<i64> {
+        self.core.int(name)
+    }
+}
+
+impl Renderer {
+    /// What wakes [`Renderer::wait`] from another thread.
+    #[must_use]
+    pub fn waker(&self) -> Waker {
+        Waker(Arc::clone(&self.wake))
+    }
+
+    /// Waits until mpv says a frame may wait or a [`Waker`] calls, at most
+    /// `limit`. A call that came before the wait is not lost: it returns at
+    /// once. Says whether it was woken (and not just out of time).
+    pub fn wait(&self, limit: Duration) -> bool {
+        let pending = self
+            .wake
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (mut pending, _) = self
+            .wake
+            .changed
+            .wait_timeout_while(pending, limit, |pending| !*pending)
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *pending)
+    }
+
     /// Whether a new frame waits to be rendered (`mpv_render_context_update`).
     pub fn frame_ready(&mut self) -> bool {
         // SAFETY: the render context is live until `drop`.
-        let flags = unsafe { mpv_render_context_update(self.render.as_ptr()) };
+        let flags = unsafe { mpv_render_context_update(self.context.as_ptr()) };
         flags & RENDER_UPDATE_FRAME != 0
     }
 
@@ -532,7 +693,7 @@ impl Mpv {
         // a `Target` and refuses a slice shorter than that or a stride below
         // four bytes a pixel. The slice is borrowed exclusively until the
         // call returns, and mpv writes no further and keeps no pointer.
-        let code = unsafe { mpv_render_context_render(self.render.as_ptr(), params.as_mut_ptr()) };
+        let code = unsafe { mpv_render_context_render(self.context.as_ptr(), params.as_mut_ptr()) };
         check("mpv_render_context_render", code)
     }
 
@@ -564,48 +725,38 @@ impl Mpv {
         // int, the type render.h names for them, that lives until the call
         // returns; with rendering skipped mpv needs no target and is given
         // none (render.h, MPV_RENDER_PARAM_SKIP_RENDERING).
-        let code = unsafe { mpv_render_context_render(self.render.as_ptr(), params.as_mut_ptr()) };
+        let code = unsafe { mpv_render_context_render(self.context.as_ptr(), params.as_mut_ptr()) };
         check("mpv_render_context_render", code)
     }
 
-    /// A property as a floating point number, `None` while mpv has none
-    /// (no file, no video).
+    /// A property as a floating point number, `None` while mpv has none.
+    /// For the stamp of a frame, read right after it was rendered: a
+    /// question to the core, which render.h wants a render thread to keep
+    /// away from while a frame waits. Right after a render none does.
     pub fn double(&mut self, name: &CStr) -> Option<f64> {
-        let mut value = 0.0_f64;
-        // SAFETY: the handle is live, the name NUL-terminated, and `value`
-        // is the double FORMAT_DOUBLE asks for.
-        let code = unsafe {
-            mpv_get_property(
-                self.core.0.as_ptr(),
-                name.as_ptr(),
-                FORMAT_DOUBLE,
-                (&raw mut value).cast(),
-            )
-        };
-        (code >= 0).then_some(value)
+        self.core.double(name)
     }
 
-    /// A property as an integer, `None` while mpv has none.
+    /// A property as an integer, `None` while mpv has none. For the size
+    /// of the picture, read right after a render as well: asked while a
+    /// frame waits, the core does not answer before mpv gives up on that
+    /// frame (200 ms, measured at every jump).
     pub fn int(&mut self, name: &CStr) -> Option<i64> {
-        let mut value = 0_i64;
-        // SAFETY: as in `double`, with the int64_t FORMAT_INT64 asks for.
-        let code = unsafe {
-            mpv_get_property(
-                self.core.0.as_ptr(),
-                name.as_ptr(),
-                FORMAT_INT64,
-                (&raw mut value).cast(),
-            )
-        };
-        (code >= 0).then_some(value)
+        self.core.int(name)
     }
 }
 
-impl Drop for Mpv {
+impl Drop for Renderer {
     fn drop(&mut self) {
-        // SAFETY: the render context came from mpv_render_context_create and
-        // is freed exactly once, before the core (`core` drops after this).
-        unsafe { mpv_render_context_free(self.render.as_ptr()) }
+        // SAFETY: the context came from mpv_render_context_create and is
+        // freed exactly once, here. The callback is removed first, so mpv
+        // has no pointer to the `Wake` when that goes (after this body);
+        // the share of the core goes last, so the core outlives its
+        // context, as render.h asks.
+        unsafe {
+            mpv_render_context_set_update_callback(self.context.as_ptr(), None, ptr::null_mut());
+            mpv_render_context_free(self.context.as_ptr());
+        }
     }
 }
 
@@ -726,16 +877,16 @@ mod tests {
 
     #[test]
     fn a_text_with_a_nul_byte_is_no_source() {
-        let mut mpv =
+        let (mut mpv, mut renderer) =
             Mpv::new(&[(c"config", c"no"), (c"vo", c"libmpv"), (c"ao", c"null")]).unwrap();
         assert_eq!(mpv.load("a\0b").unwrap_err().code, ERROR_INVALID_PARAMETER);
         assert_eq!(mpv.double(c"time-pos"), None, "no file, no position");
-        assert!(!mpv.frame_ready());
+        assert!(!renderer.frame_ready());
     }
 
     #[test]
     fn properties_are_set_and_read_as_text_and_as_a_flag() {
-        let mut mpv =
+        let (mut mpv, _renderer) =
             Mpv::new(&[(c"config", c"no"), (c"vo", c"libmpv"), (c"ao", c"null")]).unwrap();
         assert_eq!(mpv.flag(c"pause"), Some(false));
         mpv.set(c"pause", "yes").unwrap();
@@ -764,11 +915,57 @@ mod tests {
 
     #[test]
     fn the_core_moves_to_another_thread() {
-        let mut mpv =
+        let (mut mpv, renderer) =
             Mpv::new(&[(c"config", c"no"), (c"vo", c"libmpv"), (c"ao", c"null")]).unwrap();
         let volume = std::thread::spawn(move || mpv.double(c"volume"))
             .join()
             .unwrap();
         assert_eq!(volume, Some(100.0));
+        // The core went with that thread; the renderer still holds its
+        // share and frees its context before the core ends.
+        drop(renderer);
+    }
+
+    /// The renderer lives on a thread of its own while the core is used
+    /// here, and either of them may go first.
+    #[test]
+    fn the_renderer_works_on_its_own_thread_and_is_woken() {
+        let options = [(c"config", c"no"), (c"vo", c"libmpv"), (c"ao", c"null")];
+        let (mut mpv, mut renderer) = Mpv::new(&options).unwrap();
+        // mpv may call once when the context is made; after that nothing
+        // wakes it and the wait runs out.
+        let _ = renderer.wait(Duration::from_millis(200));
+        assert!(!renderer.wait(Duration::from_millis(20)));
+        // A wake that comes before the wait is not lost, and counts once.
+        let waker = renderer.waker();
+        waker.wake();
+        assert!(renderer.wait(Duration::from_secs(5)));
+        assert!(!renderer.wait(Duration::from_millis(20)));
+
+        let (asked, answer) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let woken = renderer.wait(Duration::from_secs(5));
+            // Both threads ask the same core.
+            let volume = renderer.double(c"volume");
+            let ready = renderer.frame_ready();
+            asked.send(()).ok();
+            (woken, volume, ready, renderer)
+        });
+        mpv.set(c"volume", "40").unwrap();
+        waker.wake();
+        answer.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(mpv.double(c"volume"), Some(40.0));
+        let (woken, volume, ready, renderer) = thread.join().unwrap();
+        assert!(woken);
+        assert_eq!(volume, Some(40.0));
+        assert!(!ready, "no file, no frame");
+
+        // The core first: the renderer keeps it alive until it is gone too.
+        drop(mpv);
+        drop(renderer);
+        // And the renderer first.
+        let (mpv, renderer) = Mpv::new(&options).unwrap();
+        drop(renderer);
+        drop(mpv);
     }
 }
