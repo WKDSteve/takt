@@ -38,7 +38,7 @@ Ist eine Variable gesetzt, aber kein absoluter Pfad oder fehlt die Importbibliot
 
 Bequem für Terminal und Editor zugleich: die Variablen in `~/.cargo/config.toml` unter `[env]` setzen; dann bauen beide mit denselben Werten und kompilieren nicht abwechselnd neu.
 
-Mit `TAKT_LIBMPV_DIR` gebaut, spielt der Player Dateien über libmpv (`MpvBackend`): `cargo run --release -p takt-player -- film.mkv`, oder eine Datei auf das Fenster ziehen. Ohne die Variable baut derselbe Befehl den Player mit dem Testbild allein; so baut ihn die CI auf allen drei Plattformen, und so ist der Rolling-Build `latest` gebaut. Die Tests des Backends spielen die erzeugten Dateien unter `apps/takt-player/tests/data` (`pattern-3s.mkv` aus `scripts/make-test-clip.py`, dazu `make-long-gop-clip.py`, `make-colour-clips.py` und `make-format-clips.py`; nichts davon stammt aus einem Film), stumm; sie laufen nur in einem Build mit libmpv (in der CI: der Job „libmpv gelinkt“).
+Mit `TAKT_LIBMPV_DIR` gebaut, spielt der Player Dateien über libmpv (`MpvBackend`): `cargo run --release -p takt-player -- film.mkv`, oder eine Datei auf das Fenster ziehen. Ohne die Variable baut derselbe Befehl den Player mit dem Testbild allein; so baut ihn die CI auf allen drei Plattformen, und so ist der Rolling-Build `latest` gebaut. Die Tests des Backends spielen die erzeugten Dateien unter `apps/takt-player/tests/data` (`pattern-3s.mkv` aus `scripts/make-test-clip.py`, dazu `make-long-gop-clip.py`, `make-colour-clips.py` und `make-format-clips.py`; nichts davon stammt aus einem Film), stumm; sie laufen nur in einem Build mit libmpv (in der CI: die Jobs „libmpv gelinkt (Ubuntu, apt)“ und „libmpv gelinkt (Windows, Archiv gepinnt)“).
 
 Zur Laufzeit muss das Betriebssystem die Bibliotheken finden: unter Windows liegen die DLLs im `PATH` oder neben der `.exe`, unter Linux im Bibliothekspfad des Systems oder, für Archive außerhalb davon, in `LD_LIBRARY_PATH`.
 
@@ -64,7 +64,7 @@ Set-Content mpv.def -Value (@('LIBRARY libmpv-2.dll', 'EXPORTS') + $exports)
 llvm-dlltool -m i386:x86-64 -d mpv.def -l mpv.lib
 ```
 
-Ohne LLVM, in einer Developer-PowerShell im selben Ordner:
+Ohne LLVM, in einer Developer-PowerShell im selben Ordner (so macht es die CI im Job „libmpv gelinkt (Windows, Archiv gepinnt)“, die dasselbe Archiv lädt und nur mit dem dort gepinnten SHA-256 annimmt; shinchiro hält die letzten 30 Veröffentlichungen vor, ist diese fort, meldet der Job SKIP und es wird hier und in `ci.yml` ein neueres Archiv eingetragen):
 
 ```powershell
 $exports = dumpbin /exports libmpv-2.dll |

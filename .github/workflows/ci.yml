@@ -114,6 +114,104 @@ jobs:
         if: always()
         run: python3 scripts/ci-skip-summary.py test.log --title "libmpv (Ubuntu)"
 
+  # libmpv on Windows: the very build the measurements in docs/reviews/phase-0.md were made with (docs/BUILD.md,
+  # section Windows; a GPL build, accepted for zone 2 on 2026-10-31; pinning it here was decided on 2026-11-14).
+  # The archive comes from its publisher and is taken only with the SHA-256 below. The publisher keeps its last 30
+  # releases: once this one is gone and the cache has dropped it, the job says SKIP in a warning and in the
+  # summary, and counts as no evidence (TST-16); then pin a newer archive here and in docs/BUILD.md. A file with
+  # another hash fails the job.
+  libmpv-windows:
+    name: libmpv gelinkt (Windows, Archiv gepinnt)
+    runs-on: windows-latest
+    env:
+      MPV_TAG: "20261021"
+      MPV_ARCHIVE: mpv-dev-x86_64-20261021-git-e471496c56.7z
+      MPV_SHA256: efc719eff3dc5954b4a5efc800632808bcec01cc9034940dd14e5eb7fe9ea633
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-12
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, resolved 2026-11-12
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4, resolved 2026-11-14
+        with:
+          path: mpv-dev.7z
+          key: libmpv-windows-${{ env.MPV_SHA256 }}
+      - name: Archiv holen und gegen den SHA-256 pruefen
+        id: archive
+        shell: pwsh
+        run: |
+          $file = 'mpv-dev.7z'
+          if (-not (Test-Path -LiteralPath $file)) {
+              $url = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$env:MPV_TAG/$env:MPV_ARCHIVE"
+              try {
+                  Invoke-WebRequest -Uri $url -OutFile $file -MaximumRetryCount 3 -RetryIntervalSec 5
+              }
+              catch {
+                  $status = 0
+                  if ($_.Exception.Response) { $status = [int] $_.Exception.Response.StatusCode }
+                  if ($status -ne 404) { throw }
+                  $why = "$env:MPV_ARCHIVE is gone from its publisher (HTTP 404): nothing of libmpv was built or tested on Windows. Pin a newer archive in ci.yml and docs/BUILD.md."
+                  Write-Output "::warning title=SKIP libmpv (Windows)::$why"
+                  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "### libmpv (Windows): SKIP`n`n$why"
+                  Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'available=false'
+                  exit 0
+              }
+          }
+          $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne $env:MPV_SHA256) {
+              Remove-Item -LiteralPath $file -Force
+              throw "the archive has SHA-256 $hash, pinned is $env:MPV_SHA256: not used"
+          }
+          Write-Output "$env:MPV_ARCHIVE, SHA-256 as pinned"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'available=true'
+      # The recipe of docs/BUILD.md (section Windows, the variant without LLVM): only the mpv_* functions go into
+      # the import library the MSVC linker needs.
+      - name: Entpacken und mpv.lib erzeugen (Rezept aus BUILD.md)
+        if: steps.archive.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'mpv-dev'
+          7z x mpv-dev.7z "-o$dir" -y | Select-Object -Last 3
+          if ($LASTEXITCODE -ne 0) { throw "7z failed ($LASTEXITCODE)" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -property installationPath
+          $msvc = Get-ChildItem -LiteralPath (Join-Path $vs 'VC\Tools\MSVC') | Sort-Object Name -Descending | Select-Object -First 1
+          $bin = Join-Path $msvc.FullName 'bin\Hostx64\x64'
+          Push-Location $dir
+          $exports = & (Join-Path $bin 'dumpbin.exe') /exports libmpv-2.dll |
+              Select-String '\s(mpv_\S+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if (-not $exports) { throw 'no mpv_* export found in libmpv-2.dll' }
+          Set-Content mpv.def -Value (@('LIBRARY libmpv-2.dll', 'EXPORTS') + $exports)
+          & (Join-Path $bin 'lib.exe') /nologo /def:mpv.def /machine:x64 /out:mpv.lib
+          if ($LASTEXITCODE -ne 0) { throw "lib failed ($LASTEXITCODE)" }
+          Pop-Location
+          Write-Output "$($exports.Count) functions in mpv.lib"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "TAKT_LIBMPV_DIR=$dir"
+          # The DLL is found through PATH when the tests start.
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $dir
+      - name: Link-Test, Clippy und alle Tests des Players mit libmpv
+        if: steps.archive.outputs.available == 'true'
+        shell: bash
+        run: |
+          cargo test -p takt-player --test ffi_native_link -- --nocapture 2>&1 | tee test.log
+          # The cfg must have come on: both libmpv tests ran, not the stand-in that says SKIP.
+          grep -q "test libmpv::client_api_is_version_2 ... ok" test.log
+          grep -q "test libmpv::license_state_matches_build_md ... ok" test.log
+          cargo clippy -p takt-player --all-targets --all-features
+          # Silent (ao=null), as on Ubuntu: the MpvBackend plays the test files of the repository.
+          cargo test -p takt-player -- --nocapture 2>&1 | tee -a test.log
+          grep -q "test mpv::tests::a_test_pattern_is_rendered_into_memory ... ok" test.log
+          grep -q "test mpv::backend::tests::a_file_plays_pauses_jumps_and_ends ... ok" test.log
+          grep -q "test mpv::backend::tests::the_frames_are_bt709_whatever_primaries_the_file_names ... ok" test.log
+          grep -q "test mpv::backend::tests::rounds_of_loading_jumping_and_switching_subtitles_hold_nothing_up ... ok" test.log
+          grep -q "test session::tests::a_file_swaps_the_clock_and_the_test_picture_swaps_it_back ... ok" test.log
+      - name: SKIPs in die Zusammenfassung
+        if: always() && steps.archive.outputs.available == 'true'
+        shell: bash
+        run: python scripts/ci-skip-summary.py test.log --title "libmpv (Windows)"
+
   licenses:
     name: Lizenzen und Sicherheitshinweise
     runs-on: ubuntu-latest
