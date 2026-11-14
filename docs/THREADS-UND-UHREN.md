@@ -51,6 +51,7 @@ Ein Video-Frame, das zwei Millisekunden zu spät kommt, sieht niemand. Ein Audio
 | Demux | wir | soft | keine, nur Durchsatz |
 | Decode-Pool | FFmpeg intern, ab Phase 1 teils wir | soft | Durchsatz |
 | GPU-Submission | wir | soft, framegebunden | Bildwiederholrate |
+| mpv-Render (`takt-mpv-render`, nur mit dem `MpvBackend` der Phase 0) | wir, je Backend einer | soft, framegebunden | die Frist von mpv: 200 ms je Bild |
 | UI | die Fensterbibliothek, meist der Haupt-Thread | soft | Bildwiederholrate |
 | Offline-Render-Pool | wir, ab Phase 3 | Batch | keine |
 | Encoder | wir, ab Phase 2 | Batch bis soft | bei Live-Streams die Ausgaberate |

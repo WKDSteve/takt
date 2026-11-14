@@ -244,28 +244,48 @@ Bildes ist seine Frame-Nummer, sodass ein Test am Bild abliest, welches Frame es
 - **Die zehn Sekunden, nach denen ein Öffnen aufgegeben wird, haben einen Test** (mit verkürzter Frist): der Grund
   kommt einmal, mpv ist danach untätig, die nächste Datei spielt.
 
-### MpvBackend: ein Thread rendert und fragt
+### MpvBackend: ein Thread rendert, einer steuert
 
-`render.h` verlangt einen Render-Thread, der nie auf mpvs Kern wartet. Takt rendert und fragt im selben Thread. Wartet
-der Kern gerade darauf, dass ein Bild gerendert wird (nach einem Sprung, beim Laden, beim Wechsel der Untertitel), und
-dieser Thread stellt stattdessen eine Frage, blockieren beide, bis mpv nach 200 ms aufgibt.
+`render.h` verlangt einen Render-Thread, der nie auf mpvs Kern wartet. Wartet der Kern gerade darauf, dass ein Bild
+gerendert wird (nach einem Sprung, beim Laden, beim Wechsel der Untertitel), und der Thread, der rendern sollte, stellt
+stattdessen eine Frage, blockieren beide, bis mpv nach 200 ms aufgibt. Bis zum 2026-11-14 hat Takt im selben Thread
+gerendert und gefragt.
 
-| | vorher | nachher |
-|---|---|---|
-| Sprung: Zeit bis zur Ankunft | etwa 200 ms | 4 bis 9 ms (ein bis zwei Durchläufe von 4 ms) |
-| Backend verwerfen, während es öffnet | nicht gemessen | 1 ms |
+| Stand | Sprung: Zeit bis zur Ankunft |
+|---|---|
+| ein Thread rendert und fragt (bis takt `505fa3e`) | etwa 200 ms |
+| ein Thread, das wartende Bild wird zuerst gerendert (takt `1d88bc0`) | 4 bis 9 ms |
+| eigener Render-Thread, der vor dem Rendern die Bildgröße abfragt (Zwischenstand, nie auf `main`) | etwa 205 ms |
+| eigener Render-Thread, der erst rendert und danach fragt (takt `2f3c1f7`) | etwa 4,5 ms |
 
-- **Jetzt wird das wartende Bild zuerst gerendert**, bevor mpv etwas gefragt wird: in ein Pool-Frame, das bis zum
-  nächsten `next_frame` liegen bleibt, oder es wird als gezeigt verbucht, wenn es keinen Platz dafür gibt.
-- **Das erste Bild einer Datei hat Vorrang vor der Regel:** trifft es zusammen mit der Meldung „geladen“ ein, wird
-  erst die Meldung genommen (dort entsteht der Platz für das Bild). Sonst wäre es als gezeigt verbucht worden.
-- **Ein Rest bleibt:** beginnt ein Bild zu warten, nachdem geprüft und bevor gefragt wurde, kostet das weiter bis zu
-  200 ms. Weg ist das erst, wenn in einem eigenen Thread gerendert wird und die Eigenschaften beobachtet statt
-  abgefragt werden.
-- **`mpv_command_async` wird nicht benutzt.** Untertiteldateien damit zu lesen, hat mpvs Kern (0.41) dauerhaft
-  angehalten: in etwa einem von neun Läufen, wenn mehrere gleichzeitig endeten, und jedes Mal, wenn dabei eine Datei
-  geladen wurde. `sub-add` wartet deshalb weiter auf mpv; an einem schlafenden Laufwerk hält das Lesen einer
-  Untertiteldatei das Fenster so lange an.
+- **Die Frames rendert jetzt ein eigener Thread des Backends.** mpv weckt ihn über seinen Update-Callback, er rendert
+  das Bild sofort in ein Pool-Frame und legt es in ein Fach; `next_frame` nimmt das neueste. Der Thread des Fensters
+  steuert: Kommandos, Eigenschaften, Ereignisse. Er darf auf den Kern warten, weil der Kern nicht mehr auf ihn wartet.
+- **Auch der Render-Thread darf nicht fragen, solange ein Bild wartet.** Die dritte Zeile der Tabelle ist die
+  Gegenprobe: dieselbe Abfrage (die Bildgröße) vor dem Rendern statt danach, und jeder Sprung kostete wieder 200 ms.
+  Der Thread rendert deshalb in der Größe, die er kennt, liest danach Zeit und Größe und zeichnet dasselbe Bild noch
+  einmal, wenn die Größe eine andere ist (das erste Bild einer Datei, ein Wechsel mitten in einer).
+- **Der Zeitstempel bleibt eine Abfrage direkt nach dem Rendern.** Die Render-API nennt die Zeit eines Bildes nicht.
+  Beobachtet statt abgefragt käme sie im anderen Thread an, ohne Zuordnung zum Bild; einen Durchlauf später gelesen
+  wäre sie bei 60 fps oft schon die des nächsten Bildes. Der Test mit der Frame-Nummer im Bild bleibt grün.
+- **Dauertest:** 300 Runden laden, springen, Untertitel umschalten und nachladen (rund 9000 Aufrufe), zweimal
+  gelaufen: kein Hänger; einmal kein Aufruf über 150 ms, einmal einer mit 197 ms. Das ist der Rest: das nächste Bild
+  beginnt zu warten, während der Render-Thread gerade nach der Zeit des letzten fragt. Während eine andere Sitzung
+  baute, zählte derselbe Test 43 solche Aufrufe; die Zahl gilt also nur auf ruhiger Maschine.
+- **`mpv_command_async` wird weiter nicht benutzt; der Render-Thread war nicht die Ursache.** Mit getrennten Threads
+  noch einmal gemessen, je Lauf drei gleichzeitige `sub-add` und ein Laden, während acht anstehen:
+
+  | Aufbau | Läufe | davon dauerhaft angehalten |
+  |---|---|---|
+  | `sub-add` asynchron, mehrere zugleich | 20 | 5 |
+  | dazu: Laden wartet, bis die laufenden abgebrochen und beantwortet sind | 30 | 6 |
+  | immer nur einer zur Zeit, ohne Abbruch und ohne fehlerhafte Datei (1200 `sub-add`, 400 Ladevorgänge) | 10 | 0 |
+  | immer nur einer zur Zeit, mit Abbruch des laufenden vor dem Laden und einer Datei, die keine Untertitel ist | 40 | 12 |
+
+  mpvs Kern (0.41, Windows-Build) bleibt stehen, sobald ein asynchrones `sub-add` abgebrochen oder von einem Laden
+  eingeholt wird. `sub-add` wartet deshalb weiter auf mpv; an einem schlafenden Laufwerk hält das Lesen einer
+  Untertiteldatei das Fenster so lange an. Nicht nachgestellt: derselbe Ablauf ohne Takt (ein kleines Programm gegen
+  dieselbe libmpv) und auf dem libmpv aus apt.
 
 ### A/V-Sync von Hand
 
@@ -349,7 +369,7 @@ Für Phase 0 ist das nur eine Notiz. Aber die `VideoBackend`-Schnittstelle ist b
 | Das Fenster öffnet über mpv nur vorhandene Dateien; `on_load` prüft, was mpv selbst öffnet | Playlist-Dateien führten sonst ins Netz | nein, höchstens um eine Allowlist erweitert |
 | Playlist-Dateien liest Takt selbst; ein Eintrag ist nur ein relativer Pfad im Ordner der Liste (am 2026-11-14 gefragt und bestätigt: absolute Pfade bleiben draußen, auch lokale) | ein Backend, das Listen liest, spielt ihre Einträge am Fenster vorbei; absolute Pfade erreichen Netzwerkfreigaben | ja: absolute lokale Pfade ließen sich erlauben, Freigaben und Adressen nicht |
 | Die Frames des `MpvBackend` sind BT.709; was die Datei nennt, steht daneben (`source_color`) | mpvs Software-Renderer rechnet selbst um, gemessen | ja, mit der Render-API in die GPU-Fläche liefert mpv das Bild nicht mehr als fertiges `rgb0` |
-| Vor jeder Frage an mpv wird das wartende Bild gerendert; keine Kommandos mit späterer Antwort | Rendern und Fragen in einem Thread blockiert sonst bis zu 200 ms; `mpv_command_async` hat den Kern angehalten | ja, mit einem eigenen Render-Thread |
+| Die Frames des `MpvBackend` rendert ein eigener Thread, der erst rendert und danach fragt; keine Kommandos mit späterer Antwort | `render.h` verlangt es, und gemessen kostet jede Frage bei wartendem Bild 200 ms; `mpv_command_async` hat den Kern angehalten, auch mit getrennten Threads | nein für den Thread; das asynchrone `sub-add` kann mit einer anderen mpv-Version neu geprüft werden |
 | Eine Untertiteldatei darf Formatierung, aber keine andere Datei, kein Netz, kein Skript (`access-references=no`) | mit mpvs Standard führt eine `.srt` mit EDL-Inhalt zu beidem | nein |
 
 ---
