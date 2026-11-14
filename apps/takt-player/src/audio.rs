@@ -5,7 +5,9 @@
 //! The test source has no sound, so a feeder keeps the ring full of silence
 //! and the device drives the audio master clock at its own pace. Without a
 //! device, or with `TAKT_AUDIO=sim`, a thread reports a position every 10 ms
-//! instead, and the player says so.
+//! instead, and the player says so. `TAKT_AUDIO_DEVICE` names another output
+//! device by a part of its name (a measuring run on a silent virtual device);
+//! a name that fits none is simulated too, never the default device.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +28,8 @@ const PERIOD_FRAMES: u64 = 480;
 
 enum Kind {
     Device {
+        // The wish of `TAKT_AUDIO_DEVICE`, `None` for the default device.
+        wanted: Option<String>,
         // Keeps the stream alive; not Send on every platform, so the path
         // stays on the thread that started it.
         output: Output,
@@ -83,7 +87,8 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
             realtime: true,
             ..OutputConfig::default()
         };
-        match Output::open(config, callback) {
+        let wanted = std::env::var("TAKT_AUDIO_DEVICE").ok();
+        match Output::open_on(config, callback, wanted.as_deref()) {
             Ok(output) => {
                 let feeder = {
                     let stop = Arc::clone(&stop);
@@ -98,6 +103,7 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
                 };
                 let path = AudioPath {
                     kind: Some(Kind::Device {
+                        wanted,
                         output,
                         stats,
                         gain,
@@ -139,9 +145,12 @@ impl AudioPath {
     /// One line for the start of the player.
     pub fn describe(&self) -> String {
         match &self.kind {
-            Some(Kind::Device { output, .. }) => {
+            Some(Kind::Device { wanted, output, .. }) => {
+                let device = wanted
+                    .as_ref()
+                    .map_or("default device".to_owned(), |w| format!("device {w:?}"));
                 format!(
-                    "default device, {:?}, buffer {:?}",
+                    "{device}, {:?}, buffer {:?}",
                     output.format(),
                     output.buffer()
                 )

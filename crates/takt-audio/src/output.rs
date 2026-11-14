@@ -88,6 +88,8 @@ impl Default for OutputConfig {
 pub enum OutputError {
     /// The host has no default output device.
     NoDevice,
+    /// No output device of the host has this text in its name.
+    NoSuchDevice(String),
     /// The device takes none of [`FORMATS`] with this rate and channel count.
     Unsupported(String),
     /// `cpal` refused to build or start the stream.
@@ -98,6 +100,9 @@ impl fmt::Display for OutputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoDevice => write!(f, "no default audio output device"),
+            Self::NoSuchDevice(wanted) => {
+                write!(f, "no audio output device with {wanted:?} in its name")
+            }
             Self::Unsupported(why) => write!(f, "the audio device does not take the stream: {why}"),
             Self::Stream(why) => write!(f, "the audio stream did not start: {why}"),
         }
@@ -152,11 +157,39 @@ impl Output {
     ///
     /// # Errors
     ///
-    /// [`OutputError`] when there is no device, it takes no such stream, or
-    /// the stream does not start.
+    /// As [`Output::open_on`].
     pub fn open(config: OutputConfig, callback: OutputCallback) -> Result<Self, OutputError> {
+        Self::open_on(config, callback, None)
+    }
+
+    /// Opens the output device whose name holds `device` (any case), or the
+    /// default device for `None`, and starts `callback` on it.
+    ///
+    /// A name that fits no device is an error and never the default device:
+    /// a measuring run that names a silent device must not end up on the
+    /// speakers.
+    ///
+    /// # Errors
+    ///
+    /// [`OutputError`] when there is no such device, it takes no such stream,
+    /// or the stream does not start.
+    pub fn open_on(
+        config: OutputConfig,
+        callback: OutputCallback,
+        device: Option<&str>,
+    ) -> Result<Self, OutputError> {
         let host = cpal::default_host();
-        let device = host.default_output_device().ok_or(OutputError::NoDevice)?;
+        let device = match device {
+            None => host.default_output_device().ok_or(OutputError::NoDevice)?,
+            Some(wanted) => host
+                .output_devices()
+                .map_err(|e| OutputError::Unsupported(e.to_string()))?
+                .find(|d| {
+                    d.description()
+                        .is_ok_and(|description| name_holds(description.name(), wanted))
+                })
+                .ok_or_else(|| OutputError::NoSuchDevice(wanted.to_owned()))?,
+        };
         let channels = u16::try_from(callback.channels())
             .map_err(|_| OutputError::Unsupported("too many channels".into()))?;
         let ranges: Vec<_> = device
@@ -272,6 +305,13 @@ fn frames_of(duration: std::time::Duration, rate: u32) -> u64 {
     u64::try_from(frames).unwrap_or(u64::MAX)
 }
 
+/// Whether the device name holds `wanted`, whatever the case. An empty
+/// `wanted` fits nothing: it is a variable set to nothing, not a wish.
+fn name_holds(name: &str, wanted: &str) -> bool {
+    let wanted = wanted.trim();
+    !wanted.is_empty() && name.to_lowercase().contains(&wanted.to_lowercase())
+}
+
 /// The first of `candidates` whose format comes first in [`FORMATS`].
 fn pick<T>(candidates: &[T], format_of: impl Fn(&T) -> cpal::SampleFormat) -> Option<&T> {
     FORMATS
@@ -314,6 +354,20 @@ mod tests {
         assert_eq!(
             priority_of(true, &Some("no rtprio".into())).to_string(),
             "refused: no rtprio"
+        );
+    }
+
+    #[test]
+    fn a_device_is_found_by_a_part_of_its_name() {
+        let name = "Voicemeeter In 4 (VB-Audio Voicemeeter VAIO)";
+        assert!(name_holds(name, "Voicemeeter In 4"));
+        assert!(name_holds(name, " voicemeeter in 4 "));
+        assert!(!name_holds(name, "Voicemeeter In 5"));
+        assert!(!name_holds(name, ""));
+        assert!(!name_holds(name, "  "));
+        assert_eq!(
+            OutputError::NoSuchDevice("In 9".into()).to_string(),
+            "no audio output device with \"In 9\" in its name"
         );
     }
 
