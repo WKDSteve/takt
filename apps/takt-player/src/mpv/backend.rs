@@ -1396,10 +1396,9 @@ impl VideoBackend for MpvBackend {
             // opens: it stays until the file is open, then it is handed out.
             return Ok(None);
         }
-        if !self.loaded {
-            drop(self.shared.take());
-            return Ok(None);
-        }
+        // Also after the file has ended: its last picture may still lie in
+        // the slot, and a file of a few frames has no other. (A picture of
+        // the file before does not: asking for a file empties the slot.)
         Ok(self.shared.take())
     }
 
@@ -1614,9 +1613,10 @@ mod tests {
     /// its first frame, and red, green and blue in the middle of it.
     fn colour_of(name: &str) -> (ColorDescription, FrameMeta, [u8; 3]) {
         let mut backend = backend(Sources::Files);
+        // The files are a fifth of a second long: held at their first
+        // picture, they are still there when they are asked about.
+        backend.set_paused(true).unwrap();
         let info = backend.open(&colour_clip(name)).unwrap();
-        let named = info.source_color.unwrap();
-        assert_eq!(backend.source_color(), Some(named));
         let mut seen = None;
         passes(&mut backend, Duration::from_secs(5), |_, frame| {
             let picture = frame.get();
@@ -1626,6 +1626,10 @@ mod tests {
             false
         });
         let (meta, pixel) = seen.expect("a frame of the colour file");
+        // mpv names the colour when the file opens or, on a busy machine,
+        // only once it has decoded a frame: by now it does.
+        let named = backend.source_color().expect("the colour of the file");
+        assert!(info.source_color.is_none_or(|at_open| at_open == named));
         (named, meta, pixel)
     }
 
@@ -2367,6 +2371,35 @@ mod tests {
         );
     }
 
+    /// A file may end before its last picture was taken (a file of a few
+    /// frames, a pass that came late): the picture is handed out all the
+    /// same, with the pass that learns of the end.
+    #[test]
+    fn the_last_picture_of_a_file_that_has_ended_is_still_handed_out() {
+        let mut backend = backend(Sources::Files);
+        // Five frames, a fifth of a second.
+        backend.open(&colour_clip("bt709")).unwrap();
+        // No pass while it plays: it has ended when the first one comes
+        // (mpv is idle then).
+        let started = Instant::now();
+        while backend.mpv.flag(c"idle-active") != Some(true) {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "it never ended"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let clock = backend.clock();
+        let picture = backend.next_frame(clock.as_ref()).unwrap();
+        assert!(backend.is_eof(), "the file has ended");
+        let picture = picture.expect("its last picture");
+        let rows = picture.get().plane(0).unwrap();
+        let at = 32 * picture.get().stride(0).unwrap() + 32 * 4;
+        assert!(near([rows[at], rows[at + 1], rows[at + 2]], [56, 152, 195]));
+        // One picture, once.
+        assert!(backend.next_frame(clock.as_ref()).unwrap().is_none());
+    }
+
     /// Giving a backend up while mpv opens a source that never answers
     /// does not wait for that source: the window does it in its own thread
     /// when the playlist is emptied.
@@ -2448,6 +2481,8 @@ mod tests {
         // The rest plays to the end.
         passes(&mut backend, Duration::from_secs(4), |_, _| true);
         assert!(backend.is_eof());
+        // At most the last picture is still to come, then nothing.
+        let _ = backend.next_frame(clock.as_ref()).unwrap();
         assert!(backend.next_frame(clock.as_ref()).unwrap().is_none());
         // And the same backend opens the next file.
         assert!(backend.open(&clip()).is_ok());
@@ -2464,6 +2499,9 @@ mod tests {
     /// as the window measures it for its overlay line "seek": the position
     /// of mpv once it has arrived.
     fn lands_at(backend: &mut MpvBackend, target: i64, mode: SeekMode) -> i64 {
+        // Held, so that the position read is where the jump landed and not
+        // a frame or two further on a busy machine.
+        backend.set_paused(true).unwrap();
         let clock = backend.clock();
         backend.seek(Timestamp::from_millis(target), mode).unwrap();
         let started = Instant::now();
