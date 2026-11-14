@@ -3,13 +3,18 @@
 //! few seconds, then the measurements of the scheduler and the audio path.
 //! It stays as `--headless`: the numbers of `docs/PHASE-0.md` are measured
 //! with it, on all three platforms and without a window.
+//!
+//! `--fps`, `--hz` and `--seconds` set the rate of the source, the refresh
+//! rate of the simulated display and the length of the run; the A/B protocol
+//! of `docs/reviews/phase-0.md` (`scripts/ab-measure.py`) reads the last
+//! line, `takt-ab key=value ...`.
 
 // Dieses Modul formatiert ausschliesslich Messwerte fuer die Ausgabe. Zeit
 // wird hier nie gerechnet, nur angezeigt — deshalb ist Gleitkomma erlaubt.
 #![allow(clippy::cast_precision_loss)]
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use takt_backend::{NullBackend, Pattern, Presentation, Scheduler, VideoBackend};
 use takt_clock::{Clock, SystemMonotonic};
@@ -19,16 +24,89 @@ use takt_core::{
 
 use crate::audio::{self, DeviceSummary};
 
-/// Wie lange die Demo-Wiedergabe laeuft.
-const DEMO_SECONDS: i64 = 3;
-/// Bildwiederholrate der Testquelle: die NTSC-Rate, weil sie am ehesten
-/// Rundungsfehler aufdeckt.
-const FPS: (i64, i64) = (24_000, 1_001);
+/// The longest run `--seconds` takes: a day.
+const MAX_SECONDS: i64 = 86_400;
+
+/// What a headless run measures with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Options {
+    /// Frame rate of the test source. Default 24000/1001: the NTSC rate
+    /// shows rounding errors first.
+    pub fps: Rational,
+    /// Refresh rate of the simulated display. Default 60.
+    pub hz: Rational,
+    /// Length of the source in seconds. Default 3.
+    pub seconds: i64,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            fps: Rational::lit(24_000, 1_001),
+            hz: Rational::lit(60, 1),
+            seconds: 3,
+        }
+    }
+}
+
+impl Options {
+    /// Reads `--fps N[/D]`, `--hz N[/D]` and `--seconds N` from the arguments
+    /// of the program; everything else is left to `main`.
+    ///
+    /// # Errors
+    ///
+    /// A text for the user when a value is missing, not a number, or out of
+    /// range (rates from 1 to 1000 per second, 1 to 86400 seconds).
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self::default();
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let mut value = || {
+                args.next()
+                    .ok_or_else(|| format!("{arg} needs a value"))
+                    .map(String::as_str)
+            };
+            match arg.as_str() {
+                "--fps" => options.fps = rate(arg, value()?)?,
+                "--hz" => options.hz = rate(arg, value()?)?,
+                "--seconds" => {
+                    let text = value()?;
+                    options.seconds = text
+                        .parse()
+                        .ok()
+                        .filter(|s| (1..=MAX_SECONDS).contains(s))
+                        .ok_or_else(|| format!("{arg} {text}: 1 to {MAX_SECONDS} seconds"))?;
+                }
+                _ => {}
+            }
+        }
+        Ok(options)
+    }
+
+    /// The period of the simulated display in nanoseconds, rounded down.
+    fn display_period_nanos(&self) -> u64 {
+        // Both parts are positive and the rate is at most 1000 (see `rate`).
+        let nanos = 1_000_000_000_i128 * i128::from(self.hz.den()) / i128::from(self.hz.num());
+        u64::try_from(nanos).unwrap_or(u64::MAX)
+    }
+}
+
+/// A rate as `N` or `N/D`, from 1 to 1000 per second.
+fn rate(option: &str, text: &str) -> Result<Rational, String> {
+    let (num, den) = text.split_once('/').unwrap_or((text, "1"));
+    let parsed = num
+        .parse::<i64>()
+        .ok()
+        .zip(den.parse::<i64>().ok())
+        .filter(|&(num, den)| den > 0 && num >= den && num / den <= 1_000)
+        .and_then(|(num, den)| Rational::new(num, den));
+    parsed.ok_or_else(|| format!("{option} {text}: a rate from 1 to 1000, as N or N/D"))
+}
 
 /// The measuring run without a window (`takt-player --headless`).
-pub fn run() {
-    let fps = Rational::lit(FPS.0, FPS.1);
-    let duration = Timestamp::from_millis(DEMO_SECONDS * 1_000);
+pub fn run(options: &Options) {
+    let fps = options.fps;
+    let duration = Timestamp::from_millis(options.seconds * 1_000);
 
     let meta = FrameMeta {
         width: 1920,
@@ -52,6 +130,7 @@ pub fn run() {
         }
     };
 
+    let period_ns = options.display_period_nanos();
     println!("Takt Player — Phase 0 (kopflos)");
     println!("  Backend      {}", backend.name());
     println!(
@@ -63,6 +142,11 @@ pub fn run() {
         "  Framedauer   {:.3} ms",
         info.frame_duration_nanos().unwrap_or(0) as f64 / 1e6
     );
+    println!(
+        "  Anzeige      {} Hz ({:.3} ms je Durchlauf)",
+        options.hz,
+        period_ns as f64 / 1e6
+    );
     println!("  Frames       {}", backend.total_frames());
     println!("  Audio        {}", audio.describe());
     println!();
@@ -70,9 +154,13 @@ pub fn run() {
     let mut scheduler = Scheduler::new();
     let frame_ns = info.frame_duration_nanos().unwrap_or(16_666_667);
 
-    // Anzeigedurchlauf bei 60 Hz, so wie ein echter Renderer aufgerufen wuerde.
-    let vsync = Duration::from_nanos(16_666_667);
-    backend.set_display_period(Some(16_666_667));
+    // One pass per refresh of the simulated display, as a renderer would be
+    // called. The passes follow a fixed grid from the start: sleeping one
+    // period after each pass would add the work of the pass to every period
+    // and let the display run slow.
+    backend.set_display_period(i64::try_from(period_ns).ok());
+    let started = Instant::now();
+    let mut pass = 0_u64;
     loop {
         let frame = match backend.next_frame(&clock) {
             Ok(f) => f,
@@ -86,13 +174,18 @@ pub fn run() {
             Presentation::Shown { .. } | Presentation::Repeated => {}
         }
         drop(frame); // Frame zurueck in den Pool
-        std::thread::sleep(vsync);
+        pass += 1;
+        let due = started + Duration::from_nanos(period_ns.saturating_mul(pass));
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
     }
+    let elapsed = started.elapsed();
 
+    let simulated = audio.device_stats().is_none();
     let device = audio.stop();
 
     let s = scheduler.stats();
     let b = backend.stats();
+    let p99 = s.quantile_upper_micros(99, 100);
     println!("Messwerte");
     println!("  dargestellt     {}", s.shown);
     println!(
@@ -106,6 +199,10 @@ pub fn run() {
         s.mean_abs_error_nanos() as f64 / 1e6
     );
     println!(
+        "  Fehler p99      {}",
+        p99.map_or("-".to_owned(), |us| format!("<{:.3} ms", us as f64 / 1e3))
+    );
+    println!(
         "  Fehler max spaet {:.3} ms",
         s.worst_late_nanos as f64 / 1e6
     );
@@ -115,7 +212,9 @@ pub fn run() {
     );
     println!("  Endposition     {}", clock.now());
     println!("  Framedauer      {:.3} ms", frame_ns as f64 / 1e6);
+    let mut xruns = None;
     if let Some(DeviceSummary { stats: a, priority }) = device {
+        xruns = Some(a.xruns());
         println!("  Prioritaet      {priority}");
         println!(
             "  Audio           {} Callbacks, {} Xruns, {} Frames Stille",
@@ -160,5 +259,80 @@ pub fn run() {
             count,
             "#".repeat((*count as usize).min(40))
         );
+    }
+    println!();
+    // The line scripts/ab-measure.py reads; a missing number is `-`.
+    let number = |n: Option<u64>| n.map_or("-".to_owned(), |n| n.to_string());
+    println!(
+        "takt-ab backend={} fps={fps} hz={} seconds={} elapsed_ms={} passes={pass} shown={} \
+         repeated={} dropped={} mean_us={} p99_us={} late_us={} early_us={} audio={} xruns={}",
+        backend.name(),
+        options.hz,
+        options.seconds,
+        elapsed.as_millis(),
+        s.shown,
+        s.repeated,
+        b.dropped,
+        s.mean_abs_error_nanos() / 1_000,
+        number(p99),
+        s.worst_late_nanos / 1_000,
+        s.worst_early_nanos.saturating_abs() / 1_000,
+        if simulated { "simulated" } else { "device" },
+        number(xruns),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|&a| a.to_owned()).collect()
+    }
+
+    #[test]
+    fn without_options_the_run_of_phase_0() {
+        let options = Options::parse(&args(&["takt-player", "--headless"])).unwrap();
+        assert_eq!(options, Options::default());
+        assert_eq!(options.fps, Rational::lit(24_000, 1_001));
+        assert_eq!(options.display_period_nanos(), 16_666_666);
+    }
+
+    #[test]
+    fn rates_as_a_number_or_a_fraction() {
+        let options = Options::parse(&args(&[
+            "--headless",
+            "--fps",
+            "50",
+            "--hz",
+            "120000/1001",
+            "--seconds",
+            "300",
+        ]))
+        .unwrap();
+        assert_eq!(options.fps, Rational::lit(50, 1));
+        assert_eq!(options.hz, Rational::lit(120_000, 1_001));
+        assert_eq!(options.seconds, 300);
+        assert_eq!(options.display_period_nanos(), 8_341_666);
+    }
+
+    #[test]
+    fn a_value_out_of_range_is_named() {
+        for bad in [
+            &["--fps"][..],
+            &["--fps", "0"],
+            &["--fps", "-24"],
+            &["--fps", "24/0"],
+            &["--fps", "1/2"],
+            &["--fps", "1001"],
+            &["--hz", "sixty"],
+            &["--hz", "60/"],
+            &["--seconds", "0"],
+            &["--seconds", "86401"],
+            &["--seconds", "1.5"],
+        ] {
+            let err = Options::parse(&args(bad)).unwrap_err();
+            assert!(err.starts_with(bad[0]), "{bad:?}: {err}");
+        }
     }
 }

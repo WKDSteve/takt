@@ -36,12 +36,21 @@ fn main() -> ExitCode {
         print!("{}", app::keys_markdown());
         return ExitCode::SUCCESS;
     }
-    if std::env::args().skip(1).any(|arg| arg == "--headless") {
-        headless::run();
-        return ExitCode::SUCCESS;
+    let args: Vec<String> = std::env::args().collect();
+    // `--headless [--fps N[/D]] [--hz N[/D]] [--seconds N]`: the measuring loop without a window.
+    if args.iter().skip(1).any(|arg| arg == "--headless") {
+        return match headless::Options::parse(&args[1..]) {
+            Ok(options) => {
+                headless::run(&options);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("takt-player: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
     // `--seconds N`: a measuring run of the window, closed after N seconds.
-    let args: Vec<String> = std::env::args().collect();
     let seconds = args
         .iter()
         .position(|arg| arg == "--seconds")

@@ -79,6 +79,45 @@ impl SchedulerStats {
         self.repeated as f64 * 100.0 / total as f64
     }
 
+    /// An upper bound of the quantile `num/den` of the error magnitudes, in
+    /// microseconds: the top of the histogram class that holds it, and never
+    /// more than the largest error seen. `None` without a shown frame or
+    /// with `den == 0`.
+    ///
+    /// The classes double, so the bound is at most twice the true value;
+    /// that is the price of sixteen counters instead of a list of samples.
+    #[must_use]
+    pub fn quantile_upper_micros(&self, num: u64, den: u64) -> Option<u64> {
+        if self.shown == 0 || den == 0 {
+            return None;
+        }
+        let total: u64 = self.histogram.iter().map(|&c| u64::from(c)).sum();
+        // The smallest rank that covers num/den of the samples, at least 1.
+        let rank = u128::from(total) * u128::from(num.min(den));
+        let rank = u64::try_from(rank.div_ceil(u128::from(den)))
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let worst = self
+            .worst_late_nanos
+            .unsigned_abs()
+            .max(self.worst_early_nanos.unsigned_abs())
+            .div_ceil(1_000);
+        let mut seen = 0_u64;
+        for (class, &count) in self.histogram.iter().enumerate() {
+            seen += u64::from(count);
+            if seen >= rank {
+                // The last class is open at the top: only the worst bounds it.
+                let top = if class + 1 == self.histogram.len() {
+                    u64::MAX
+                } else {
+                    1_u64 << (class + 1)
+                };
+                return Some(top.min(worst));
+            }
+        }
+        Some(worst)
+    }
+
     fn record(&mut self, error_nanos: i64) {
         self.shown += 1;
         self.abs_error_sum_nanos = self
@@ -294,6 +333,32 @@ mod tests {
         assert_eq!(s.stats().histogram[9], 1);
         assert_eq!(s.stats().histogram[13], 1);
         assert_eq!(s.stats().shown, 3);
+    }
+
+    #[test]
+    fn the_quantile_is_the_top_of_its_class_and_never_above_the_worst() {
+        let mut stats = SchedulerStats::default();
+        assert_eq!(stats.quantile_upper_micros(99, 100), None);
+
+        // 98 errors of 100 us (class 6: 64..128), one of 5 ms, one of 40 ms.
+        for _ in 0..98 {
+            stats.record(100_000);
+        }
+        stats.record(-5_000_000);
+        stats.record(40_000_000);
+        assert_eq!(stats.quantile_upper_micros(1, 2), Some(128));
+        assert_eq!(stats.quantile_upper_micros(98, 100), Some(128));
+        // Rank 99 of 100 is the 5 ms error: class 12 ends at 8192 us.
+        assert_eq!(stats.quantile_upper_micros(99, 100), Some(8_192));
+        // The last class has no top; the worst error bounds it.
+        assert_eq!(stats.quantile_upper_micros(1, 1), Some(40_000));
+        assert_eq!(stats.quantile_upper_micros(7, 1), Some(40_000));
+        assert_eq!(stats.quantile_upper_micros(1, 0), None);
+
+        // One error only: the bound is the error itself, not the class top.
+        let mut one = SchedulerStats::default();
+        one.record(3_000_000);
+        assert_eq!(one.quantile_upper_micros(99, 100), Some(3_000));
     }
 
     #[test]
