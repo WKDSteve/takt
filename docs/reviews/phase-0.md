@@ -185,6 +185,84 @@ Lesart:
 * **Ein bis vier verworfene Frames je Minute bleiben bei 60 fps auf 60 Hz,** auch kopflos (1). Bildrate und Raster sind fast gleich, die Phase wandert, und gelegentlich sind zwei Frames in einem Durchlauf fertig; das ist der Fall, für den mpv `display-resample` hat (siehe oben beim Spike). Der mittlere Fehler streut bei dieser Rate von 1,2 bis 7,9 ms, je nachdem, wo die Phase steht, und sagt dort wenig.
 * **Nicht gemessen:** Speicherbandbreite und CPU-Last des Prozesses, 4K, und jede Messung unter Nebenlast.
 
+### MpvBackend: die Frames sind BT.709, was die Datei auch nennt
+
+Die Annahme war, das Backend beschrifte seine Frames falsch: fest BT.709, obwohl die Datei BT.601 oder BT.2020 sein kann.
+Gemessen ist es umgekehrt. Sechs Testdateien enthalten denselben kodierten Strom und unterscheiden sich nur in den
+Farb-Tags im Kopf (`scripts/make-colour-clips.py`); was am Ende im Frame steht, kommt also allein von den Tags:
+
+| Datei nennt | Pixel im Frame (R, G, B) | was mpv getan hat |
+|---|---|---|
+| BT.709, Matrix BT.709 | 56, 152, 195 | nur die Matrix, das Bild kommt an, wie es ist |
+| BT.601 525 Zeilen | 77, 159, 192 | Matrix BT.601, Primärwerte nach BT.709 umgerechnet |
+| BT.601 625 Zeilen | 54, 159, 192 | dieselbe Matrix, andere Primärwerte, anderes Rot |
+| BT.2020, PQ | 0, 255, 255 | nach BT.709 umgerechnet, Helles bei Weiß abgeschnitten |
+| BT.2020, HLG | 0, 255, 255 | ebenso |
+
+- **mpvs Software-Renderer rechnet Primärwerte und Übertragungsfunktion selbst um**, nach BT.709 mit dem Gamma von
+  BT.1886 (über zimg). Jedes Frame ist also BT.709, voller Wertebereich, und so steht es in `FrameMeta`. Die Werte der
+  Datei dort einzutragen, wäre falsch gewesen.
+- **Was die Datei nennt, steht jetzt daneben:** `MediaInfo::source_color` und `MpvBackend::source_color` (neuer Typ
+  `takt_core::ColorDescription`). Unbekannte Namen bleiben `Unknown` und werden nicht geraten. Die Diagnosezeile nennt
+  beides („file bt.2020/pq, shown as bt.709, hdr cut off at white“).
+- **`ColorPrimaries::Bt601` gab es nur einmal**, obwohl 525 und 625 Zeilen verschiedene Primärwerte haben (die Tabelle
+  zeigt den Unterschied im Rot). Es sind jetzt `Bt601Ntsc` und `Bt601Pal`; `DisplayP3` steht neben `DciP3`.
+- **HDR wird nicht tonegemappt.** Was heller ist als SDR-Weiß, wird hart abgeschnitten, in 8 Bit. `rgb0` taugt für
+  HDR nicht; der Weg dafür ist mpvs Render-API in die GPU-Fläche oder die eigene Pipeline (Phase 1).
+- **Gilt für libmpv mit zimg.** Gegenprobe mit `sws-allow-zimg=no`: dann wendet mpv nur die Matrix an und das Frame
+  behält die Primärwerte der Datei. Die Tests `the_frames_are_bt709_whatever_primaries_the_file_names` und
+  `hdr_is_cut_off_at_white_not_tone_mapped` schlagen auf einem solchen Build fehl. Grün auf dem Windows-Build
+  (mpv 0.41) und auf Ubuntu mit dem libmpv aus apt.
+
+### MpvBackend: Sprünge, Spuren, Formate
+
+Gemessen mit `long-gop-12s.mkv` (`scripts/make-long-gop-clip.py`): Keyframes bei 0 s, 4 s und 8 s, und das Grau jedes
+Bildes ist seine Frame-Nummer, sodass ein Test am Bild abliest, welches Frame es ist.
+
+| Ziel des Sprungs | Fenster (`SeekMode::Keyframe`) landet bei | `SeekMode::Exact` landet bei |
+|---|---|---|
+| 6,5 s | 4,0 s | 6,52 s (das erste Frame ab dem Ziel) |
+| 1,0 s | 0,0 s | 1,0 s |
+| 7,96 s | 4,0 s | 7,96 s |
+| 3,99 s | 0,0 s | – |
+| 11,0 s | 8,0 s | – |
+
+- **Der Sprung des Fensters landet auf dem Keyframe vor dem Ziel**, also nie weiter weg als ein Keyframe-Abstand und
+  nie hinter dem Ziel.
+- **Die Overlay-Zeile „seek“ las ein Frame zu spät** (4,04 s statt 4,0 s). Solange mpv unterwegs ist, nennt es als
+  Position das Ziel, und das Bild des Sprungs trägt diesen Stempel. Gemessen wird jetzt mpvs Position in dem Moment,
+  in dem seine Ereignisse die Ankunft melden (Sprung begonnen, Wiedergabe wieder aufgenommen); die Eigenschaft
+  `seeking` allein nennt einen Sprung fertig, bevor er begonnen hat.
+- **Im Lauf trägt jedes Frame seine eigene Zeit:** 50 von 50 Frames stimmen mit ihrer Bildnummer überein (Test
+  `a_frame_carries_its_own_time_except_on_the_way_to_a_jump`).
+- **Spuren wählt man aus einer Liste in der Leiste** („Audio“, „Subtitles“); `j` und `#` schalten weiter durch.
+- **Vier weitere Paare aus Container und Codec** spielen mit dem richtigen Frame zur richtigen Zeit und nehmen einen
+  Sprung: AV1 in Matroska, H.264 und HEVC in MP4, VP9 in WebM (je 2 s, 64x64, `scripts/make-format-clips.py`). Das
+  belegt den Weg, nicht die Last: 1080p und 4K in diesen Codecs sind nicht gemessen.
+- **Die zehn Sekunden, nach denen ein Öffnen aufgegeben wird, haben einen Test** (mit verkürzter Frist): der Grund
+  kommt einmal, mpv ist danach untätig, die nächste Datei spielt.
+
+### MpvBackend: ein Thread rendert und fragt
+
+`render.h` verlangt einen Render-Thread, der nie auf mpvs Kern wartet. Takt rendert und fragt im selben Thread. Wartet
+der Kern gerade darauf, dass ein Bild gerendert wird (nach einem Sprung, beim Laden, beim Wechsel der Untertitel), und
+dieser Thread stellt stattdessen eine Frage, blockieren beide, bis mpv nach 200 ms aufgibt.
+
+| | vorher | nachher |
+|---|---|---|
+| Sprung: Zeit bis zur Ankunft | etwa 200 ms | etwa 4,5 ms (ein Durchlauf) |
+| Backend verwerfen, während es öffnet | nicht gemessen | 1 ms |
+
+- **Jetzt wird das wartende Bild zuerst gerendert**, bevor mpv etwas gefragt wird: in ein Pool-Frame, das bis zum
+  nächsten `next_frame` liegen bleibt, oder es wird als gezeigt verbucht, wenn es keinen Platz dafür gibt.
+- **Ein Rest bleibt:** beginnt ein Bild zu warten, nachdem geprüft und bevor gefragt wurde, kostet das weiter bis zu
+  200 ms. Weg ist das erst, wenn in einem eigenen Thread gerendert wird und die Eigenschaften beobachtet statt
+  abgefragt werden.
+- **`mpv_command_async` wird nicht benutzt.** Untertiteldateien damit zu lesen, hat mpvs Kern (0.41) dauerhaft
+  angehalten: in etwa einem von neun Läufen, wenn mehrere gleichzeitig endeten, und jedes Mal, wenn dabei eine Datei
+  geladen wurde. `sub-add` wartet deshalb weiter auf mpv; an einem schlafenden Laufwerk hält das Lesen einer
+  Untertiteldatei das Fenster so lange an.
+
 ### A/V-Sync von Hand
 
 Die Audio-Master-Uhr zieht die Latenz ab, die cpal für das Gerät vorhersagt; Wandler, Lautsprecher, Bluetooth und die Anzeige-Latenz des Monitors kennt sie nicht. Ob Bild und Ton zusammenfallen, sagt nur eine Messung von außen. Die Testdatei dafür:
@@ -265,7 +343,9 @@ Für Phase 0 ist das nur eine Notiz. Aber die `VideoBackend`-Schnittstelle ist b
 | Bild des `MpvBackend` als `rgb0`, zweiter Texturpfad statt Wandlung nach NV12 | keine doppelte Wandlung, volle Farbauflösung an Untertiteln und Kanten, RGB wird für Bild-Modus, Capture und Compositing gebraucht | ja: mit mpvs Render-API direkt in die GPU-Fläche braucht mpv den Pfad nicht mehr, der Typ und der Texturpfad bleiben |
 | Die Uhr im mpv-Pfad folgt mpvs Tonposition; `Session` hält Testbild oder Datei, nie beides | genau eine Uhr (Invariante 3), mpv ist in Phase 0 der Tonpfad | ja, mit der eigenen Pipeline in Phase 1 |
 | Das Fenster öffnet über mpv nur vorhandene Dateien; `on_load` prüft, was mpv selbst öffnet | Playlist-Dateien führten sonst ins Netz | nein, höchstens um eine Allowlist erweitert |
-| Playlist-Dateien liest Takt selbst; ein Eintrag ist nur ein relativer Pfad im Ordner der Liste | ein Backend, das Listen liest, spielt ihre Einträge am Fenster vorbei; absolute Pfade erreichen Netzwerkfreigaben | ja: absolute lokale Pfade ließen sich erlauben, Freigaben und Adressen nicht |
+| Playlist-Dateien liest Takt selbst; ein Eintrag ist nur ein relativer Pfad im Ordner der Liste (am 2026-11-14 gefragt und bestätigt: absolute Pfade bleiben draußen, auch lokale) | ein Backend, das Listen liest, spielt ihre Einträge am Fenster vorbei; absolute Pfade erreichen Netzwerkfreigaben | ja: absolute lokale Pfade ließen sich erlauben, Freigaben und Adressen nicht |
+| Die Frames des `MpvBackend` sind BT.709; was die Datei nennt, steht daneben (`source_color`) | mpvs Software-Renderer rechnet selbst um, gemessen | ja, mit der Render-API in die GPU-Fläche liefert mpv das Bild nicht mehr als fertiges `rgb0` |
+| Vor jeder Frage an mpv wird das wartende Bild gerendert; keine Kommandos mit späterer Antwort | Rendern und Fragen in einem Thread blockiert sonst bis zu 200 ms; `mpv_command_async` hat den Kern angehalten | ja, mit einem eigenen Render-Thread |
 | Eine Untertiteldatei darf Formatierung, aber keine andere Datei, kein Netz, kein Skript (`access-references=no`) | mit mpvs Standard führt eine `.srt` mit EDL-Inhalt zu beidem | nein |
 
 ---
