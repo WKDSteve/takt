@@ -10,7 +10,9 @@ entry and the desktop shortcut "Takt" when they point at that folder, and the en
 Apps when it names that folder. A second run finds nothing to do and says so; it is not an error. A
 program that still runs cannot be removed: that is an error, not a "removed".
 
-Settings > Apps runs the copy in the install folder with the places of that install.
+This is the way for the terminal. The entry in Settings > Apps does the same without a script and
+without a console window: it runs the installed player as "takt-player.exe --uninstall"
+(apps/takt-player/src/uninstall.rs).
 
 .PARAMETER InstallDir
 The install folder (default $env:TAKT_INSTALL_DIR, else %LOCALAPPDATA%\takt\bin).
@@ -29,7 +31,8 @@ The key that stands for HKCU\Software (default $env:TAKT_REGISTRY_ROOT, else HKC
 Remove although the session is elevated (for a build machine).
 
 .PARAMETER PauseOnError
-Wait for a key after an error (Settings > Apps opens a window that would close at once).
+Wait for a key after an error (the Settings > Apps entry of an install made before the program
+removed itself passes it: its console window would close at once).
 
 .EXAMPLE
 .\scripts\uninstall.ps1

@@ -16,7 +16,11 @@ checks:
   and install folder; the account's own are never touched), under PowerShell 7 and Windows PowerShell
   5.1: the files, the Start menu entry and the desktop shortcut with the icon of the program, the
   Settings > Apps entry; an update over it; a payload that is no release and a folder of somebody
-  else's refused; a Claude session refused; then the installed uninstall.ps1, twice.
+  else's refused; a Claude session refused; then the installed uninstall.ps1, twice;
+- with -AppExe (or -BuildDir), the entry of Settings > Apps itself: its command names no PowerShell,
+  and run as it stands (plus --yes, so no window asks) the real takt-player.exe removes the temp
+  install in its own process. That is the one way the real program is started here (and once as
+  --headless, to be the program that still runs).
 
 With -Zip the zip of a real build is checked too, against the takt-player.exe of -BuildDir (the
 rolling workflow checks the zip it is about to publish this way), and that program must be a window
@@ -31,6 +35,9 @@ A zip made by package-release.ps1 from -BuildDir, checked as well.
 .PARAMETER BuildDir
 The folder with the takt-player.exe the -Zip was made from.
 
+.PARAMETER AppExe
+A real takt-player.exe (default: the one of -BuildDir). With it the entry of Settings > Apps is run.
+
 .PARAMETER Label
 The version label the -Zip must say (X.Y.Z+<short commit>).
 
@@ -42,6 +49,7 @@ The version label the -Zip must say (X.Y.Z+<short commit>).
 param(
     [string] $Zip = '',
     [string] $BuildDir = '',
+    [string] $AppExe = '',
     [string] $Label = ''
 )
 
@@ -79,6 +87,42 @@ function Invoke-Child([string] $Script, [string[]] $Arguments, [string] $Shell =
     }
     finally {
         $env:CLAUDECODE = $saved
+    }
+}
+
+# The command of a Settings > Apps entry, run as it stands plus --yes (no window asks) and
+# --allow-elevated (the hosted runners run elevated). The program gets a temp folder of the test and no
+# CLAUDECODE; nothing of this process changes.
+function Invoke-Entry([string] $Command) {
+    if ($Command -notmatch '^"([^"]+)"(.*)$') { return [pscustomobject]@{ Code = -1; Output = "not a command: $Command" } }
+    $exe = $Matches[1]
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $exe
+    $info.Arguments = @($Matches[2].Trim(), '--yes', '--allow-elevated') -join ' '
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $info.StandardErrorEncoding = [Text.Encoding]::UTF8
+    # From inside the folder that is to go, as a terminal standing in it would.
+    $info.WorkingDirectory = Split-Path -Parent $exe
+    $info.EnvironmentVariables.Remove('CLAUDECODE')
+    $info.EnvironmentVariables['TEMP'] = $script:appTemp
+    $info.EnvironmentVariables['TMP'] = $script:appTemp
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        $out = $process.StandardOutput.ReadToEndAsync()
+        $err = $process.StandardError.ReadToEndAsync()
+        # A window that asks would wait for ever: that is a failure, not a hang of the test.
+        if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            return [pscustomobject]@{ Code = -1; Output = 'did not end within a minute (does a window ask?)' }
+        }
+        return [pscustomobject]@{ Code = $process.ExitCode; Output = ($out.Result + $err.Result) }
+    }
+    finally {
+        $process.Dispose()
     }
 }
 
@@ -164,7 +208,10 @@ try {
         }
         $key = "$regRoot\Microsoft\Windows\CurrentVersion\Uninstall\takt"
         $entry = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
-        Write-Check ($null -ne $entry -and $entry.DisplayVersion -ceq "$version+0123456" -and $entry.UninstallString -like '*uninstall.ps1*-PauseOnError') "${shell}: the Settings > Apps entry names the version and the uninstall"
+        $entryCommand = "`"$app`" --uninstall --start-menu-dir `"$startMenu`" --desktop-dir `"$desktop`" --registry-root `"$regRoot`""
+        Write-Check ($null -ne $entry -and $entry.DisplayVersion -ceq "$version+0123456" -and $entry.UninstallString -ceq $entryCommand) "${shell}: the Settings > Apps entry names the version, and its command is the installed player with --uninstall and the places of this install"
+        if ($null -ne $entry -and $entry.UninstallString -cne $entryCommand) { Write-Output "  it says: $($entry.UninstallString)" }
+        Write-Check ($null -ne $entry -and $entry.UninstallString -notmatch '(powershell|pwsh|cmd)\.exe|\.ps1|-File') "${shell}: the command names no PowerShell, no shell and no script"
 
         $r = Invoke-Child (Join-Path $payload 'install.ps1') $places $shell
         Write-Check ($r.Code -eq 0 -and -not (Get-ChildItem -LiteralPath $install -Filter '*.old')) "${shell}: an update over the install leaves no .old"
@@ -196,6 +243,86 @@ try {
     catch { $refused = $_.Exception.Message -match 'Claude session' }
     finally { $env:CLAUDECODE = $savedClaude }
     Write-Check $refused 'a Claude session is refused'
+
+    # The entry of Settings > Apps, run as it stands: the real player removes its install.
+    if (-not $AppExe -and $BuildDir) { $AppExe = Join-Path $BuildDir 'takt-player.exe' }
+    if (-not $AppExe) {
+        Write-Host 'skip  the entry of Settings > Apps run by the program itself (no -AppExe, no -BuildDir)'
+    }
+    else {
+        if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "test-release.ps1: no such program: $AppExe" }
+        $script:appTemp = Join-Path $work 'app temp'
+        New-Item -ItemType Directory -Path $script:appTemp | Out-Null
+        $install = Join-Path $work 'entry install\takt\bin'
+        $startMenu = Join-Path $work 'entry startmenu'
+        $desktop = Join-Path $work 'entry desktop'
+        $places = @('-InstallDir', $install, '-StartMenuDir', $startMenu, '-DesktopDir', $desktop, '-RegistryRoot', $regRoot, '-AllowElevated', '-DesktopShortcut')
+        $real = Join-Path $work 'real payload'
+        Copy-Item -LiteralPath $payload -Destination $real -Recurse
+        Copy-Item -LiteralPath $AppExe -Destination (Join-Path $real 'takt-player.exe') -Force
+        $r = Invoke-Child (Join-Path $real 'install.ps1') $places
+        Write-Check ($r.Code -eq 0) 'entry: an install with the real player'
+        if ($r.Code -ne 0) { Write-Output $r.Output }
+        $app = Join-Path $install 'takt-player.exe'
+        $key = "$regRoot\Microsoft\Windows\CurrentVersion\Uninstall\takt"
+        $command = [string](Get-ItemProperty -LiteralPath $key).UninstallString
+        $files = 'LICENSE,README.md,VERSION,takt-player.exe,uninstall.ps1'
+
+        # Refused before anything goes: a player that runs from the install (the measuring loop, without a
+        # window and without a sound device), a registry root of another hive.
+        $savedAudio = $env:TAKT_AUDIO
+        $env:TAKT_AUDIO = 'sim'
+        try { $running = Start-Process -FilePath $app -ArgumentList '--headless', '--seconds', '60' -WindowStyle Hidden -PassThru }
+        finally { $env:TAKT_AUDIO = $savedAudio }
+        try {
+            Start-Sleep -Milliseconds 500
+            $r = Invoke-Entry $command
+            Write-Check ($r.Code -ne 0 -and $r.Output -match 'running from' -and $r.Output -match "PID $($running.Id)" -and ((Get-Names $install) -join ',') -ceq $files) 'entry: refused while the player runs from the install, with its PID, and nothing goes'
+            if ($r.Code -eq 0 -or $r.Output -notmatch 'running from') { Write-Output $r.Output }
+        }
+        finally {
+            Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
+            $running.WaitForExit(5000) | Out-Null
+        }
+        Start-Sleep -Milliseconds 300
+        $r = Invoke-Entry "`"$app`" --uninstall --start-menu-dir `"$startMenu`" --desktop-dir `"$desktop`" --registry-root `"HKLM:\Software\x`""
+        Write-Check ($r.Code -ne 0 -and $r.Output -match 'below HKCU' -and ((Get-Names $install) -join ',') -ceq $files) 'entry: a registry root outside HKCU is refused'
+
+        # A shortcut that leads elsewhere is not of this install and stays.
+        $foreignLink = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $startMenu 'Takt.lnk'))
+        $foreignLink.TargetPath = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $foreignLink.Save()
+        $r = Invoke-Entry $command
+        Write-Check ($r.Code -eq 0 -and -not (Test-Path -LiteralPath $install) -and -not (Test-Path -LiteralPath (Join-Path $desktop 'Takt.lnk'))) 'entry: the install and its desktop shortcut go'
+        if ($r.Code -ne 0) { Write-Output $r.Output }
+        Write-Check ((Test-Path -LiteralPath (Join-Path $startMenu 'Takt.lnk')) -and $r.Output -match 'kept .*Takt\.lnk') 'entry: a Start menu entry that starts another program is left alone, and named'
+        Remove-Item -LiteralPath (Join-Path $startMenu 'Takt.lnk')
+
+        # The whole of it: files with the rest of a cut short install, both shortcuts, the entry; and the
+        # program itself, which is moved to the temp folder.
+        $r = Invoke-Child (Join-Path $real 'install.ps1') $places
+        Set-Content -LiteralPath (Join-Path $install 'README.md.new') -Value 'cut short'
+        Get-ChildItem -LiteralPath $script:appTemp -Force | Remove-Item -Force
+        Set-Content -LiteralPath (Join-Path $script:appTemp 'takt-player-removed-1.exe') -Value 'left by an earlier removal'
+        $r = Invoke-Entry ([string](Get-ItemProperty -LiteralPath $key).UninstallString)
+        Write-Check ($r.Code -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $work 'entry install\takt')) -and -not (Test-Path -LiteralPath (Join-Path $startMenu 'Takt.lnk')) -and
+            -not (Test-Path -LiteralPath (Join-Path $desktop 'Takt.lnk'))) 'entry: removes it all: the files, the folder the installer made, both shortcuts'
+        if ($r.Code -ne 0) { Write-Output $r.Output }
+        Write-Check (-not (Test-Path -LiteralPath $key)) 'entry: and the Settings > Apps entry itself'
+        $moved = @(Get-ChildItem -LiteralPath $script:appTemp -Force)
+        Write-Check ($moved.Count -eq 1 -and $moved[0].Name -match '^takt-player-removed-[0-9]+\.exe$' -and $moved[0].Name -ne 'takt-player-removed-1.exe' -and (Get-Sha $moved[0].FullName) -eq (Get-Sha $AppExe)) 'entry: the program moved itself to the temp folder (it cannot delete its own file) and took the one an earlier removal left'
+        if ($moved.Count -ne 1) { Write-Output "  the temp folder holds: $(($moved | ForEach-Object { $_.Name }) -join ', ')" }
+        Write-Check ($r.Output -match 'removed the Settings > Apps entry' -and $r.Output -match 'were not touched') 'entry: says what it removed and what stays'
+
+        # A folder that is no install loses nothing.
+        $loose = Join-Path $work 'loose'
+        New-Item -ItemType Directory -Path $loose | Out-Null
+        Copy-Item -LiteralPath $AppExe -Destination (Join-Path $loose 'takt-player.exe')
+        Set-Content -LiteralPath (Join-Path $loose 'README.md') -Value 'mine'
+        $r = Invoke-Entry "`"$(Join-Path $loose 'takt-player.exe')`" --uninstall --start-menu-dir `"$startMenu`" --desktop-dir `"$desktop`" --registry-root `"$regRoot`""
+        Write-Check ($r.Code -ne 0 -and $r.Output -match 'not an install of takt' -and ((Get-Names $loose) -join ',') -ceq 'README.md,takt-player.exe') 'entry: the program in a folder that is no install removes nothing'
+        if ($r.Code -eq 0) { Write-Output $r.Output }
+    }
 
     if ($Zip) {
         if (-not $BuildDir) { throw 'test-release.ps1: -Zip needs -BuildDir' }

@@ -18,6 +18,9 @@
 //! A release build for Windows is a window program: started from the Start
 //! menu it opens no console window next to the player. Started from a
 //! terminal it writes there all the same (`console`).
+//!
+//! `takt-player --uninstall` (Windows) removes the install the program is
+//! part of; it is what the entry in Settings > Apps runs (`uninstall`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
@@ -34,6 +37,8 @@ mod render;
 mod session;
 mod theme;
 mod ui;
+#[cfg(windows)]
+mod uninstall;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -69,6 +74,12 @@ fn files(args: &[String]) -> Vec<PathBuf> {
 fn main() -> ExitCode {
     // Before the first line is written: a window program has no console of its own.
     console::attach_parent();
+    // `--uninstall`: the entry in Settings > Apps. The program removes its own install, in this
+    // process and with a question in a window (`uninstall`).
+    #[cfg(windows)]
+    if std::env::args().skip(1).any(|arg| arg == "--uninstall") {
+        return uninstall::run(&uninstall::PRODUCT, std::env::args().skip(1));
+    }
     // `--keys`: the list of keys as Markdown (the text of docs/KEYS.md).
     if std::env::args().skip(1).any(|arg| arg == "--keys") {
         print!("{}", app::keys_markdown());

@@ -62,10 +62,15 @@ jobs:
         env:
           TAKT_GPU_TESTS: "1"
           TAKT_GPU_ADAPTER: fallback
-      # Packing, install and uninstall of the rolling zip, with a stand-in program and throw-away places.
-      - name: Install-Skripte (Windows)
+      # Packing, install and uninstall of the rolling zip, with a stand-in program and throw-away places; and
+      # the entry of Settings > Apps, which is the player itself (takt-player --uninstall): the build of this
+      # job removes a temp install with it.
+      - name: Install-Skripte und Deinstallation durch das Programm (Windows)
         if: runner.os == 'Windows'
-        run: pwsh -NoProfile -File scripts/test-release.ps1
+        shell: bash
+        run: |
+          cargo build -p takt-player
+          pwsh -NoProfile -File scripts/test-release.ps1 -AppExe target/debug/takt-player.exe
       - name: Doku baut ohne fehlende Verweise
         run: cargo doc --workspace --no-deps
         env:

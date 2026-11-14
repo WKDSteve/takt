@@ -28,7 +28,13 @@ administrator rights. Windows (SmartScreen) may ask before the first start: the 
 
 ## Remove
 
-*Settings > Apps > Takt > Uninstall*, or `%LOCALAPPDATA%\takt\bin\uninstall.ps1`.
+*Settings > Apps > Takt > Uninstall*: the player removes its own install
+(`takt-player.exe --uninstall`). It asks first, in a window; no PowerShell and no console window
+opens. From a terminal `%LOCALAPPDATA%\takt\bin\uninstall.ps1` does the same.
+
+Windows does not let a running program delete its own file, so *Settings > Apps* moves
+`takt-player.exe` into your folder for temporary files (`%TEMP%\takt-player-removed-<number>.exe`)
+and leaves it there. Nothing starts it; delete it when you like, or let the cleanup of Windows take it.
 
 ## Keys
 
