@@ -31,5 +31,5 @@ mod time;
 pub use audio::{AudioBuffer, ChannelLayout, SampleFormat};
 pub use error::{Error, Result};
 pub use frame::{FrameMeta, FramePool, PLANE_ALIGN, PooledFrame, VideoFrame};
-pub use pixel::{ColorPrimaries, ColorRange, PixelFormat, TransferFunction};
+pub use pixel::{ColorDescription, ColorPrimaries, ColorRange, PixelFormat, TransferFunction};
 pub use time::{Rational, Timestamp};

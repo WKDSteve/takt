@@ -19,7 +19,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::pixel::{ColorPrimaries, ColorRange, PixelFormat, TransferFunction};
+use crate::pixel::{ColorDescription, ColorPrimaries, ColorRange, PixelFormat, TransferFunction};
 use crate::time::Timestamp;
 
 /// Beschreibung eines Frames ohne die Bilddaten selbst.
@@ -46,6 +46,17 @@ impl FrameMeta {
     #[must_use]
     pub const fn is_hdr(&self) -> bool {
         self.transfer.is_hdr()
+    }
+
+    /// Wie die Werte dieses Frames als Farbe zu lesen sind: das, was im
+    /// Frame steht, nicht das, was die Quelle ueber sich sagt.
+    #[must_use]
+    pub const fn color(&self) -> ColorDescription {
+        ColorDescription {
+            primaries: self.primaries,
+            transfer: self.transfer,
+            range: self.range,
+        }
     }
 }
 

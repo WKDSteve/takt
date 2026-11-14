@@ -111,12 +111,19 @@ pub enum ColorPrimaries {
     /// BT.709 — HD-Video, sRGB-Primaerwerte. Der Alltagsfall.
     #[default]
     Bt709,
-    /// BT.601 — Standard Definition, PAL und NTSC.
-    Bt601,
+    /// BT.601 mit 525 Zeilen (NTSC), die Primaerwerte von SMPTE 170M.
+    Bt601Ntsc,
+    /// BT.601 mit 625 Zeilen (PAL, SECAM), die Primaerwerte von BT.470 BG.
+    /// Nicht dieselben wie bei 525 Zeilen: wer beide gleich behandelt,
+    /// verschiebt Rot und Gruen sichtbar.
+    Bt601Pal,
     /// BT.2020 — UHD und HDR, deutlich weiterer Farbraum.
     Bt2020,
-    /// DCI-P3 — Kino und Apple-Displays.
+    /// DCI-P3 — Kino, Weisspunkt des Projektors (kein D65).
     DciP3,
+    /// Display P3 — die Primaerwerte von DCI-P3 mit Weisspunkt D65
+    /// (Apple-Displays, viele Telefone).
+    DisplayP3,
     /// Aus der Datei nicht ermittelbar.
     Unknown,
 }
@@ -149,6 +156,32 @@ impl TransferFunction {
     #[must_use]
     pub const fn is_hdr(self) -> bool {
         matches!(self, Self::Pq | Self::Hlg)
+    }
+}
+
+/// Wie die Werte eines Bildes als Farbe zu lesen sind: Primaerwerte,
+/// Uebertragungsfunktion und Wertebereich zusammen.
+///
+/// Dieselbe Angabe beschreibt zwei verschiedene Dinge, die nicht gleich sein
+/// muessen: was eine Quelle ueber ihr Bild sagt, und was in einem Frame
+/// tatsaechlich steht ([`crate::FrameMeta::color`]). Ein Backend, das das
+/// Bild selbst umrechnet, liefert Frames in einem anderen Farbraum als die
+/// Datei nennt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ColorDescription {
+    /// Farbprimaerwerte.
+    pub primaries: ColorPrimaries,
+    /// Uebertragungsfunktion.
+    pub transfer: TransferFunction,
+    /// Wertebereich der Komponenten.
+    pub range: ColorRange,
+}
+
+impl ColorDescription {
+    /// Ob die Angabe einen HDR-Signalpfad beschreibt.
+    #[must_use]
+    pub const fn is_hdr(&self) -> bool {
+        self.transfer.is_hdr()
     }
 }
 
@@ -207,6 +240,32 @@ mod tests {
         assert!(TransferFunction::Pq.is_hdr());
         assert!(TransferFunction::Hlg.is_hdr());
         assert!(!TransferFunction::Bt709.is_hdr());
+    }
+
+    #[test]
+    fn die_beiden_bt601_und_die_beiden_p3_sind_verschiedene_primaerwerte() {
+        assert_ne!(ColorPrimaries::Bt601Ntsc, ColorPrimaries::Bt601Pal);
+        assert_ne!(ColorPrimaries::DciP3, ColorPrimaries::DisplayP3);
+    }
+
+    #[test]
+    fn eine_farbangabe_ist_hdr_wie_ihre_uebertragungsfunktion() {
+        let sdr = ColorDescription::default();
+        assert_eq!(sdr.primaries, ColorPrimaries::Bt709);
+        assert_eq!(sdr.range, ColorRange::Limited);
+        assert!(!sdr.is_hdr());
+        let hdr = ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer: TransferFunction::Pq,
+            range: ColorRange::Limited,
+        };
+        assert!(hdr.is_hdr());
+        // Weite Primaerwerte allein sind kein HDR.
+        let wide = ColorDescription {
+            transfer: TransferFunction::Bt709,
+            ..hdr
+        };
+        assert!(!wide.is_hdr());
     }
 
     #[test]
