@@ -215,8 +215,11 @@ if ($DesktopShortcut) {
 $uninstallKey = "$RegistryRoot\Microsoft\Windows\CurrentVersion\Uninstall\takt"
 Write-Output "==> Settings > Apps entry ($uninstallKey)"
 $command = "`"$app`" --uninstall"
-if ($StartMenuDir -ne (Get-Place ([Environment]::GetFolderPath('Programs')))) { $command += " --start-menu-dir `"$StartMenuDir`"" }
-if ($DesktopDir -ne (Get-Place ([Environment]::GetFolderPath('Desktop')))) { $command += " --desktop-dir `"$DesktopDir`"" }
+# An account without such a folder (a service account) has no place of its own to compare with.
+$ownStartMenu = [Environment]::GetFolderPath('Programs')
+$ownDesktop = [Environment]::GetFolderPath('Desktop')
+if (-not $ownStartMenu -or $StartMenuDir -ne $ownStartMenu.TrimEnd('\')) { $command += " --start-menu-dir `"$StartMenuDir`"" }
+if (-not $ownDesktop -or $DesktopDir -ne $ownDesktop.TrimEnd('\')) { $command += " --desktop-dir `"$DesktopDir`"" }
 if ($RegistryRoot -ne 'HKCU:\Software') { $command += " --registry-root `"$RegistryRoot`"" }
 $size = [int](((Get-ChildItem -LiteralPath $InstallDir -File | Measure-Object -Property Length -Sum).Sum) / 1KB)
 if (Test-Path -LiteralPath $uninstallKey) { Remove-Item -LiteralPath $uninstallKey -Recurse -Force }

@@ -107,8 +107,10 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String> {
 #[derive(Debug)]
 struct Places {
     install: PathBuf,
-    start_menu: PathBuf,
-    desktop: PathBuf,
+    /// The folders of the shortcuts; `None` when the account has no such folder (a service
+    /// account): then there is no shortcut to look for.
+    start_menu: Option<PathBuf>,
+    desktop: Option<PathBuf>,
     /// The key below `HKEY_CURRENT_USER` that stands for `Software`.
     software: String,
 }
@@ -195,13 +197,10 @@ fn prepare(product: &Product, options: &Options, program: &Path) -> Result<Place
             product.name
         ));
     }
-    let folder =
-        |given: Option<&str>, name: &str, which: sys::Folder| match setting(given, product, name) {
-            Some(dir) => place(&dir),
-            None => {
-                sys::folder(which).ok_or_else(|| format!("Windows did not say where {name} is"))
-            }
-        };
+    let folder = |given: Option<&str>, name: &str, which: sys::Folder| {
+        setting(given, product, name)
+            .map_or_else(|| Ok(sys::folder(which)), |dir| place(&dir).map(Some))
+    };
     let places = Places {
         start_menu: folder(
             options.start_menu.as_deref(),
@@ -342,10 +341,14 @@ fn remove(
     }
 
     // 2. The shortcuts, when they lead into the install folder.
-    let link = places.start_menu.join(product.link);
-    remove_link(&link, install, "the Start menu entry", &mut report)?;
-    let link = places.desktop.join(product.link);
-    remove_link(&link, install, "the desktop shortcut", &mut report)?;
+    for (dir, what) in [
+        (&places.start_menu, "the Start menu entry"),
+        (&places.desktop, "the desktop shortcut"),
+    ] {
+        if let Some(dir) = dir {
+            remove_link(&dir.join(product.link), install, what, &mut report)?;
+        }
+    }
 
     // 3. The files the installer puts there, with the .new and .old of an install that was cut
     // short; a folder that holds anything else stays. The mark goes last: until then this can
@@ -617,8 +620,8 @@ mod tests {
             let registry = TestPlace::new(&format!("uninstall-{what}"));
             let places = Places {
                 install: install.clone(),
-                start_menu: root.join("menu"),
-                desktop: root.join("desk"),
+                start_menu: Some(root.join("menu")),
+                desktop: Some(root.join("desk")),
                 software: registry.key().to_owned(),
             };
             let program = install.join(DEMO.program);
@@ -702,7 +705,7 @@ mod tests {
         fs::write(install.join("mine.txt"), "mine").unwrap();
         it.enter(Path::new(r"C:\another\demo\bin"));
         sys::write_registry_text(&it.key("Run"), "demo", "cmd /c something-of-yours");
-        fs::write(it.places.start_menu.join("demo.lnk"), "no shortcut").unwrap();
+        fs::write(it.root.join("menu").join("demo.lnk"), "no shortcut").unwrap();
 
         let report = it.remove().unwrap();
 
@@ -717,7 +720,7 @@ mod tests {
             Some("cmd /c something-of-yours")
         );
         assert!(sys::registry_text(&it.key(r"Uninstall\demo"), "InstallLocation").is_some());
-        assert!(it.places.start_menu.join("demo.lnk").is_file());
+        assert!(it.root.join("menu").join("demo.lnk").is_file());
         assert_eq!(
             report
                 .notes
@@ -751,13 +754,30 @@ mod tests {
     }
 
     #[test]
+    fn an_account_without_shortcut_folders_loses_its_install_all_the_same() {
+        let mut it = Install::new("nofolders");
+        let install = it.places.install.clone();
+        it.places.start_menu = None;
+        it.places.desktop = None;
+        it.enter(&install);
+        let report = it.remove().unwrap();
+        assert!(!install.exists());
+        assert!(
+            report
+                .removed
+                .iter()
+                .any(|line| line == "the Settings > Apps entry")
+        );
+    }
+
+    #[test]
     fn a_folder_that_is_no_install_is_refused() {
         let it = Install::new("unmarked");
         fs::remove_file(it.places.install.join(MARK)).unwrap();
         let options = Options {
             allow_elevated: true,
-            start_menu: Some(it.places.start_menu.display().to_string()),
-            desktop: Some(it.places.desktop.display().to_string()),
+            start_menu: Some(it.root.join("menu").display().to_string()),
+            desktop: Some(it.root.join("desk").display().to_string()),
             registry_root: Some(format!(r"HKCU:\{}", it.registry.key())),
             ..Options::default()
         };
