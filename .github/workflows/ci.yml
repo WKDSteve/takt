@@ -87,6 +87,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, resolved 2026-11-12
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
       - name: ALSA- und libmpv-Header
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libmpv-dev pkg-config
@@ -99,6 +100,11 @@ jobs:
           # The cfg must have come on: both libmpv tests ran, not the stand-in that says SKIP.
           grep -q "test libmpv::client_api_is_version_2 ... ok" test.log
           grep -q "test libmpv::license_state_matches_build_md ... ok" test.log
+          # The module mpv exists only with the cfg: no other job compiles, lints or tests it.
+          cargo clippy -p takt-player --all-targets --all-features
+          cargo test -p takt-player mpv:: -- --nocapture 2>&1 | tee -a test.log
+          grep -q "test mpv::tests::a_test_pattern_is_rendered_into_memory ... ok" test.log
+          grep -q "test mpv::ffi::tests::a_text_with_a_nul_byte_is_no_source ... ok" test.log
       - name: SKIPs in die Zusammenfassung
         if: always()
         run: python3 scripts/ci-skip-summary.py test.log --title "libmpv (Ubuntu)"

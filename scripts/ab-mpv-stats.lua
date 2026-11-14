@@ -11,39 +11,39 @@ local mp = require("mp")
 
 -- name of the key in the line -> property of mpv
 local PROPERTIES = {
-	{ "mode", "video-sync" },
-	{ "fps", "container-fps" },
-	{ "hz", "display-fps" },
-	{ "seconds", "time-pos" },
-	{ "dropped", "frame-drop-count" },
-	{ "decoder_dropped", "decoder-frame-drop-count" },
-	{ "delayed", "vo-delayed-frame-count" },
-	{ "mistimed", "mistimed-frame-count" },
-	{ "jitter", "vsync-jitter" },
-	{ "vsync_ratio", "vsync-ratio" },
-	{ "speed", "audio-speed-correction" },
+    { "mode", "video-sync" },
+    { "fps", "container-fps" },
+    { "hz", "display-fps" },
+    { "seconds", "time-pos" },
+    { "dropped", "frame-drop-count" },
+    { "decoder_dropped", "decoder-frame-drop-count" },
+    { "delayed", "vo-delayed-frame-count" },
+    { "mistimed", "mistimed-frame-count" },
+    { "jitter", "vsync-jitter" },
+    { "vsync_ratio", "vsync-ratio" },
+    { "speed", "audio-speed-correction" },
 }
 
 local last = {}
 
 local function sample()
-	for _, pair in ipairs(PROPERTIES) do
-		local value = mp.get_property(pair[2])
-		if value ~= nil then
-			last[pair[1]] = value
-		end
-	end
+    for _, pair in ipairs(PROPERTIES) do
+        local value = mp.get_property(pair[2])
+        if value ~= nil then
+            last[pair[1]] = value
+        end
+    end
 end
 
 mp.add_periodic_timer(1, sample)
 mp.register_event("end-file", sample)
 
 mp.register_event("shutdown", function()
-	local parts = { "takt-ab backend=mpv" }
-	for _, pair in ipairs(PROPERTIES) do
-		-- A property mpv never gave is `-`; spaces would break the key=value line.
-		local value = (last[pair[1]] or "-"):gsub("%s+", "_")
-		parts[#parts + 1] = pair[1] .. "=" .. value
-	end
-	print(table.concat(parts, " "))
+    local parts = { "takt-ab backend=mpv" }
+    for _, pair in ipairs(PROPERTIES) do
+        -- A property mpv never gave is `-`; spaces would break the key=value line.
+        local value = (last[pair[1]] or "-"):gsub("%s+", "_")
+        parts[#parts + 1] = pair[1] .. "=" .. value
+    end
+    print(table.concat(parts, " "))
 end)

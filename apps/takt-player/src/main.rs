@@ -14,6 +14,8 @@ mod app;
 mod audio;
 mod diagnostics;
 mod headless;
+#[cfg(takt_libmpv)]
+mod mpv;
 mod palette;
 mod playlist;
 mod refresh;
@@ -39,11 +41,15 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     // `--headless [--fps N[/D]] [--hz N[/D]] [--seconds N]`: the measuring loop without a window.
     if args.iter().skip(1).any(|arg| arg == "--headless") {
+        // 2: the options are wrong; 1: the run itself failed.
         return match headless::Options::parse(&args[1..]) {
-            Ok(options) => {
-                headless::run(&options);
-                ExitCode::SUCCESS
-            }
+            Ok(options) => match headless::run(&options) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("takt-player: {e}");
+                    ExitCode::FAILURE
+                }
+            },
             Err(e) => {
                 eprintln!("takt-player: {e}");
                 ExitCode::from(2)

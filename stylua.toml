@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The Lua scripts of this repository (scripts/*.lua, run by mpv) are indented with spaces: the control
+# character guard (scripts/check-control-chars.py, NREL-14) takes no tab in a tracked text file.
+indent_type = "Spaces"
+indent_width = 4
+column_width = 120

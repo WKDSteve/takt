@@ -8,6 +8,7 @@ table row per run:
     cargo build --release -p takt-player
     python scripts/ab-measure.py                      # NullBackend, headless: 23.976, 25, 50, 60 fps on 60 Hz, 5 min each
     python scripts/ab-measure.py --hz 60 120          # the same on two simulated displays
+    python scripts/ab-measure.py --mpv-sw             # libmpv through its software renderer, headless (needs libmpv)
     python scripts/ab-measure.py --mpv                # mpv itself, display-resample and audio: needs a real screen
 
 Paths:
@@ -16,6 +17,10 @@ Paths:
          simulated (one pass per period, no vsync), so the numbers say what the scheduler decides, not what a screen
          shows. `--device NAME` plays the silence of the run on that output device (TAKT_AUDIO_DEVICE); without a
          device the clock is simulated and the row says so.
+  mpv-sw `takt-player --headless --mpv`: libmpv decodes the same pattern (from lavfi, with a silent sound track) and
+         renders it into memory; the error is `audio-pts - time-pos` of mpv at the pass that takes the frame, and the
+         row names what rendering a frame costs. Needs a player built with TAKT_LIBMPV_DIR (docs/BUILD.md) and the
+         libmpv library in PATH.
   mpv    `mpv --video-sync=<mode>` on the same pattern from lavfi, with scripts/ab-mpv-stats.lua. mpv opens a window
          and measures against the real refresh of the screen it is on; `--ao=null` keeps it silent. mpv has no
          histogram of presentation errors: its row holds the vsync jitter and its own counters instead.
@@ -43,9 +48,19 @@ HEADER = (
 
 
 def fraction(text):
-    """A rate `N` or `N/D` as a float; only for the expected count and the labels, never fed back."""
+    """A rate `N`, `N/D` or `N.NNN` as a float; only for the expected count and the labels, never fed back."""
     num, _, den = text.partition("/")
-    return int(num) / int(den or "1")
+    return float(num) / float(den or "1")
+
+
+def comma(text):
+    """A number with the decimal comma of the German table."""
+    return text.replace(".", ",")
+
+
+def pattern(fps):
+    """The test pattern of lavfi with a silent sound track, as mpv and libmpv open it."""
+    return f"av://lavfi:testsrc2=size=1920x1080:rate={fps}[out0];anullsrc=r=48000:cl=stereo[out1]"
 
 
 def result_line(output):
@@ -58,11 +73,11 @@ def result_line(output):
 
 
 def per_minute(count, seconds):
-    return f"{float(count) * 60 / float(seconds):.1f}".replace(".", ",")
+    return comma(f"{float(count) * 60 / float(seconds):.1f}")
 
 
 def millis(micros):
-    return f"{float(micros) / 1000:.2f} ms".replace(".", ",")
+    return comma(f"{float(micros) / 1000:.2f} ms")
 
 
 def null_row(result, date, hardware):
@@ -71,13 +86,28 @@ def null_row(result, date, hardware):
     fps, hz = fraction(result["fps"]), fraction(result["hz"])
     # A pass without a new frame is no fault when the display is faster than the source: (hz - fps) per second.
     expected = max(hz - fps, 0) * 60
-    clock = "Gerät" if result["audio"] == "device" else "Uhr simuliert"
-    p99 = "–" if result["p99_us"] == "-" else "< " + millis(result["p99_us"])
+    if result["backend"] == "mpv-sw":
+        # The quantile of this path is exact, the render time an upper bound of its class.
+        lead = millis(result.get("offset_us", "0"))
+        path = (
+            f"libmpv, Software-Renderer, kopflos (Uhr von mpv, Vorlauf {lead}; "
+            f"Rendern p99 < {millis(result['render_p99_us'])})"
+        )
+        bound = ""
+    else:
+        clock = "Gerät" if result["audio"] == "device" else "Uhr simuliert"
+        path = f"NullBackend, kopflos ({clock})"
+        bound = "< "
+
+    def error(key):
+        return "–" if result[key] == "-" else millis(result[key])
+
+    dropped = "–" if result["dropped"] == "-" else per_minute(result["dropped"], seconds)
     return (
-        f"| {date} | {hardware} | Testbild {fps:.3f} fps, {result['seconds']} s | NullBackend, kopflos ({clock}) "
-        f"| {hz:g} Hz simuliert | {millis(result['mean_us'])} | {p99} "
-        f"| {per_minute(result['repeated'], seconds)} | {expected:.1f} | {per_minute(result['dropped'], seconds)} |"
-    ).replace(".", ",")
+        f"| {date} | {hardware} | Testbild {comma(f'{fps:.3f}')} fps, {result['seconds']} s | {path} "
+        f"| {hz:g} Hz simuliert | {error('mean_us')} | {bound}{error('p99_us')} "
+        f"| {per_minute(result['repeated'], seconds)} | {comma(f'{expected:.1f}')} | {dropped} |"
+    )
 
 
 def mpv_row(result, date, hardware):
@@ -95,12 +125,13 @@ def mpv_row(result, date, hardware):
         # mpv counts mistimed frames only with a display-* mode.
         return "–" if number(key) is None else per_minute(number(key), seconds)
 
-    source = "Testbild" if fps is None else f"Testbild {fps:.3f} fps"
+    source = "Testbild" if fps is None else f"Testbild {comma(f'{fps:.3f}')} fps"
     return (
         f"| {date} | {hardware} | {source}, {seconds:.0f} s | mpv `--video-sync={result.get('mode', '?')}` "
-        f"| {'?' if hz is None else f'{hz:.3f}'} Hz | vsync-jitter {'–' if jitter is None else f'{jitter:.4f}'} | – "
+        f"| {'?' if hz is None else comma(f'{hz:.3f}')} Hz "
+        f"| vsync-jitter {'–' if jitter is None else comma(f'{jitter:.4f}')} | – "
         f"| verspätet {count('delayed')}, falsch getaktet {count('mistimed')} | – | {count('dropped')} |"
-    ).replace(".", ",")
+    )
 
 
 def run(command, env=None):
@@ -123,6 +154,10 @@ def main():
     parser.add_argument("--hardware", default=platform.node(), help="text of the hardware column")
     parser.add_argument("--player", default=str(ROOT / "target" / "release" / "takt-player"), help="takt-player binary")
     parser.add_argument("--mpv", action="store_true", help="measure mpv itself instead (opens a window)")
+    parser.add_argument("--mpv-sw", action="store_true", help="measure libmpv through takt-player --headless --mpv")
+    parser.add_argument(
+        "--mpv-early", type=int, default=0, help="mpv-sw: microseconds mpv hands a frame out before its time"
+    )
     parser.add_argument("--mpv-path", default="mpv", help="mpv binary (default: from PATH)")
     parser.add_argument("--no-header", action="store_true", help="rows only")
     args = parser.parse_args()
@@ -154,8 +189,8 @@ def main():
                         "--hwdec=no",
                         "--fullscreen",
                         f"--length={args.seconds}",
-                        # The pattern with a silent sound track: display-resample steers the audio speed.
-                        f"av://lavfi:testsrc2=size=1920x1080:rate={fps}[out0];anullsrc=r=48000:cl=stereo[out1]",
+                        # With a sound track: display-resample steers the audio speed.
+                        pattern(fps),
                     ]
                 )
                 row = result and mpv_row(result, date, args.hardware)
@@ -170,9 +205,10 @@ def main():
             env["TAKT_AUDIO_DEVICE"] = args.device
         for hz in args.hz:
             for fps in args.fps:
-                result, why = run(
-                    [args.player, "--headless", "--fps", fps, "--hz", hz, "--seconds", str(args.seconds)], env
-                )
+                command = [args.player, "--headless", "--fps", fps, "--hz", hz, "--seconds", str(args.seconds)]
+                if args.mpv_sw:
+                    command += ["--mpv", pattern(fps), "--mpv-early", str(args.mpv_early)]
+                result, why = run(command, env)
                 if result is None:
                     print(f"ab-measure: null {fps} at {hz} Hz: {why}", file=sys.stderr)
                     failed = True
