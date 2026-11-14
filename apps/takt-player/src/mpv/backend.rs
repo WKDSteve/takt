@@ -274,6 +274,12 @@ pub struct MpvBackend {
     /// The frame rendered since the last call of
     /// [`VideoBackend::next_frame`], until that hands it out.
     ready: Option<PooledFrame>,
+    /// What mpv reported in the round that is being taken ([`Self::pump`]);
+    /// kept so that a round allocates nothing.
+    events: Vec<Event>,
+    /// Frames mpv was told to count as shown without being rendered.
+    #[cfg(test)]
+    discarded: u64,
     /// The video changed: look at its size again before the next frame.
     refit: bool,
     /// The jump that is on its way.
@@ -529,6 +535,9 @@ impl MpvBackend {
             size: None,
             pool: None,
             ready: None,
+            events: Vec::new(),
+            #[cfg(test)]
+            discarded: 0,
             refit: false,
             jump: Jump::Done,
             loading: None,
@@ -902,8 +911,8 @@ impl MpvBackend {
     /// is still opening (or nothing was asked), then once the description of
     /// the file or why it does not play. Never waits.
     pub fn poll_open(&mut self) -> Option<takt_core::Result<MediaInfo>> {
-        self.settle();
-        self.pump();
+        // A frame that finds no place here is told by `next_frame`.
+        let _ = self.pump();
         let limit = self.open_timeout;
         if self
             .loading
@@ -1037,6 +1046,10 @@ impl MpvBackend {
         else {
             if self.mpv.frame_ready() {
                 self.mpv.discard_frame().map_err(backend_error)?;
+                #[cfg(test)]
+                {
+                    self.discarded += 1;
+                }
             }
             return Ok(());
         };
@@ -1087,65 +1100,97 @@ impl MpvBackend {
     }
 
     /// [`MpvBackend::render_waiting`] before mpv is asked something, where
-    /// a frame that finds no place is not the caller's business.
+    /// a frame that finds no place is not the caller's business. Not while
+    /// a file is being opened: the frame that waits may be the first of
+    /// that file, which only [`MpvBackend::pump`] can tell.
     fn settle(&mut self) {
-        let _ = self.render_waiting();
+        if self.loading.is_none() {
+            let _ = self.render_waiting();
+        }
     }
 
-    /// Takes what mpv reported since the last pass. While a load is on its
-    /// way, the events of its entry decide how it ends; the events of the
-    /// file it replaces are not its own.
-    fn pump(&mut self) {
+    /// One round with mpv: takes what it reported since the last one and
+    /// renders the frame that waits ([`MpvBackend::render_waiting`], whose
+    /// result this returns).
+    ///
+    /// The frame comes first, so that nothing is asked while the core waits
+    /// for it, with one exception. When the news is that the file is
+    /// loaded, the frame that waits may be its first picture, and there is
+    /// no place for it before the load is taken (the size of the picture is
+    /// asked there): rendered first it would be counted as shown and lost,
+    /// and a file opened while paused shows no other. That round takes the
+    /// news first.
+    fn pump(&mut self) -> takt_core::Result<()> {
+        let mut events = std::mem::take(&mut self.events);
+        events.clear();
         loop {
-            let event = self.mpv.poll();
-            if let Some(load) = self.loading.as_mut() {
-                let mine = |entry: i64| load.entry.is_none_or(|id| id == entry);
-                match event {
-                    Event::None => break,
-                    Event::StartFile { entry } if mine(entry) => load.started = true,
-                    Event::FileLoaded if load.started => self.finish_open(),
-                    Event::EndFile { entry, .. } if load.started && mine(entry) => {
-                        self.fail_open(Error::SourceUnavailable("mpv cannot open it".to_owned()));
-                    }
-                    Event::Shutdown => {
-                        self.fail_open(Error::Backend("mpv shut down".to_owned()));
-                    }
-                    Event::Hook { id } => self.on_hook(id),
-                    Event::VideoReconfig => self.refit = true,
-                    // A file that starts to play says so with the event of
-                    // a jump that ended; none was asked for yet.
-                    Event::StartFile { .. }
-                    | Event::FileLoaded
-                    | Event::EndFile { .. }
-                    | Event::Seek
-                    | Event::PlaybackRestart
-                    | Event::Other => {}
-                }
-                continue;
-            }
-            match event {
+            match self.mpv.poll() {
                 Event::None => break,
-                Event::EndFile { .. } | Event::Shutdown => {
-                    self.eof = true;
-                    self.loaded = false;
+                event => events.push(event),
+            }
+        }
+        let opens = self.loading.is_some() && events.contains(&Event::FileLoaded);
+        let mut rendered = if opens { Ok(()) } else { self.render_waiting() };
+        for &event in &events {
+            self.on_event(event);
+        }
+        if opens {
+            rendered = self.render_waiting();
+        }
+        self.events = events;
+        rendered
+    }
+
+    /// Takes one event. While a load is on its way, the events of its entry
+    /// decide how it ends; the events of the file it replaces are not its
+    /// own.
+    fn on_event(&mut self, event: Event) {
+        if let Some(load) = self.loading.as_mut() {
+            let mine = |entry: i64| load.entry.is_none_or(|id| id == entry);
+            match event {
+                Event::StartFile { entry } if mine(entry) => load.started = true,
+                Event::FileLoaded if load.started => self.finish_open(),
+                Event::EndFile { entry, .. } if load.started && mine(entry) => {
+                    self.fail_open(Error::SourceUnavailable("mpv cannot open it".to_owned()));
+                }
+                Event::Shutdown => {
+                    self.fail_open(Error::Backend("mpv shut down".to_owned()));
+                }
+                Event::Hook { id } => self.on_hook(id),
+                Event::VideoReconfig => self.refit = true,
+                // A file that starts to play says so with the event of a
+                // jump that ended; none was asked for yet.
+                Event::None
+                | Event::StartFile { .. }
+                | Event::FileLoaded
+                | Event::EndFile { .. }
+                | Event::Seek
+                | Event::PlaybackRestart
+                | Event::Other => {}
+            }
+            return;
+        }
+        match event {
+            Event::EndFile { .. } | Event::Shutdown => {
+                self.eof = true;
+                self.loaded = false;
+                self.jump = Jump::Done;
+            }
+            Event::VideoReconfig => self.refit = true,
+            Event::Hook { id } => self.on_hook(id),
+            Event::Seek => {
+                if self.jump == Jump::Asked {
+                    self.jump = Jump::Begun;
+                }
+            }
+            // The end of a jump that began after the last one was asked
+            // for; the end of an earlier one says nothing about it.
+            Event::PlaybackRestart => {
+                if self.jump == Jump::Begun {
                     self.jump = Jump::Done;
                 }
-                Event::VideoReconfig => self.refit = true,
-                Event::Hook { id } => self.on_hook(id),
-                Event::Seek => {
-                    if self.jump == Jump::Asked {
-                        self.jump = Jump::Begun;
-                    }
-                }
-                // The end of a jump that began after the last one was asked
-                // for; the end of an earlier one says nothing about it.
-                Event::PlaybackRestart => {
-                    if self.jump == Jump::Begun {
-                        self.jump = Jump::Done;
-                    }
-                }
-                Event::StartFile { .. } | Event::FileLoaded | Event::Other => {}
             }
+            Event::None | Event::StartFile { .. } | Event::FileLoaded | Event::Other => {}
         }
     }
 
@@ -1225,8 +1270,7 @@ impl VideoBackend for MpvBackend {
     /// is read from [`MpvBackend::position_millis`] once mpv has arrived.
     fn next_frame(&mut self, _clock: &dyn Clock) -> takt_core::Result<Option<PooledFrame>> {
         // The frame that waits first: only then is mpv asked anything.
-        let rendered = self.render_waiting();
-        self.pump();
+        let rendered = self.pump();
         self.publish_position();
         self.passes += 1;
         if self.passes.is_multiple_of(COUNTER_PASSES) {
@@ -2066,6 +2110,45 @@ mod tests {
         });
         assert_eq!(frames, 3);
         drop(slow);
+    }
+
+    /// A file opened while paused shows one picture, its first, and that
+    /// picture may wait at mpv together with the news that the file is
+    /// loaded. It must not be taken for a picture of the file before and
+    /// thrown away: nothing would follow it.
+    #[test]
+    fn the_first_picture_of_a_file_opened_while_paused_is_shown() {
+        for round in 0..5 {
+            let mut backend = backend(Sources::Files);
+            backend.set_paused(true).unwrap();
+            backend.begin_open(&long_gop()).unwrap();
+            // Long enough for mpv to load the file and decode its picture
+            // before it is asked: both wait for the same pass.
+            std::thread::sleep(Duration::from_millis(300));
+            let clock = backend.clock();
+            let (mut opened, mut picture) = (false, None);
+            let started = Instant::now();
+            // A pass as the window makes it: the load, then the frame.
+            while picture.is_none() && started.elapsed() < Duration::from_secs(2) {
+                if let Some(ended) = backend.poll_open() {
+                    ended.unwrap();
+                    opened = true;
+                }
+                picture = backend.next_frame(clock.as_ref()).unwrap();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+            assert!(opened, "round {round}");
+            assert_eq!(
+                backend.discarded, 0,
+                "round {round}: a picture of the new file was counted as shown"
+            );
+            let picture = picture.unwrap_or_else(|| panic!("round {round}: no picture"));
+            // Frame 0 of the file: its grey is 16, its time 0.
+            let rows = picture.get().plane(0).unwrap();
+            let at = 32 * picture.get().stride(0).unwrap() + 32 * 4;
+            assert!(rows[at].abs_diff(16) <= 3, "round {round}: {}", rows[at]);
+            assert_eq!(picture.get().meta().pts.ticks(), 0, "round {round}");
+        }
     }
 
     /// Giving a backend up while mpv opens a source that never answers
