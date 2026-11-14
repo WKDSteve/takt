@@ -94,10 +94,26 @@ enum Kind {
     File(Box<File>),
 }
 
+/// A file mpv has not opened yet.
+#[cfg(takt_libmpv)]
+enum Pending {
+    /// By a backend of its own, while the test picture plays on its clock:
+    /// the clocks are swapped when the file is open, not before.
+    Fresh(Box<MpvBackend>),
+    /// By the backend of the file that played; its clock stays.
+    Same,
+}
+
 /// What plays now, with its clock.
 pub struct Session {
     time: Arc<SystemMonotonic>,
     kind: Kind,
+    #[cfg(takt_libmpv)]
+    pending: Option<Pending>,
+    /// How the last open ended, where it ends at once (a build without
+    /// libmpv), until [`Session::poll_open`] takes it.
+    #[cfg(not(takt_libmpv))]
+    finished: Option<Result<(), String>>,
     /// No output device, neither of the player nor of mpv (tests).
     silent: bool,
     paused: bool,
@@ -124,6 +140,10 @@ impl Session {
         Self {
             time,
             kind,
+            #[cfg(takt_libmpv)]
+            pending: None,
+            #[cfg(not(takt_libmpv))]
+            finished: None,
             silent,
             paused: false,
             volume: 1.0,
@@ -150,25 +170,36 @@ impl Session {
         !matches!(self.kind, Kind::Test(_))
     }
 
-    /// Plays the file `path` from its start. In a build without libmpv the
-    /// test picture starts again in its place: the file is not read.
+    /// Begins to open the file `path` and returns at once: the window stays
+    /// in use while mpv opens it, and [`Session::poll_open`] says how it
+    /// ended. A file that is still being opened is given up for this one. In
+    /// a build without libmpv the test picture starts again in its place:
+    /// the file is not read.
+    ///
+    /// While the test picture plays it plays on, on its clock, until the
+    /// file is open. A file that plays is gone at once: mpv replaces it.
     ///
     /// # Errors
     ///
-    /// A text for the user when the file cannot be played; what played
-    /// before goes on then, unless it was a file that mpv has already let go.
+    /// A text for the user when the file is refused before mpv is asked
+    /// (it does not exist); what played or was being opened goes on then.
     pub fn open_file(&mut self, path: &Path) -> Result<(), String> {
         #[cfg(takt_libmpv)]
         {
             let name = path.to_string_lossy();
-            let fresh = match &mut self.kind {
-                Kind::File(file) => {
-                    let info = file.source.open(&name).map_err(|e| e.to_string())?;
-                    file.duration_millis = duration_millis(&info);
-                    file.size = info.video.map(|v| (v.width, v.height));
-                    None
+            match (&mut self.kind, &mut self.pending) {
+                (Kind::File(file), _) => {
+                    file.source.begin_open(&name).map_err(|e| e.to_string())?;
+                    file.duration_millis = 0;
+                    file.size = None;
+                    self.pending = Some(Pending::Same);
                 }
-                Kind::Test(_) => {
+                // The backend that is opening already takes the new file: it
+                // is not dropped while mpv may still be busy with the old one.
+                (Kind::Test(_), Some(Pending::Fresh(source))) => {
+                    source.begin_open(&name).map_err(|e| e.to_string())?;
+                }
+                (Kind::Test(_), _) => {
                     let config = Config {
                         sources: Sources::Files,
                         sound: if self.silent {
@@ -180,21 +211,10 @@ impl Session {
                     };
                     let time = Arc::clone(&self.time) as Arc<dyn takt_clock::MonotonicSource>;
                     let mut source = MpvBackend::new(config, time).map_err(|e| e.to_string())?;
-                    let info = source.open(&name).map_err(|e| e.to_string())?;
-                    Some(File {
-                        clock: source.clock(),
-                        duration_millis: duration_millis(&info),
-                        size: info.video.map(|v| (v.width, v.height)),
-                        source,
-                    })
+                    source.begin_open(&name).map_err(|e| e.to_string())?;
+                    self.pending = Some(Pending::Fresh(Box::new(source)));
                 }
-            };
-            if let Some(file) = fresh {
-                // The swap of the clock: the test picture, its clock and its
-                // device are dropped here, and the clock of mpv is the one.
-                self.kind = Kind::File(Box::new(file));
             }
-            self.apply();
             Ok(())
         }
         #[cfg(not(takt_libmpv))]
@@ -204,13 +224,87 @@ impl Session {
                 .open(&path.to_string_lossy())
                 .map_err(|e| e.to_string())?;
             self.seek_to(0);
+            self.finished = Some(Ok(()));
             Ok(())
+        }
+    }
+
+    /// How the open of [`Session::open_file`] ended; asked once a pass.
+    /// `None` while it is on its way (or nothing was asked), then once
+    /// `Ok` when the file plays, or the text of why it does not. Never
+    /// waits.
+    ///
+    /// On `Ok` after the test picture the clock has been swapped: the test
+    /// picture, its clock and its device are dropped, and the clock of mpv
+    /// is the one. On an error the test picture plays on; a file that
+    /// played before is gone (mpv let it go when it was asked).
+    pub fn poll_open(&mut self) -> Option<Result<(), String>> {
+        #[cfg(takt_libmpv)]
+        {
+            let ended = match (self.pending.take()?, &mut self.kind) {
+                (Pending::Same, Kind::File(file)) => match file.source.poll_open() {
+                    None => {
+                        self.pending = Some(Pending::Same);
+                        return None;
+                    }
+                    Some(Ok(info)) => {
+                        file.duration_millis = duration_millis(&info);
+                        file.size = info.video.map(|v| (v.width, v.height));
+                        Ok(())
+                    }
+                    Some(Err(e)) => Err(e.to_string()),
+                },
+                (Pending::Fresh(mut source), _) => match source.poll_open() {
+                    None => {
+                        self.pending = Some(Pending::Fresh(source));
+                        return None;
+                    }
+                    Some(Ok(info)) => {
+                        self.kind = Kind::File(Box::new(File {
+                            clock: source.clock(),
+                            duration_millis: duration_millis(&info),
+                            size: info.video.map(|v| (v.width, v.height)),
+                            source: *source,
+                        }));
+                        Ok(())
+                    }
+                    Some(Err(e)) => Err(e.to_string()),
+                },
+                // Nothing of a file is left to wait for.
+                (Pending::Same, Kind::Test(_)) => return None,
+            };
+            if ended.is_ok() {
+                self.apply();
+            }
+            Some(ended)
+        }
+        #[cfg(not(takt_libmpv))]
+        {
+            self.finished.take()
+        }
+    }
+
+    /// Whether a file is being opened.
+    #[must_use]
+    pub const fn opening(&self) -> bool {
+        #[cfg(takt_libmpv)]
+        {
+            self.pending.is_some()
+        }
+        #[cfg(not(takt_libmpv))]
+        {
+            self.finished.is_some()
         }
     }
 
     /// Back to the test picture (the playlist is empty). Nothing happens
     /// when it plays already.
     pub fn show_test_picture(&mut self) {
+        #[cfg(takt_libmpv)]
+        {
+            // A file that was on its way is given up.
+            self.pending = None;
+        }
         if self.is_file() {
             self.kind = Self::test_kind(&self.time, self.silent);
             self.apply();
@@ -483,6 +577,37 @@ mod tests {
         Session::silent(Arc::new(SystemMonotonic::new()))
     }
 
+    /// Passes of 4 ms, as the window makes them, until the open has ended.
+    #[cfg(takt_libmpv)]
+    fn opened(session: &mut Session) -> Result<(), String> {
+        let asked = std::time::Instant::now();
+        loop {
+            if let Some(ended) = session.poll_open() {
+                return ended;
+            }
+            assert!(
+                asked.elapsed() < std::time::Duration::from_secs(15),
+                "the open never ended"
+            );
+            let _ = session.next_frame();
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+    }
+
+    #[cfg(not(takt_libmpv))]
+    #[test]
+    fn without_libmpv_an_entry_is_the_test_picture_again_and_ends_at_once() {
+        let mut session = session();
+        assert!(session.poll_open().is_none(), "nothing was asked");
+        session.seek_to(90_000);
+        session.open_file(Path::new("film.mkv")).unwrap();
+        assert!(session.opening());
+        assert_eq!(session.poll_open(), Some(Ok(())));
+        assert!(!session.opening() && session.poll_open().is_none());
+        assert!(!session.is_file());
+        assert!(session.now_millis() < 1_000, "from the start");
+    }
+
     #[test]
     fn the_test_picture_plays_on_the_clock_of_the_player() {
         let mut session = session();
@@ -522,7 +647,15 @@ mod tests {
         assert!(!session.is_file());
         assert_eq!(std::ptr::from_ref(session.master()), first);
 
+        // Opening returns at once; until mpv has the file open, the test
+        // picture plays on, on its clock.
+        assert!(session.poll_open().is_none(), "nothing was asked");
         session.open_file(Path::new(clip)).unwrap();
+        assert!(session.opening());
+        assert!(!session.is_file());
+        assert_eq!(std::ptr::from_ref(session.master()), first);
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(!session.opening());
         assert!(session.is_file());
         assert_eq!(session.backend_name(), "mpv-sw");
         let second = std::ptr::from_ref(session.master());
@@ -549,11 +682,88 @@ mod tests {
 
         // The next file plays on the same backend and the same clock.
         session.open_file(Path::new(clip)).unwrap();
+        assert!(session.opening());
+        assert_eq!(opened(&mut session), Ok(()));
         assert_eq!(std::ptr::from_ref(session.master()), second);
+        assert_eq!(session.duration_millis(), 3_003);
 
         session.show_test_picture();
         assert!(!session.is_file());
         assert_eq!(session.backend_name(), "null");
         assert_ne!(std::ptr::from_ref(session.master()), second);
+    }
+
+    /// A file of bytes mpv cannot play, with the name of a film.
+    #[cfg(takt_libmpv)]
+    fn junk(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("takt-junk-{}-{tag}.mkv", std::process::id()));
+        std::fs::write(&path, b"this is not a film\n").unwrap();
+        path
+    }
+
+    #[cfg(takt_libmpv)]
+    #[test]
+    fn a_file_mpv_cannot_open_is_reported_once_and_the_test_picture_plays_on() {
+        let junk = junk("alone");
+        let mut session = session();
+        let first = std::ptr::from_ref(session.master());
+        // It exists, so the open begins; mpv finds out that it is no film.
+        session.open_file(&junk).unwrap();
+        assert!(session.opening());
+        let ended = opened(&mut session);
+        let _ = std::fs::remove_file(&junk);
+        assert_eq!(
+            ended,
+            Err("Quelle nicht verfuegbar: mpv cannot open it".to_owned())
+        );
+        assert!(!session.opening());
+        assert!(session.poll_open().is_none(), "reported once");
+        assert!(!session.is_file());
+        assert_eq!(std::ptr::from_ref(session.master()), first);
+        assert!(session.next_frame().is_ok());
+    }
+
+    /// The next entry while one is still being opened: the answer is the
+    /// one of the file asked for last, not the end of the one given up.
+    #[cfg(takt_libmpv)]
+    #[test]
+    fn a_file_asked_for_while_another_opens_replaces_it() {
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pattern-3s.mkv");
+        let junk = junk("replaced");
+
+        // From the test picture: the backend that is opening takes the next.
+        let mut session = session();
+        session.open_file(&junk).unwrap();
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(session.is_file());
+        assert_eq!(session.duration_millis(), 3_003);
+        assert!(session.poll_open().is_none(), "one answer for two asks");
+
+        // And while a file plays, both ways round.
+        session.open_file(&junk).unwrap();
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.duration_millis(), 3_003);
+        session.open_file(Path::new(clip)).unwrap();
+        session.open_file(&junk).unwrap();
+        assert!(opened(&mut session).is_err());
+        assert!(session.poll_open().is_none());
+
+        // What is no file is refused at once; the open on its way goes on.
+        session.open_file(Path::new(clip)).unwrap();
+        assert!(
+            session
+                .open_file(Path::new("takt-no-such-file.mkv"))
+                .is_err()
+        );
+        assert!(session.opening());
+        assert_eq!(opened(&mut session), Ok(()));
+
+        // Back to the test picture gives an open up.
+        session.open_file(Path::new(clip)).unwrap();
+        session.show_test_picture();
+        assert!(!session.opening() && !session.is_file());
+        let _ = std::fs::remove_file(&junk);
     }
 }

@@ -291,9 +291,47 @@ impl PlayerState {
     }
 }
 
+/// A fault that would repeat every pass (a source that fails at every
+/// frame), said once: again only when it changes or after it went away.
+#[derive(Debug, Default)]
+pub struct Reported(Option<String>);
+
+impl Reported {
+    /// Whether `fault` is news: true the first time it is seen, false as
+    /// long as the same one repeats.
+    pub fn is_news(&mut self, fault: &str) -> bool {
+        if self.0.as_deref() == Some(fault) {
+            return false;
+        }
+        self.0 = Some(fault.to_owned());
+        true
+    }
+
+    /// The fault went away: the same one is news again.
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fault_that_repeats_is_said_once() {
+        let mut reported = Reported::default();
+        assert!(reported.is_news("pool exhausted"));
+        // 60 passes a second with the same fault: nothing more.
+        assert!((0..600).all(|_| !reported.is_news("pool exhausted")));
+        assert!(reported.is_news("mpv shut down"), "another one is news");
+        assert!(!reported.is_news("mpv shut down"));
+        assert!(
+            reported.is_news("pool exhausted"),
+            "and so is a change back"
+        );
+        reported.clear();
+        assert!(reported.is_news("pool exhausted"), "after it went away");
+    }
 
     #[test]
     fn space_toggles_and_escape_quits() {

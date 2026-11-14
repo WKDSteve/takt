@@ -168,6 +168,17 @@ pub struct Config {
     pub early: Early,
 }
 
+/// A load mpv has not finished.
+struct Loading {
+    asked: Instant,
+    /// The number mpv gave the entry: only events with it belong to this
+    /// load. A load that replaced another one sees the end of that one
+    /// first, and must not take it for its own. `None` when mpv names no
+    /// number; then the first start counts.
+    entry: Option<i64>,
+    started: bool,
+}
+
 /// A track to choose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Track {
@@ -196,6 +207,10 @@ pub struct MpvBackend {
     pool: Option<FramePool>,
     /// The video changed: look at its size again before the next frame.
     refit: bool,
+    /// The file mpv was asked for and has not opened yet.
+    loading: Option<Loading>,
+    /// How the last load ended, until [`MpvBackend::poll_open`] takes it.
+    opened: Option<takt_core::Result<MediaInfo>>,
     loaded: bool,
     eof: bool,
     /// The file has a sound track that plays (the clock follows it).
@@ -395,6 +410,8 @@ impl MpvBackend {
             size: None,
             pool: None,
             refit: false,
+            loading: None,
+            opened: None,
             loaded: false,
             eof: false,
             has_sound: false,
@@ -569,33 +586,90 @@ impl MpvBackend {
         }
     }
 
-    /// Waits until mpv has opened the file it was just given.
-    fn wait_loaded(&mut self) -> takt_core::Result<()> {
-        let asked = Instant::now();
-        // What comes before the start of the new file belongs to the old one
-        // (its end, when a file replaces a playing one).
-        let mut started = false;
-        loop {
-            match self.mpv.poll() {
-                Event::StartFile => started = true,
-                Event::FileLoaded if started => return Ok(()),
-                Event::EndFile { .. } if started => {
-                    return Err(Error::SourceUnavailable("mpv cannot open it".to_owned()));
-                }
-                Event::Shutdown => return Err(Error::Backend("mpv shut down".to_owned())),
-                Event::Hook { id } => self.on_hook(id),
-                Event::None => {
-                    if asked.elapsed() > OPEN_TIMEOUT {
-                        return Err(Error::SourceUnavailable(format!(
-                            "not open after {OPEN_TIMEOUT:?}"
-                        )));
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                Event::FileLoaded | Event::EndFile { .. } | Event::VideoReconfig | Event::Other => {
-                }
-            }
+    /// Asks mpv for `source` and returns at once; [`MpvBackend::poll_open`]
+    /// says how it ended. What played before is gone from here on. A load
+    /// that is still on its way is replaced: mpv gives it up.
+    ///
+    /// # Errors
+    ///
+    /// When the source may not be opened ([`Sources`]) or mpv refuses the
+    /// command; nothing is loading then.
+    pub fn begin_open(&mut self, source: &str) -> takt_core::Result<()> {
+        let source = self.checked(source)?;
+        self.loaded = false;
+        self.eof = true;
+        self.stats = BackendStats::default();
+        self.loading = None;
+        self.opened = None;
+        self.mpv.load(&source).map_err(backend_error)?;
+        self.loading = Some(Loading {
+            asked: Instant::now(),
+            // `loadfile` replaces the playlist: its one entry is this load.
+            entry: self.mpv.int(c"playlist/0/id").filter(|&id| id > 0),
+            started: false,
+        });
+        Ok(())
+    }
+
+    /// How the load of [`MpvBackend::begin_open`] ended: `None` while mpv
+    /// is still opening (or nothing was asked), then once the description of
+    /// the file or why it does not play. Never waits.
+    pub fn poll_open(&mut self) -> Option<takt_core::Result<MediaInfo>> {
+        self.pump();
+        if self
+            .loading
+            .as_ref()
+            .is_some_and(|load| load.asked.elapsed() > OPEN_TIMEOUT)
+        {
+            self.fail_open(Error::SourceUnavailable(format!(
+                "not open after {OPEN_TIMEOUT:?}"
+            )));
         }
+        self.opened.take()
+    }
+
+    /// The load failed: mpv is told to stop, and the reason is kept.
+    fn fail_open(&mut self, error: Error) {
+        self.loading = None;
+        // What did not open must not go on behind the back of the player: a
+        // playlist file "ends" by handing its entries to mpv, which would
+        // play them without a picture here.
+        let _ = self.mpv.command("stop", &["stop"]);
+        self.opened = Some(Err(error));
+    }
+
+    /// mpv has opened the file: the description of what plays now.
+    fn finish_open(&mut self) {
+        self.loading = None;
+        self.loaded = true;
+        self.eof = false;
+        if let Err(error) = self.fit() {
+            self.loaded = false;
+            self.eof = true;
+            self.fail_open(error);
+            return;
+        }
+        self.publish_position();
+        let duration = self
+            .mpv
+            .double(c"duration")
+            .and_then(micros)
+            .filter(|&d| d > 0)
+            .map(|d| Timestamp::new(d, Rational::MICROS));
+        self.opened = Some(Ok(MediaInfo {
+            duration,
+            frame_rate: self
+                .mpv
+                .double(c"container-fps")
+                .and_then(micros)
+                .and_then(rate_of),
+            video: self.size.map(Self::meta),
+            sample_rate: self
+                .mpv
+                .int(c"audio-params/samplerate")
+                .and_then(|rate| u32::try_from(rate).ok()),
+            seekable: self.mpv.flag(c"seekable").unwrap_or(false),
+        }));
     }
 
     /// The size of the picture: the display size once a frame is decoded
@@ -657,10 +731,34 @@ impl MpvBackend {
         Ok(())
     }
 
-    /// Takes what mpv reported since the last pass.
+    /// Takes what mpv reported since the last pass. While a load is on its
+    /// way, the events of its entry decide how it ends; the events of the
+    /// file it replaces are not its own.
     fn pump(&mut self) {
         loop {
-            match self.mpv.poll() {
+            let event = self.mpv.poll();
+            if let Some(load) = self.loading.as_mut() {
+                let mine = |entry: i64| load.entry.is_none_or(|id| id == entry);
+                match event {
+                    Event::None => break,
+                    Event::StartFile { entry } if mine(entry) => load.started = true,
+                    Event::FileLoaded if load.started => self.finish_open(),
+                    Event::EndFile { entry, .. } if load.started && mine(entry) => {
+                        self.fail_open(Error::SourceUnavailable("mpv cannot open it".to_owned()));
+                    }
+                    Event::Shutdown => {
+                        self.fail_open(Error::Backend("mpv shut down".to_owned()));
+                    }
+                    Event::Hook { id } => self.on_hook(id),
+                    Event::VideoReconfig => self.refit = true,
+                    Event::StartFile { .. }
+                    | Event::FileLoaded
+                    | Event::EndFile { .. }
+                    | Event::Other => {}
+                }
+                continue;
+            }
+            match event {
                 Event::None => break,
                 Event::EndFile { .. } | Event::Shutdown => {
                     self.eof = true;
@@ -668,7 +766,7 @@ impl MpvBackend {
                 }
                 Event::VideoReconfig => self.refit = true,
                 Event::Hook { id } => self.on_hook(id),
-                Event::StartFile | Event::FileLoaded | Event::Other => {}
+                Event::StartFile { .. } | Event::FileLoaded | Event::Other => {}
             }
         }
     }
@@ -705,45 +803,17 @@ impl VideoBackend for MpvBackend {
     }
 
     /// Blocks until mpv has opened the source (a local file: milliseconds),
-    /// at most ten seconds.
+    /// at most ten seconds: [`MpvBackend::begin_open`] and then
+    /// [`MpvBackend::poll_open`] until it answers. The window does not call
+    /// this; it polls once a pass.
     fn open(&mut self, source: &str) -> takt_core::Result<MediaInfo> {
-        let source = self.checked(source)?;
-        self.loaded = false;
-        self.eof = true;
-        self.stats = BackendStats::default();
-        self.mpv.load(&source).map_err(backend_error)?;
-        if let Err(error) = self.wait_loaded() {
-            // What did not open must not go on behind the back of the
-            // player: a playlist file "ends" by handing its entries to mpv,
-            // which would play them without a picture here.
-            let _ = self.mpv.command("stop", &["stop"]);
-            return Err(error);
+        self.begin_open(source)?;
+        loop {
+            if let Some(ended) = self.poll_open() {
+                return ended;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        self.loaded = true;
-        self.eof = false;
-        self.fit()?;
-        self.publish_position();
-
-        let duration = self
-            .mpv
-            .double(c"duration")
-            .and_then(micros)
-            .filter(|&d| d > 0)
-            .map(|d| Timestamp::new(d, Rational::MICROS));
-        Ok(MediaInfo {
-            duration,
-            frame_rate: self
-                .mpv
-                .double(c"container-fps")
-                .and_then(micros)
-                .and_then(rate_of),
-            video: self.size.map(Self::meta),
-            sample_rate: self
-                .mpv
-                .int(c"audio-params/samplerate")
-                .and_then(|rate| u32::try_from(rate).ok()),
-            seekable: self.mpv.flag(c"seekable").unwrap_or(false),
-        })
     }
 
     fn seek(&mut self, to: Timestamp, mode: SeekMode) -> takt_core::Result<()> {
@@ -1295,6 +1365,59 @@ mod tests {
         );
         // The backend is usable afterwards.
         assert!(backend.open(PATTERN).is_ok());
+    }
+
+    #[test]
+    fn opening_never_waits_and_a_second_ask_replaces_the_first() {
+        // A port that takes a connection and never answers: mpv waits for
+        // it as it would for a file on a drive that sleeps.
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = slow.local_addr().unwrap().port();
+        let mut backend = backend(Sources::Any);
+        let clock = backend.clock();
+
+        let asked = Instant::now();
+        backend
+            .begin_open(&format!("http://127.0.0.1:{port}/slow.mkv"))
+            .unwrap();
+        assert!(
+            asked.elapsed() < Duration::from_millis(500),
+            "asking returned at once: {:?}",
+            asked.elapsed()
+        );
+        // Passes as the window makes them: no answer yet, no frame, and no
+        // pass is held up.
+        let mut longest = Duration::ZERO;
+        while asked.elapsed() < Duration::from_millis(400) {
+            let pass = Instant::now();
+            assert!(backend.poll_open().is_none(), "still opening");
+            assert!(backend.next_frame(clock.as_ref()).unwrap().is_none());
+            longest = longest.max(pass.elapsed());
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(longest < Duration::from_millis(100), "{longest:?}");
+
+        // The next entry is asked for while the first still opens: its
+        // answer is the one that comes, and it comes long before the first
+        // would have given up.
+        let asked = Instant::now();
+        backend.begin_open(&clip()).unwrap();
+        let info = loop {
+            if let Some(ended) = backend.poll_open() {
+                break ended.unwrap();
+            }
+            assert!(asked.elapsed() < Duration::from_secs(5), "never opened");
+            std::thread::sleep(Duration::from_millis(4));
+        };
+        assert_eq!(info.video.map(|v| (v.width, v.height)), Some((160, 90)));
+        assert!(backend.poll_open().is_none(), "one answer");
+        let mut frames = 0;
+        passes(&mut backend, Duration::from_secs(2), |_, _| {
+            frames += 1;
+            frames < 3
+        });
+        assert_eq!(frames, 3, "and it plays");
+        drop(slow);
     }
 
     #[test]

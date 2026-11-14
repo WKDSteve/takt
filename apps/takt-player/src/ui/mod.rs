@@ -45,7 +45,7 @@ use takt_backend::{Presentation, Scheduler};
 use takt_clock::SystemMonotonic;
 use takt_core::{Rational, Timestamp};
 
-use crate::app::{BINDINGS, Command, Key, MOUSE, PlayerState, command_for, seek_target};
+use crate::app::{BINDINGS, Command, Key, MOUSE, PlayerState, Reported, command_for, seek_target};
 use crate::diagnostics::{self, AudioCounters, ProcessMeter, Snapshot};
 use crate::playlist::{self, Playlist};
 use crate::refresh::RefreshMeter;
@@ -72,6 +72,10 @@ struct PlayerApp {
     /// The track chosen last, or why a file does not play: one line in the
     /// bar. Foreign text (names of tracks and files), shown as it is.
     notice: Option<String>,
+    /// The entry that is being opened, as the bar names it.
+    opening: Option<String>,
+    /// The fault of the source said last: it repeats every pass.
+    source_fault: Reported,
     shown: Option<Shown>,
     refresh: RefreshMeter,
     started: Instant,
@@ -123,6 +127,8 @@ impl PlayerApp {
             scheduler: Scheduler::new(),
             close_at: seconds.map(|s| Instant::now() + Duration::from_secs(s)),
             notice: None,
+            opening: None,
+            source_fault: Reported::default(),
             shown: None,
             refresh: RefreshMeter::default(),
             started: Instant::now(),
@@ -149,15 +155,26 @@ impl PlayerApp {
         let elapsed = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.refresh.pass(elapsed);
         self.session.set_display_period(self.refresh.period_nanos());
+        self.take_opened();
         let frame = match self.session.next_frame() {
             Ok(frame) => frame,
             Err(e) => {
-                eprintln!("takt-player: source: {e}");
+                // Once in the terminal and once in the bar, not every pass.
+                let fault = format!("source: {e}");
+                if self.source_fault.is_news(&fault) {
+                    eprintln!("takt-player: {fault}");
+                    self.notice = Some(fault);
+                }
                 return;
             }
         };
+        if frame.is_some() {
+            self.source_fault.clear();
+        }
         if self.state.playing() {
-            let eof = self.session.is_eof();
+            // While a file is being opened nothing has ended: the source
+            // that is on its way has no frames yet.
+            let eof = self.session.is_eof() && !self.session.opening();
             if eof && frame.is_none() {
                 // The end of an entry: on to the next one, if there is one.
                 if let Some(next) = self.playlist.next().map(Path::to_path_buf) {
@@ -205,26 +222,76 @@ impl PlayerApp {
         }
     }
 
-    /// Opens `path` and plays it from the start.
+    /// Begins to open `path`; it plays from its start once it is open
+    /// ([`PlayerApp::take_opened`]). The window is not held up meanwhile,
+    /// and another entry asked for replaces this one.
+    ///
+    /// An entry that is refused at once (it does not exist) is named in the
+    /// bar and the playlist goes on to the next one, as it does at the end
+    /// of an entry.
     fn play(&mut self, path: &Path) {
-        if let Err(e) = self.session.open_file(path) {
-            let line = format!("cannot play {}: {e}", Playlist::label(path));
-            eprintln!("takt-player: {line}");
-            self.notice = Some(line);
-            return;
-        }
         self.notice = None;
-        self.scheduler.reset();
-        self.seek_probe = None;
-        self.last_seek = None;
-        self.shown = None;
+        self.play_or_skip(path.to_path_buf());
+    }
+
+    /// As [`PlayerApp::play`], keeping what the bar says: the reason the
+    /// entry before did not play.
+    fn play_or_skip(&mut self, mut path: PathBuf) {
+        loop {
+            let label = Playlist::label(&path);
+            match self.session.open_file(&path) {
+                Ok(()) => {
+                    self.opening = Some(label);
+                    return;
+                }
+                Err(e) => self.cannot_play(&label, &e),
+            }
+            match self.playlist.next() {
+                Some(next) => path = next.to_path_buf(),
+                None => return,
+            }
+        }
+    }
+
+    /// Asks once a pass how the open ended: the file plays, or the bar says
+    /// why it does not.
+    fn take_opened(&mut self) {
+        let Some(ended) = self.session.poll_open() else {
+            return;
+        };
+        let label = self.opening.take().unwrap_or_default();
+        match ended {
+            Ok(()) => {
+                self.scheduler.reset();
+                self.source_fault.clear();
+                self.seek_probe = None;
+                self.last_seek = None;
+                self.shown = None;
+            }
+            Err(e) => {
+                self.cannot_play(&label, &e);
+                // On to the next entry, as at the end of one; the bar keeps
+                // the reason until an entry is chosen again.
+                if let Some(next) = self.playlist.next().map(Path::to_path_buf) {
+                    self.play_or_skip(next);
+                }
+            }
+        }
+    }
+
+    fn cannot_play(&mut self, label: &str, why: &str) {
+        let line = format!("cannot play {label}: {why}");
+        eprintln!("takt-player: {line}");
+        self.notice = Some(line);
     }
 
     /// The playlist is empty: the test picture again.
     fn stop(&mut self) {
         self.session.show_test_picture();
         self.scheduler.reset();
+        self.source_fault.clear();
         self.notice = None;
+        self.opening = None;
         self.shown = None;
     }
 
@@ -261,6 +328,10 @@ impl PlayerApp {
         .map(Path::to_path_buf);
         if let Some(path) = start {
             self.play(&path);
+        } else if !append && let Some(problem) = self.drop_problems.first() {
+            // Nothing of the drop can play (a list with addresses only): the
+            // bar says so, the playlist window has every line.
+            self.notice = Some(problem.clone());
         }
     }
 
@@ -656,7 +727,10 @@ impl eframe::App for PlayerApp {
                     self.state.set_volume(volume);
                     self.session.set_volume(self.state.effective_volume());
                 }
-                if let Some(notice) = &self.notice {
+                if let Some(entry) = &self.opening {
+                    ui.separator();
+                    ui.label(format!("opening {entry}"));
+                } else if let Some(notice) = &self.notice {
                     ui.separator();
                     ui.label(notice);
                 }

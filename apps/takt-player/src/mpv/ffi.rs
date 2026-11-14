@@ -45,12 +45,20 @@ struct RawEvent {
 }
 
 /// The head of `mpv_event_end_file`, the data of [`EVENT_END_FILE`]. Only
-/// the first field is read, so fields a newer libmpv adds behind do not
-/// matter.
+/// these fields are read, so fields a newer libmpv adds behind do not
+/// matter. `playlist_entry_id` is there since client API 1.108 (mpv 0.33);
+/// the player asks for 2.x.
 #[repr(C)]
 struct RawEndFile {
     reason: c_int,
     error: c_int,
+    playlist_entry_id: i64,
+}
+
+/// `mpv_event_start_file`, the data of [`EVENT_START_FILE`].
+#[repr(C)]
+struct RawStartFile {
+    playlist_entry_id: i64,
 }
 
 /// `mpv_event_hook`, the data of [`EVENT_HOOK`].
@@ -178,7 +186,11 @@ pub enum Event {
     None,
     /// mpv begins to open a file: what comes after belongs to that file,
     /// what came before to the one it replaces.
-    StartFile,
+    StartFile {
+        /// The number mpv gave the entry (`playlist/N/id`), 0 when the
+        /// event says none.
+        entry: i64,
+    },
     /// The file is open and playback starts.
     FileLoaded,
     /// The video changed (its size, its aspect): the picture may need
@@ -189,6 +201,8 @@ pub enum Event {
     EndFile {
         /// Ended by an error, not by its end or a stop.
         failed: bool,
+        /// The number of the entry that ended, as in `StartFile`.
+        entry: i64,
     },
     /// mpv is about to open a source and waits ([`Mpv::hook_on_load`]):
     /// it goes on with [`Mpv::hook_continue`] and this number.
@@ -395,12 +409,24 @@ impl Mpv {
         // read here and not kept (`&mut self` rules out a second call
         // meanwhile). The data of an END_FILE event is an
         // mpv_event_end_file, whose head `RawEndFile` mirrors; the data of
-        // a HOOK event is an mpv_event_hook, which `RawHook` mirrors.
+        // a START_FILE event is an mpv_event_start_file, which
+        // `RawStartFile` mirrors; the data of a HOOK event is an
+        // mpv_event_hook, which `RawHook` mirrors. Each pointer is checked
+        // for null before it is read.
         unsafe {
             let event = &*mpv_wait_event(self.core.0.as_ptr(), 0.0);
             match event.event_id {
                 EVENT_NONE => Event::None,
-                EVENT_START_FILE => Event::StartFile,
+                EVENT_START_FILE => {
+                    let start = event.data.cast::<RawStartFile>();
+                    Event::StartFile {
+                        entry: if start.is_null() {
+                            0
+                        } else {
+                            (*start).playlist_entry_id
+                        },
+                    }
+                }
                 EVENT_FILE_LOADED => Event::FileLoaded,
                 EVENT_VIDEO_RECONFIG => Event::VideoReconfig,
                 EVENT_HOOK => {
@@ -414,8 +440,16 @@ impl Mpv {
                 EVENT_SHUTDOWN => Event::Shutdown,
                 EVENT_END_FILE => {
                     let end = event.data.cast::<RawEndFile>();
-                    Event::EndFile {
-                        failed: !end.is_null() && (*end).reason == END_FILE_REASON_ERROR,
+                    if end.is_null() {
+                        Event::EndFile {
+                            failed: false,
+                            entry: 0,
+                        }
+                    } else {
+                        Event::EndFile {
+                            failed: (*end).reason == END_FILE_REASON_ERROR,
+                            entry: (*end).playlist_entry_id,
+                        }
                     }
                 }
                 _ => Event::Other,
