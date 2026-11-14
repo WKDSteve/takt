@@ -38,6 +38,15 @@
 //! (no ordered chapters, no references to other files, no scripts, no
 //! configuration, no `ytdl`).
 //!
+//! A subtitle file next to the film is opened by mpv on its own, and the
+//! hook does not see it. Its formatting tags are allowed (libass reads
+//! them); what it must not do is lead mpv to another file or into the
+//! network. `access-references=no` is what holds that: with the default of
+//! mpv a `.srt` whose content is an EDL shows the text of the file it names
+//! and connects to the address it names (the test
+//! `a_subtitle_file_leads_mpv_to_no_other_file_and_not_into_the_network`
+//! has both controls).
+//!
 //! Limiting the protocols of FFmpeg (`stream-lavf-o=protocol_whitelist`)
 //! does not do this: with it, mpv still connected (the test
 //! `a_core_for_files_fetches_nothing_from_the_network` has the control).
@@ -1034,6 +1043,15 @@ mod tests {
     /// Opens `http://127.0.0.1:<port>/film.mkv` on `backend` and says
     /// whether a connection reached the port.
     fn reaches_the_network(backend: &mut MpvBackend) -> bool {
+        connects_during(|port| {
+            let _ = backend.open(&format!("http://127.0.0.1:{port}/film.mkv"));
+            std::thread::sleep(Duration::from_millis(300));
+        })
+    }
+
+    /// Listens on a local port while `act` runs (it gets the port) and says
+    /// whether a connection reached it.
+    fn connects_during(act: impl FnOnce(u16)) -> bool {
         use std::sync::atomic::{AtomicBool, Ordering};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1054,8 +1072,7 @@ mod tests {
                 }
             })
         };
-        let _ = backend.open(&format!("http://127.0.0.1:{port}/film.mkv"));
-        std::thread::sleep(Duration::from_millis(300));
+        act(port);
         done.store(true, Ordering::Relaxed);
         server.join().unwrap();
         reached.load(Ordering::Relaxed)
@@ -1074,6 +1091,164 @@ mod tests {
         // And it still plays a file.
         files.sources = Sources::Files;
         assert!(files.open(&clip()).is_ok());
+    }
+
+    /// A folder of its own with the clip as `film.mkv`, removed on drop.
+    struct Folder(std::path::PathBuf);
+
+    impl Folder {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("takt-test-{}-{tag}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::copy(clip(), dir.join("film.mkv")).unwrap();
+            Self(dir)
+        }
+
+        fn write(&self, name: &str, content: &str) -> String {
+            let path = self.0.join(name);
+            std::fs::write(&path, content).unwrap();
+            path.to_string_lossy().into_owned()
+        }
+
+        fn film(&self) -> String {
+            self.0.join("film.mkv").to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Plays the film of `folder` for a second with every subtitle track
+    /// that came from a file of its own switched on in turn, and returns the
+    /// number of such tracks and every text mpv showed. `references` allows
+    /// what the backend forbids (`access-references`), for the control.
+    fn external_subtitles(folder: &Folder, references: bool) -> (usize, Vec<String>) {
+        let mut backend = backend(Sources::Files);
+        if references {
+            // What the backend switches off, on again: the control.
+            backend.mpv.set(c"access-references", "yes").unwrap();
+        }
+        backend.open(&folder.film()).unwrap();
+        let name = |text: String| CString::new(text).unwrap();
+        let tracks = backend.mpv.int(c"track-list/count").unwrap_or(0);
+        let external: Vec<i64> = (0..tracks)
+            .filter(|i| {
+                backend
+                    .mpv
+                    .string(&name(format!("track-list/{i}/type")))
+                    .as_deref()
+                    == Some("sub")
+                    && backend.mpv.flag(&name(format!("track-list/{i}/external"))) == Some(true)
+            })
+            .collect();
+        let external: Vec<i64> = external
+            .into_iter()
+            .filter_map(|i| backend.mpv.int(&name(format!("track-list/{i}/id"))))
+            .collect();
+        let mut texts = Vec::new();
+        for id in &external {
+            backend.mpv.set(c"sid", &id.to_string()).unwrap();
+            let _ = backend.seek(Timestamp::new(500_000, Rational::MICROS), SeekMode::Exact);
+            let clock = backend.clock();
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_millis(1_000) {
+                let _ = backend.next_frame(clock.as_ref());
+                if let Some(text) = backend.mpv.string(c"sub-text")
+                    && !text.is_empty()
+                    && !texts.contains(&text)
+                {
+                    texts.push(text);
+                }
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        }
+        (external.len(), texts)
+    }
+
+    /// One cue over the whole clip.
+    fn srt(text: &str) -> String {
+        format!("1\n00:00:00,000 --> 00:00:03,000\n{text}\n")
+    }
+
+    /// An EDL of mpv with one entry (`%length%name` takes any character).
+    fn edl(entry: &str) -> String {
+        format!("# mpv EDL v0\n%{}%{entry}\n", entry.len())
+    }
+
+    /// What a subtitle file that is not one could hold, with `address` as
+    /// the place it points at.
+    fn hostile_subtitles(kind: &str, address: &str) -> String {
+        match kind {
+            "edl" => edl(address),
+            "m3u" => format!("#EXTM3U\n{address}\n"),
+            // What a script format could try: a font and a picture by
+            // address.
+            _ => format!(
+                "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n\
+                 Format: Name, Fontname, Fontsize\nStyle: Default,{address},20\n\n\
+                 [Events]\nFormat: Layer, Start, End, Style, Text\n\
+                 Dialogue: 0,0:00:00.00,0:00:03.00,Default,{{\\1img({address})}}TAKT-ASS\n"
+            ),
+        }
+    }
+
+    /// Whether mpv connects to a local port when the film has a subtitle
+    /// file of `kind` next to it that points there.
+    fn subtitles_reach_the_network(kind: &str, references: bool) -> bool {
+        connects_during(|port| {
+            let address = format!("http://127.0.0.1:{port}/other.srt");
+            let folder = Folder::new(&format!("sub-net-{kind}-{references}"));
+            let name = if kind == "ass" {
+                "film.ass"
+            } else {
+                "film.srt"
+            };
+            folder.write(name, &hostile_subtitles(kind, &address));
+            let _ = external_subtitles(&folder, references);
+        })
+    }
+
+    #[test]
+    fn a_subtitle_file_leads_mpv_to_no_other_file_and_not_into_the_network() {
+        let shows = |texts: &[String], word: &str| texts.iter().any(|t| t.contains(word));
+
+        // A subtitle file next to the film is found, and its text is what
+        // mpv shows. Formatting tags are allowed; they are not text.
+        let plain = Folder::new("sub-plain");
+        plain.write("film.srt", &srt("<i>TAKT-PLAIN</i>"));
+        let (tracks, texts) = external_subtitles(&plain, false);
+        assert_eq!(tracks, 1, "the file next to the film is a track");
+        assert!(shows(&texts, "TAKT-PLAIN"), "{texts:?}");
+        assert!(!shows(&texts, "<i>"), "{texts:?}");
+
+        // A subtitle file that is a list of other files (an EDL of mpv)
+        // does not make mpv read them: it is no track, and the text of the
+        // other file is never shown.
+        let folder = Folder::new("sub-file-edl");
+        let other = folder.write("other.txt", &srt("TAKT-CANARY"));
+        folder.write("film.srt", &edl(&other));
+        let (tracks, texts) = external_subtitles(&folder, false);
+        assert_eq!(tracks, 0, "{texts:?}");
+        assert!(!shows(&texts, "TAKT-CANARY"), "{texts:?}");
+        // The control: with the references mpv allows by default, the same
+        // file does show the text of the other one. `access-references=no`
+        // is what keeps it out, and this test would notice its loss.
+        let (_, texts) = external_subtitles(&folder, true);
+        assert!(shows(&texts, "TAKT-CANARY"), "the control: {texts:?}");
+
+        // And it does not make mpv connect anywhere, whatever it holds.
+        for kind in ["edl", "m3u", "ass"] {
+            assert!(
+                !subtitles_reach_the_network(kind, false),
+                "{kind}: mpv connected"
+            );
+        }
+        // The control again: with references allowed the EDL does connect,
+        // so the listener would have seen it above.
+        assert!(subtitles_reach_the_network("edl", true), "the control");
     }
 
     #[test]
