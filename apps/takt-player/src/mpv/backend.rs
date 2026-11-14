@@ -19,8 +19,10 @@
 //!   microseconds. Without a sound track the position of the video stands in,
 //!   and the presentation error then says nothing.
 //! * **The picture: `rgb0` as mpv made it.** The frame is rendered at the
-//!   display size of the video, subtitles drawn in, and copied once into a
-//!   pooled [`PixelFormat::Rgb0`] frame. It is never converted to NV12.
+//!   display size of the video, subtitles drawn in, straight into a pooled
+//!   [`PixelFormat::Rgb0`] frame (its plane starts aligned and has an
+//!   aligned stride, which is what mpv asks for). There is no surface in
+//!   between and no copy, and it is never converted to NV12.
 //!
 //! # What may be opened
 //!
@@ -57,7 +59,7 @@ use takt_core::{
     Timestamp, TransferFunction,
 };
 
-use super::ffi::{Event, Mpv, Surface};
+use super::ffi::{self, Event, Mpv, Target};
 use super::micros;
 
 /// The "sample rate" of the clock: its anchor counts microseconds.
@@ -65,7 +67,10 @@ const CLOCK_RATE: u32 = 1_000_000;
 /// How long the clock runs on without a new anchor: six passes at 60 Hz.
 /// Longer than that and the player stopped asking, so the position stands.
 const MAX_EXTRAPOLATION_NANOS: u64 = 100_000_000;
-/// Frames of the pool: the one being shown, the one being copied, and room.
+/// Frames of the pool. The renderer holds the frame it shows (the frame
+/// itself, not a copy) until the next one replaces it, and mpv renders into
+/// a second one meanwhile: two are needed. The other two are room for a
+/// consumer that keeps a frame a pass longer.
 const POOL_FRAMES: usize = 4;
 /// How long a source may take to open.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -177,7 +182,8 @@ pub struct MpvBackend {
     clock: Arc<AudioMasterClock>,
     writer: AudioClockWriter,
     time: Arc<dyn MonotonicSource>,
-    surface: Option<Surface>,
+    /// Width and height of the picture, `None` without video.
+    size: Option<(u32, u32)>,
     pool: Option<FramePool>,
     /// The video changed: look at its size again before the next frame.
     refit: bool,
@@ -377,7 +383,7 @@ impl MpvBackend {
             clock: Arc::new(clock),
             writer,
             time,
-            surface: None,
+            size: None,
             pool: None,
             refit: false,
             loaded: false,
@@ -415,7 +421,7 @@ impl MpvBackend {
         self.has_sound
     }
 
-    /// What rendering a frame into memory and copying it took so far.
+    /// What rendering a frame into its pooled frame took so far.
     #[must_use]
     pub fn render_times(&self) -> DurationSnapshot {
         self.render.snapshot()
@@ -614,22 +620,30 @@ impl MpvBackend {
         }
     }
 
-    /// Makes surface and pool fit the picture; both gone without video.
+    /// Makes the pool fit the picture; gone without video.
+    ///
+    /// Frames of the old size that are still out (one at the renderer) stay
+    /// valid and go back to the old pool, which ends with the last of them.
     fn fit(&mut self) -> takt_core::Result<()> {
         self.refit = false;
         let Some(size) = self.picture_size() else {
-            self.surface = None;
+            self.size = None;
             self.pool = None;
             return Ok(());
         };
-        if self.surface.as_ref().map(Surface::size) == Some(size) {
+        if self.size == Some(size) {
             return Ok(());
         }
+        self.size = None;
+        self.pool = None;
         // A size beyond 8K is refused here, before anything is allocated.
-        self.surface = Some(Surface::new(size.0, size.1).ok_or(Error::InvalidGeometry {
-            width: size.0,
-            height: size.1,
-        })?);
+        if !ffi::fits(size.0, size.1) {
+            return Err(Error::InvalidGeometry {
+                width: size.0,
+                height: size.1,
+            });
+        }
+        self.size = Some(size);
         self.pool = Some(FramePool::new(Self::meta(size), POOL_FRAMES));
         Ok(())
     }
@@ -714,7 +728,7 @@ impl VideoBackend for MpvBackend {
                 .double(c"container-fps")
                 .and_then(micros)
                 .and_then(rate_of),
-            video: self.surface.as_ref().map(|s| Self::meta(s.size())),
+            video: self.size.map(Self::meta),
             sample_rate: self
                 .mpv
                 .int(c"audio-params/samplerate")
@@ -753,41 +767,38 @@ impl VideoBackend for MpvBackend {
         if self.refit {
             self.fit()?;
         }
+        let (Some((width, height)), Some(pool)) = (self.size, self.pool.as_mut()) else {
+            return Ok(None);
+        };
+        // The frame first, then the question whether mpv has a picture: with
+        // every frame out (`PoolExhausted`) the picture of mpv keeps waiting
+        // and is rendered in the pass that finds a frame again.
+        let mut frame = pool.acquire(self.clock.now()).ok_or(Error::PoolExhausted {
+            capacity: pool.capacity(),
+        })?;
         if !self.mpv.frame_ready() {
             return Ok(None);
         }
-        let (Some(surface), Some(pool)) = (self.surface.as_mut(), self.pool.as_mut()) else {
-            return Ok(None);
-        };
 
         let before = Instant::now();
-        self.mpv.render(surface).map_err(backend_error)?;
+        let geometry = Error::InvalidGeometry { width, height };
+        let picture = frame.get_mut();
+        let stride = picture.stride(0).ok_or(geometry.clone())?;
+        // mpv writes into the plane of the frame itself: it starts aligned
+        // and its stride is aligned (`takt_core::VideoFrame`).
+        let target = picture
+            .plane_mut(0)
+            .and_then(|rows| Target::new(rows, width, height, stride))
+            .ok_or(geometry)?;
+        self.mpv.render(target).map_err(backend_error)?;
         // The position of the frame just rendered; without one (the very
         // first frame of some files) the clock itself, an error of zero.
-        let pts = self
+        let position = self
             .mpv
             .double(c"time-pos")
             .and_then(micros)
             .map_or_else(|| self.clock.now(), |t| Timestamp::new(t, Rational::MICROS));
-        let mut frame = pool.acquire(pts).ok_or(Error::PoolExhausted {
-            capacity: pool.capacity(),
-        })?;
-        let (width, height) = surface.size();
-        let geometry = Error::InvalidGeometry { width, height };
-        let target = frame.get_mut();
-        let to_stride = target.stride(0).ok_or(geometry.clone())?;
-        let from_stride = surface.stride();
-        let row = to_stride.min(from_stride);
-        let plane = target.plane_mut(0).ok_or(geometry)?;
-        // One copy, row by row: the surface is padded to 64 bytes a row for
-        // mpv, the frame is tight.
-        for (to, from) in plane
-            .chunks_mut(to_stride)
-            .zip(surface.pixels().chunks(from_stride))
-        {
-            let bytes = row.min(to.len()).min(from.len());
-            to[..bytes].copy_from_slice(&from[..bytes]);
-        }
+        picture.set_pts(position);
         self.render
             .record(u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX));
         self.stats.decoded += 1;
@@ -968,6 +979,11 @@ mod tests {
             assert_eq!(meta.format, PixelFormat::Rgb0);
             assert_eq!((meta.width, meta.height), (320, 240));
             assert_eq!(frame.get().stride(0), Some(320 * 4));
+            assert_eq!(
+                frame.get().plane(0).unwrap().as_ptr().align_offset(64),
+                0,
+                "mpv rendered into an aligned plane"
+            );
             assert!(
                 frame.get().plane(0).unwrap().iter().any(|&b| b != 0),
                 "a picture reached the frame"

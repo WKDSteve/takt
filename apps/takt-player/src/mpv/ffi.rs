@@ -4,7 +4,7 @@
 //! calls.
 //!
 //! The one module of the player with `unsafe` (KONZEPT, unsafe policy):
-//! declarations and calls stay in here, [`Mpv`] and [`Surface`] are what the
+//! declarations and calls stay in here, [`Mpv`] and [`Target`] are what the
 //! rest of the program sees.
 #![allow(unsafe_code)]
 
@@ -90,9 +90,10 @@ const ERROR_NOMEM: c_int = -1;
 /// `MPV_ERROR_INVALID_PARAMETER`, for a text that cannot be a C string.
 const ERROR_INVALID_PARAMETER: c_int = -4;
 
-/// What the surface is aligned to: mpv asks for 64 bytes for pointer and
-/// stride, or it takes slower paths.
-const ALIGN: usize = 64;
+/// The largest picture mpv is given rows for: 8K.
+pub const MAX_WIDTH: u32 = 8_192;
+/// See [`MAX_WIDTH`].
+pub const MAX_HEIGHT: u32 = 4_320;
 
 #[link(name = "mpv")]
 unsafe extern "C" {
@@ -213,7 +214,7 @@ impl Drop for Core {
     }
 }
 
-/// An mpv core that renders into memory ([`Surface`]) instead of a window.
+/// An mpv core that renders into memory ([`Target`]) instead of a window.
 pub struct Mpv {
     render: NonNull<RenderContext>,
     // Dropped after `render` was freed in `drop`.
@@ -429,18 +430,16 @@ impl Mpv {
         flags & RENDER_UPDATE_FRAME != 0
     }
 
-    /// Renders the current frame into `surface` (scaled to its size, `rgb0`)
+    /// Renders the current frame into `target` (scaled to its size, `rgb0`)
     /// without waiting for the time of the frame.
     ///
     /// # Errors
     ///
-    /// [`MpvError`] when mpv refuses the surface.
-    pub fn render(&mut self, surface: &mut Surface) -> Result<(), MpvError> {
-        let mut size = [surface.width, surface.height];
-        let mut stride = surface.stride;
+    /// [`MpvError`] when mpv refuses the target.
+    pub fn render(&mut self, target: Target<'_>) -> Result<(), MpvError> {
+        let mut size = [target.width, target.height];
+        let mut stride = target.stride;
         let mut no_wait: c_int = 0;
-        let pixels = surface.pixels_mut();
-        debug_assert!(pixels.len() >= stride * usize::try_from(size[1]).unwrap_or(0));
         let mut params = [
             RenderParam {
                 kind: RENDER_PARAM_SW_SIZE,
@@ -456,7 +455,7 @@ impl Mpv {
             },
             RenderParam {
                 kind: RENDER_PARAM_SW_POINTER,
-                data: pixels.as_mut_ptr().cast(),
+                data: target.pixels.as_mut_ptr().cast(),
             },
             RenderParam {
                 kind: RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
@@ -471,9 +470,10 @@ impl Mpv {
         // value of the type render.h names for it (int[2], char*, size_t*,
         // void*, int*) that lives until the call returns; the format is a
         // static string mpv only reads. The pixel pointer is valid for
-        // writes of stride * height bytes (`Surface::new` allocates exactly
-        // that from the aligned start, checked above) and is borrowed
-        // exclusively through `surface`; mpv writes no further.
+        // writes of stride * height bytes: `Target::new` is the only way to
+        // a `Target` and refuses a slice shorter than that or a stride below
+        // four bytes a pixel. The slice is borrowed exclusively until the
+        // call returns, and mpv writes no further and keeps no pointer.
         let code = unsafe { mpv_render_context_render(self.render.as_ptr(), params.as_mut_ptr()) };
         check("mpv_render_context_render", code)
     }
@@ -519,73 +519,46 @@ impl Drop for Mpv {
     }
 }
 
-/// A picture in memory that mpv renders into: `rgb0`, four bytes a pixel,
-/// rows `stride` bytes apart, start and stride aligned to 64 bytes.
-pub struct Surface {
+/// The rows mpv renders into: `rgb0`, four bytes a pixel, rows `stride`
+/// bytes apart. They belong to the caller (a plane of a pooled frame); mpv
+/// asks for a start and a stride aligned to 64 bytes and takes a slower path
+/// with a surface of its own without them.
+pub struct Target<'a> {
+    pixels: &'a mut [u8],
     width: c_int,
     height: c_int,
     stride: usize,
-    /// Where the aligned picture starts in `data`.
-    start: usize,
-    data: Vec<u8>,
 }
 
-impl Surface {
-    /// A black surface, `None` for a size of zero or one beyond 8K
-    /// (8192 x 4320).
+impl<'a> Target<'a> {
+    /// `pixels` as a picture of `width` by `height`. `None` for a size of
+    /// zero or one beyond 8K ([`MAX_WIDTH`] by [`MAX_HEIGHT`]), a stride
+    /// below four bytes a pixel, or fewer than `stride * height` bytes.
     ///
     /// The size comes from the file. Without the bound a file that only
     /// claims a huge picture makes the player allocate gigabytes before a
     /// single frame is decoded.
-    pub fn new(width: u32, height: u32) -> Option<Self> {
-        const MAX_WIDTH: u32 = 8_192;
-        const MAX_HEIGHT: u32 = 4_320;
-        if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
+    pub fn new(pixels: &'a mut [u8], width: u32, height: u32, stride: usize) -> Option<Self> {
+        if !fits(width, height) {
             return None;
         }
-        let stride = (usize::try_from(width).ok()? * 4).next_multiple_of(ALIGN);
-        let len = stride * usize::try_from(height).ok()?;
-        // Room to move the start to the next multiple of 64.
-        let data = vec![0_u8; len + ALIGN];
-        let start = data.as_ptr().align_offset(ALIGN);
-        // align_offset may refuse (usize::MAX); then the picture starts
-        // unaligned, which mpv takes on a slower path.
-        let start = if start < ALIGN { start } else { 0 };
+        let row = usize::try_from(width).ok()?.checked_mul(4)?;
+        let len = stride.checked_mul(usize::try_from(height).ok()?)?;
+        if stride < row || pixels.len() < len {
+            return None;
+        }
         Some(Self {
+            pixels,
             width: c_int::try_from(width).ok()?,
             height: c_int::try_from(height).ok()?,
             stride,
-            start,
-            data,
         })
     }
+}
 
-    /// Bytes from one row to the next.
-    pub fn stride(&self) -> usize {
-        self.stride
-    }
-
-    /// Width and height in pixels.
-    pub fn size(&self) -> (u32, u32) {
-        (
-            u32::try_from(self.width).unwrap_or(0),
-            u32::try_from(self.height).unwrap_or(0),
-        )
-    }
-
-    /// The rows of the picture, `stride * height` bytes.
-    pub fn pixels(&self) -> &[u8] {
-        &self.data[self.start..self.start + self.len()]
-    }
-
-    fn pixels_mut(&mut self) -> &mut [u8] {
-        let (start, len) = (self.start, self.len());
-        &mut self.data[start..start + len]
-    }
-
-    fn len(&self) -> usize {
-        self.stride * usize::try_from(self.height).unwrap_or(0)
-    }
+/// Whether a picture of this size is rendered at all: not empty, at most 8K.
+pub const fn fits(width: u32, height: u32) -> bool {
+    width != 0 && height != 0 && width <= MAX_WIDTH && height <= MAX_HEIGHT
 }
 
 #[cfg(test)]
@@ -593,16 +566,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_surface_is_aligned_and_holds_its_rows() {
-        let surface = Surface::new(1921, 1080).unwrap();
-        assert_eq!(surface.stride(), 7_744, "1921 * 4 up to a multiple of 64");
-        assert_eq!(surface.pixels().len(), 7_744 * 1080);
-        assert_eq!(surface.pixels().as_ptr().align_offset(ALIGN), 0);
-        assert!(Surface::new(0, 1080).is_none());
-        assert!(Surface::new(1920, 0).is_none());
-        assert!(Surface::new(8_193, 1).is_none());
-        assert!(Surface::new(1, 4_321).is_none());
-        assert!(Surface::new(8_192, 4_320).is_some());
+    fn a_target_holds_its_rows_or_is_refused() {
+        let mut rows = vec![0_u8; 64 * 3];
+        assert!(Target::new(&mut rows, 16, 3, 64).is_some());
+        assert!(Target::new(&mut rows, 15, 3, 64).is_some());
+        // Too few bytes for the rows, also by one.
+        assert!(Target::new(&mut rows, 16, 4, 64).is_none());
+        assert!(Target::new(&mut rows[..64 * 3 - 1], 16, 3, 64).is_none());
+        // A stride below four bytes a pixel.
+        assert!(Target::new(&mut rows, 17, 2, 64).is_none());
+        assert!(Target::new(&mut rows, 16, 3, 63).is_none());
+        // A stride that overflows with the height.
+        assert!(Target::new(&mut rows, 1, 3, usize::MAX).is_none());
+        assert!(Target::new(&mut rows, 0, 3, 64).is_none());
+        assert!(Target::new(&mut rows, 16, 0, 64).is_none());
+    }
+
+    #[test]
+    fn a_picture_beyond_8k_does_not_fit() {
+        assert!(fits(8_192, 4_320));
+        assert!(fits(1, 1));
+        assert!(!fits(8_193, 1));
+        assert!(!fits(1, 4_321));
+        assert!(!fits(0, 1_080));
+        assert!(!fits(1_920, 0));
+        let mut one = [0_u8; 4];
+        assert!(Target::new(&mut one, 8_193, 1, 4).is_none());
     }
 
     #[test]

@@ -20,8 +20,8 @@ Paths:
          device the clock is simulated and the row says so.
   mpv-sw `takt-player --headless --mpv`: the MpvBackend on the same pattern (from lavfi, with a silent sound track).
          libmpv decodes and renders into memory; the error is the clock of the backend (the sound position of mpv)
-         minus the timestamp of the frame at the pass that takes it, and the row names what rendering a frame and
-         copying it into a pooled frame costs. mpv hands a frame out half a display period early unless
+         minus the timestamp of the frame at the pass that takes it, and the row names what rendering a frame into
+         its pooled frame costs. mpv hands a frame out half a display period early unless
          `--mpv-early MICROS` names another lead. Silent (ao=null) unless `--device NAME` names a device. Needs a
          player built with TAKT_LIBMPV_DIR (docs/BUILD.md) and the libmpv library in PATH.
   mpv    `mpv --video-sync=<mode>` on the same pattern from lavfi, with scripts/ab-mpv-stats.lua. mpv opens a window
@@ -94,7 +94,7 @@ def null_row(result, date, hardware):
         lead = millis(result.get("offset_us", "0"))
         path = (
             f"MpvBackend, kopflos (Uhr von mpv, Vorlauf {lead}; "
-            f"Rendern und Kopie p99 < {millis(result['render_p99_us'])})"
+            f"Rendern p99 < {millis(result['render_p99_us'])})"
         )
         bound = ""
     else:

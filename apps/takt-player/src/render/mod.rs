@@ -7,7 +7,9 @@
 //! ([`Picture::from_frame`]): NV12 through [`gpu::Nv12Renderer`] (the test
 //! picture, later a decoder) and `rgb0` through [`gpu_rgb::Rgb0Renderer`]
 //! (the finished picture of the `MpvBackend`). A frame is never converted
-//! from one to the other on the CPU.
+//! from one to the other on the CPU, and it is not copied either: the paint
+//! callback holds the pooled frame itself ([`Picture`]) and uploads from its
+//! planes.
 
 // The CPU reference of the shader, used by its tests.
 #[cfg(test)]
@@ -20,42 +22,54 @@ use std::sync::Arc;
 use egui_wgpu::wgpu;
 use takt_audio::DurationSnapshot;
 
-use gpu::{LayoutError, Nv12Image, Nv12Renderer};
-use gpu_rgb::{Rgb0Image, Rgb0Renderer};
-use takt_core::{PixelFormat, VideoFrame};
+use gpu::{LayoutError, Nv12Renderer, Nv12View};
+use gpu_rgb::{Rgb0Renderer, Rgb0View};
+use takt_core::{PixelFormat, PooledFrame};
 
-/// A picture with planes of its own, in the format its frame came in.
-#[derive(Debug)]
-pub enum Picture {
+/// The texture path of a picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Path {
     /// Two planes, 4:2:0, converted by the shader.
-    Nv12(Nv12Image),
+    Nv12,
     /// Finished R'G'B' with a padding byte, shown as it is.
-    Rgb0(Rgb0Image),
+    Rgb0,
+}
+
+/// A frame on its way to a texture: the pooled frame itself, not a copy.
+///
+/// The frame goes back to its pool when the last holder lets go: the window
+/// (until the next picture replaces it) and the paint callbacks of the pass
+/// that draws it. A source therefore needs a pool of at least two frames, the
+/// one shown and the one it fills next.
+#[derive(Debug)]
+pub struct Picture {
+    frame: PooledFrame,
+    path: Path,
 }
 
 impl Picture {
-    /// A copy of the planes of `frame`, for the texture path of its format.
+    /// Takes `frame` for the texture path of its format.
     ///
     /// # Errors
     ///
     /// [`LayoutError`] for incomplete planes, and [`LayoutError::Format`]
     /// for a format without a texture path (it is not converted to one that
-    /// has).
-    pub fn from_frame(frame: &VideoFrame) -> Result<Self, LayoutError> {
-        match frame.meta().format {
-            PixelFormat::Nv12 => Nv12Image::from_frame(frame).map(Self::Nv12),
-            PixelFormat::Rgb0 => Rgb0Image::from_frame(frame).map(Self::Rgb0),
+    /// has). The frame goes back to its pool then.
+    pub fn from_frame(frame: PooledFrame) -> Result<Self, LayoutError> {
+        // The layout is checked once, here; the upload reads the same planes.
+        let path = match frame.get().meta().format {
+            PixelFormat::Nv12 => Nv12View::from_frame(frame.get()).map(|_| Path::Nv12),
+            PixelFormat::Rgb0 => Rgb0View::from_frame(frame.get()).map(|_| Path::Rgb0),
             _ => Err(LayoutError::Format),
-        }
+        }?;
+        Ok(Self { frame, path })
     }
 
     /// Width and height in pixels.
     #[must_use]
     pub fn size(&self) -> (u32, u32) {
-        match self {
-            Self::Nv12(image) => image.view().size(),
-            Self::Rgb0(image) => image.view().size(),
-        }
+        let meta = self.frame.get().meta();
+        (meta.width, meta.height)
     }
 }
 
@@ -128,11 +142,22 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
         if let Some(r) = resources.get_mut::<VideoResources>()
             && r.generation != Some(self.0.generation)
         {
-            match self.0.image.as_ref() {
-                Picture::Nv12(image) => r.nv12.upload(device, queue, &image.view()),
-                Picture::Rgb0(image) => r.rgb0.upload(device, queue, &image.view()),
+            let picture = self.0.image.as_ref();
+            // The views were built once in `Picture::from_frame`; a frame
+            // does not change after that, so they are there again.
+            match picture.path {
+                Path::Nv12 => {
+                    if let Ok(view) = Nv12View::from_frame(picture.frame.get()) {
+                        r.nv12.upload(device, queue, &view);
+                    }
+                }
+                Path::Rgb0 => {
+                    if let Ok(view) = Rgb0View::from_frame(picture.frame.get()) {
+                        r.rgb0.upload(device, queue, &view);
+                    }
+                }
             }
-            r.last_rgb0 = matches!(self.0.image.as_ref(), Picture::Rgb0(_));
+            r.last_rgb0 = picture.path == Path::Rgb0;
             r.generation = Some(self.0.generation);
         }
         Vec::new()
@@ -147,9 +172,9 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
         if let Some(r) = resources.get::<VideoResources>() {
             // The renderer of the picture this callback carries: `prepare`
             // uploaded it there.
-            match self.0.image.as_ref() {
-                Picture::Nv12(_) => r.nv12.draw(pass),
-                Picture::Rgb0(_) => r.rgb0.draw(pass),
+            match self.0.image.path {
+                Path::Nv12 => r.nv12.draw(pass),
+                Path::Rgb0 => r.rgb0.draw(pass),
             }
         }
     }
@@ -199,11 +224,10 @@ pub fn video_surface(ui: &mut egui::Ui, shown: Option<&Shown>) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_frame_goes_the_texture_path_of_its_format() {
+    fn pool(format: PixelFormat, capacity: usize) -> takt_core::FramePool {
         use takt_core::{ColorPrimaries, ColorRange, FrameMeta, Timestamp, TransferFunction};
-        let frame = |format| {
-            VideoFrame::alloc(FrameMeta {
+        takt_core::FramePool::new(
+            FrameMeta {
                 width: 8,
                 height: 4,
                 format,
@@ -211,21 +235,75 @@ mod tests {
                 transfer: TransferFunction::Bt709,
                 range: ColorRange::Limited,
                 pts: Timestamp::from_millis(0),
-            })
+            },
+            capacity,
+        )
+    }
+
+    fn frame(format: PixelFormat) -> PooledFrame {
+        pool(format, 1)
+            .acquire(takt_core::Timestamp::from_millis(0))
             .unwrap()
-        };
-        let nv12 = Picture::from_frame(&frame(PixelFormat::Nv12)).unwrap();
-        assert!(matches!(nv12, Picture::Nv12(_)));
-        let rgb0 = Picture::from_frame(&frame(PixelFormat::Rgb0)).unwrap();
-        assert!(matches!(rgb0, Picture::Rgb0(_)));
+    }
+
+    #[test]
+    fn a_frame_goes_the_texture_path_of_its_format() {
+        let nv12 = Picture::from_frame(frame(PixelFormat::Nv12)).unwrap();
+        assert_eq!(nv12.path, Path::Nv12);
+        let rgb0 = Picture::from_frame(frame(PixelFormat::Rgb0)).unwrap();
+        assert_eq!(rgb0.path, Path::Rgb0);
         assert_eq!((nv12.size(), rgb0.size()), ((8, 4), (8, 4)));
         // A format without a path is refused, not converted.
         for format in [PixelFormat::Yuv420P, PixelFormat::Rgba8, PixelFormat::P010] {
             assert_eq!(
-                Picture::from_frame(&frame(format)).unwrap_err(),
+                Picture::from_frame(frame(format)).unwrap_err(),
                 LayoutError::Format
             );
         }
+    }
+
+    #[test]
+    fn a_picture_is_the_frame_itself_and_gives_it_back_when_the_last_holder_goes() {
+        let stamp = takt_core::Timestamp::from_millis;
+        let mut pool = pool(PixelFormat::Rgb0, 2);
+        let mut frame = pool.acquire(stamp(0)).unwrap();
+        frame.get_mut().plane_mut(0).unwrap()[..4].copy_from_slice(&[9, 8, 7, 0]);
+        let rows = frame.get().plane(0).unwrap().as_ptr();
+
+        // What the window keeps and what a paint callback carries.
+        let shown = Shown {
+            image: Arc::new(Picture::from_frame(frame).unwrap()),
+            generation: 0,
+        };
+        let callback = shown.clone();
+        let view = Rgb0View::from_frame(shown.image.frame.get()).unwrap();
+        assert_eq!(view.size(), (8, 4));
+        assert_eq!(
+            shown.image.frame.get().plane(0).unwrap().as_ptr(),
+            rows,
+            "no copy: the rows of the pooled frame"
+        );
+        assert_eq!(
+            &shown.image.frame.get().plane(0).unwrap()[..4],
+            &[9, 8, 7, 0]
+        );
+
+        // The source fills its next frame while this one is shown: two out.
+        let next = pool.acquire(stamp(40)).unwrap();
+        assert_eq!(pool.in_flight(), 2);
+        assert!(pool.acquire(stamp(80)).is_none(), "the pool is the bound");
+        // The window moves on; the callback of the pass still holds the frame.
+        drop(shown);
+        assert_eq!(pool.in_flight(), 2);
+        drop(callback);
+        assert_eq!(pool.in_flight(), 1);
+        drop(next);
+        assert_eq!(pool.in_flight(), 0);
+
+        // A frame that is refused goes back as well.
+        let mut other = self::pool(PixelFormat::Rgba8, 1);
+        assert!(Picture::from_frame(other.acquire(stamp(0)).unwrap()).is_err());
+        assert_eq!(other.in_flight(), 0);
     }
 
     #[test]

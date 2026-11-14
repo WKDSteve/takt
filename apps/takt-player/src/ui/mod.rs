@@ -190,7 +190,9 @@ impl PlayerApp {
                     .map_or(target, Timestamp::ticks);
                 self.last_seek = Some((target, landed));
             }
-            match Picture::from_frame(frame.get()) {
+            // The frame itself goes to the renderer; it returns to the pool
+            // of its source when the next picture has replaced it.
+            match Picture::from_frame(frame) {
                 Ok(image) => {
                     let generation = self.shown.as_ref().map_or(0, |s| s.generation + 1);
                     self.shown = Some(Shown {

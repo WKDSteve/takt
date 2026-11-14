@@ -138,51 +138,6 @@ impl<'a> Nv12View<'a> {
     }
 }
 
-/// An NV12 picture with planes of its own: what the paint callback carries
-/// from the UI thread to the render pass (it must be `Send + Sync` and live on
-/// its own).
-#[derive(Debug)]
-pub struct Nv12Image {
-    width: u32,
-    height: u32,
-    y: Vec<u8>,
-    y_stride: u32,
-    uv: Vec<u8>,
-    uv_stride: u32,
-}
-
-impl Nv12Image {
-    /// A copy of the planes of `frame`.
-    ///
-    /// # Errors
-    ///
-    /// [`LayoutError`] for another format or incomplete planes.
-    pub fn from_frame(frame: &VideoFrame) -> Result<Self, LayoutError> {
-        let view = Nv12View::from_frame(frame)?;
-        Ok(Self {
-            width: view.width,
-            height: view.height,
-            y: view.y.to_vec(),
-            y_stride: view.y_stride,
-            uv: view.uv.to_vec(),
-            uv_stride: view.uv_stride,
-        })
-    }
-
-    /// The planes as a view.
-    #[must_use]
-    pub fn view(&self) -> Nv12View<'_> {
-        Nv12View {
-            width: self.width,
-            height: self.height,
-            y: &self.y,
-            y_stride: self.y_stride,
-            uv: &self.uv,
-            uv_stride: self.uv_stride,
-        }
-    }
-}
-
 struct Textures {
     size: (u32, u32),
     luma: wgpu::Texture,

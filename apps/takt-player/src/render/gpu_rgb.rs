@@ -90,44 +90,6 @@ impl<'a> Rgb0View<'a> {
     }
 }
 
-/// An `rgb0` picture with rows of its own: what the paint callback carries
-/// from the UI thread to the render pass.
-#[derive(Debug)]
-pub struct Rgb0Image {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-    stride: u32,
-}
-
-impl Rgb0Image {
-    /// A copy of the rows of `frame`.
-    ///
-    /// # Errors
-    ///
-    /// [`LayoutError`] for another format or an incomplete plane.
-    pub fn from_frame(frame: &VideoFrame) -> Result<Self, LayoutError> {
-        let view = Rgb0View::from_frame(frame)?;
-        Ok(Self {
-            width: view.width,
-            height: view.height,
-            pixels: view.pixels.to_vec(),
-            stride: view.stride,
-        })
-    }
-
-    /// The rows as a view.
-    #[must_use]
-    pub fn view(&self) -> Rgb0View<'_> {
-        Rgb0View {
-            width: self.width,
-            height: self.height,
-            pixels: &self.pixels,
-            stride: self.stride,
-        }
-    }
-}
-
 struct Textures {
     size: (u32, u32),
     picture: wgpu::Texture,
@@ -324,20 +286,23 @@ mod tests {
     }
 
     #[test]
-    fn an_image_copies_an_rgb0_frame_and_refuses_another_format() {
+    fn a_view_reads_an_rgb0_frame_in_place_and_refuses_another_format() {
         let mut rgb = frame(PixelFormat::Rgb0);
         rgb.plane_mut(0).unwrap()[..4].copy_from_slice(&[1, 2, 3, 0]);
-        let image = Rgb0Image::from_frame(&rgb).unwrap();
-        assert_eq!(image.view().size(), (6, 2));
-        assert_eq!(&image.view().pixels[..4], &[1, 2, 3, 0]);
-        assert_eq!(image.view().stride, 64);
+        let view = Rgb0View::from_frame(&rgb).unwrap();
+        assert_eq!(view.size(), (6, 2));
+        assert_eq!(&view.pixels[..4], &[1, 2, 3, 0]);
+        // The rows of the frame itself, at its aligned stride: 24 bytes of
+        // picture in rows of 64.
+        assert_eq!(view.pixels.as_ptr(), rgb.plane(0).unwrap().as_ptr());
+        assert_eq!(view.stride, 64);
         // The same bytes with another meaning are not taken by guessing.
         assert_eq!(
-            Rgb0Image::from_frame(&frame(PixelFormat::Rgba8)).unwrap_err(),
+            Rgb0View::from_frame(&frame(PixelFormat::Rgba8)).unwrap_err(),
             LayoutError::Format
         );
         assert_eq!(
-            Rgb0Image::from_frame(&frame(PixelFormat::Nv12)).unwrap_err(),
+            Rgb0View::from_frame(&frame(PixelFormat::Nv12)).unwrap_err(),
             LayoutError::Format
         );
     }

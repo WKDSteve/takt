@@ -34,7 +34,8 @@ use crate::mpv::{Config, Early, MpvBackend, Sound, Sources, Track};
 
 /// Length of the test picture.
 const TEST_MILLIS: i64 = 3_600_000;
-/// Frames of the pool of the test picture.
+/// Frames of the pool of the test picture: the one the renderer holds, the
+/// one being painted, and room.
 const TEST_POOL_FRAMES: usize = 6;
 
 /// A track the person can step through.
