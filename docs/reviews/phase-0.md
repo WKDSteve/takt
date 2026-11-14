@@ -233,8 +233,8 @@ Bildes ist seine Frame-Nummer, sodass ein Test am Bild abliest, welches Frame es
   Position das Ziel, und das Bild des Sprungs trägt diesen Stempel. Gemessen wird jetzt mpvs Position in dem Moment,
   in dem seine Ereignisse die Ankunft melden (Sprung begonnen, Wiedergabe wieder aufgenommen); die Eigenschaft
   `seeking` allein nennt einen Sprung fertig, bevor er begonnen hat.
-- **Im Lauf trägt jedes Frame seine eigene Zeit:** 50 von 50 Frames stimmen mit ihrer Bildnummer überein (Test
-  `a_frame_carries_its_own_time_except_on_the_way_to_a_jump`).
+- **Im Lauf trägt jedes Frame seine eigene Zeit:** in der Messung stimmten 50 von 50 Frames mit ihrer Bildnummer
+  überein; der Test `a_frame_carries_its_own_time_except_on_the_way_to_a_jump` prüft 20 und fünf nach einem Sprung.
 - **Spuren wählt man aus einer Liste in der Leiste** („Audio“, „Subtitles“); `j` und `#` schalten weiter durch.
 - **Vier weitere Paare aus Container und Codec** spielen mit dem richtigen Frame zur richtigen Zeit und nehmen einen
   Sprung: AV1 in Matroska, H.264 und HEVC in MP4, VP9 in WebM (je 2 s, 64x64, `scripts/make-format-clips.py`). Das
@@ -250,11 +250,13 @@ dieser Thread stellt stattdessen eine Frage, blockieren beide, bis mpv nach 200 
 
 | | vorher | nachher |
 |---|---|---|
-| Sprung: Zeit bis zur Ankunft | etwa 200 ms | etwa 4,5 ms (ein Durchlauf) |
+| Sprung: Zeit bis zur Ankunft | etwa 200 ms | 4 bis 9 ms (ein bis zwei Durchläufe von 4 ms) |
 | Backend verwerfen, während es öffnet | nicht gemessen | 1 ms |
 
 - **Jetzt wird das wartende Bild zuerst gerendert**, bevor mpv etwas gefragt wird: in ein Pool-Frame, das bis zum
   nächsten `next_frame` liegen bleibt, oder es wird als gezeigt verbucht, wenn es keinen Platz dafür gibt.
+- **Das erste Bild einer Datei hat Vorrang vor der Regel:** trifft es zusammen mit der Meldung „geladen“ ein, wird
+  erst die Meldung genommen (dort entsteht der Platz für das Bild). Sonst wäre es als gezeigt verbucht worden.
 - **Ein Rest bleibt:** beginnt ein Bild zu warten, nachdem geprüft und bevor gefragt wurde, kostet das weiter bis zu
   200 ms. Weg ist das erst, wenn in einem eigenen Thread gerendert wird und die Eigenschaften beobachtet statt
   abgefragt werden.
