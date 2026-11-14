@@ -23,6 +23,18 @@
 //!   [`PixelFormat::Rgb0`] frame (its plane starts aligned and has an
 //!   aligned stride, which is what mpv asks for). There is no surface in
 //!   between and no copy, and it is never converted to NV12.
+//! * **The colour: mpv converts, the frames are BT.709.** The software
+//!   renderer of mpv does not only apply the matrix of the file: it brings
+//!   primaries and transfer to BT.709 with the gamma of BT.1886 (through
+//!   zimg, which libmpv is built with). So every frame is BT.709, full
+//!   range, whatever the file is, and its [`FrameMeta`] says that. What the
+//!   file names is told apart from it ([`MpvBackend::source_color`],
+//!   `MediaInfo::source_color`). HDR is not tone-mapped on this path: what
+//!   is brighter than SDR white is cut off at white, in 8 bit. The tests
+//!   `the_frames_are_bt709_whatever_primaries_the_file_names` and
+//!   `hdr_is_cut_off_at_white_not_tone_mapped` measure both with files that
+//!   differ in their tags alone; they fail on a libmpv that converts
+//!   otherwise (one built without zimg applies the matrix only).
 //!
 //! # What may be opened
 //!
@@ -64,8 +76,8 @@ use takt_audio::{DurationHistogram, DurationSnapshot};
 use takt_backend::{BackendStats, MediaInfo, SeekMode, VideoBackend};
 use takt_clock::{AudioClockWriter, AudioMasterClock, Clock, MonotonicSource};
 use takt_core::{
-    ColorPrimaries, ColorRange, Error, FrameMeta, FramePool, PixelFormat, PooledFrame, Rational,
-    Timestamp, TransferFunction,
+    ColorDescription, ColorPrimaries, ColorRange, Error, FrameMeta, FramePool, PixelFormat,
+    PooledFrame, Rational, Timestamp, TransferFunction,
 };
 
 use super::ffi::{self, Event, Mpv, Target};
@@ -260,6 +272,44 @@ fn rate_of(micro_fps: i64) -> Option<Rational> {
         return Rational::new(ntsc * 1_000, 1_001);
     }
     Rational::new(micro_fps, 1_000_000)
+}
+
+/// The primaries mpv names (`video-params/primaries`). A name Takt has no
+/// type for is unknown, never the nearest one.
+fn primaries_of(name: &str) -> ColorPrimaries {
+    match name {
+        "bt.709" => ColorPrimaries::Bt709,
+        "bt.601-525" => ColorPrimaries::Bt601Ntsc,
+        "bt.601-625" => ColorPrimaries::Bt601Pal,
+        "bt.2020" => ColorPrimaries::Bt2020,
+        "dci-p3" => ColorPrimaries::DciP3,
+        "display-p3" => ColorPrimaries::DisplayP3,
+        _ => ColorPrimaries::Unknown,
+    }
+}
+
+/// The transfer function mpv names (`video-params/gamma`). BT.1886 is the
+/// display side of the BT.709 curve; the pure gammas (2.2, 2.8, ...) and the
+/// camera curves have no type here and are unknown.
+fn transfer_of(name: &str) -> TransferFunction {
+    match name {
+        "bt.1886" => TransferFunction::Bt709,
+        "srgb" => TransferFunction::Srgb,
+        "pq" => TransferFunction::Pq,
+        "hlg" => TransferFunction::Hlg,
+        "linear" => TransferFunction::Linear,
+        _ => TransferFunction::Unknown,
+    }
+}
+
+/// The range mpv names (`video-params/colorlevels`). Video is limited
+/// unless it says full.
+fn range_of(name: &str) -> ColorRange {
+    if name == "full" {
+        ColorRange::Full
+    } else {
+        ColorRange::Limited
+    }
 }
 
 /// Reads a JSON string whose opening quote is consumed, up to its closing
@@ -470,6 +520,22 @@ impl MpvBackend {
     #[must_use]
     pub const fn pool_frames(&self) -> usize {
         POOL_FRAMES
+    }
+
+    /// What the file says about the colour of its picture, as mpv reads it:
+    /// for a file that says nothing, mpv puts in its own guess (BT.709
+    /// primaries). This is not the colour of the frames: those are
+    /// BT.709, converted by mpv (module documentation). `None` without a
+    /// picture.
+    pub fn source_color(&mut self) -> Option<ColorDescription> {
+        let primaries = self.mpv.string(c"video-params/primaries")?;
+        let transfer = self.mpv.string(c"video-params/gamma");
+        let range = self.mpv.string(c"video-params/colorlevels");
+        Some(ColorDescription {
+            primaries: primaries_of(&primaries),
+            transfer: transfer.map_or(TransferFunction::Unknown, |name| transfer_of(&name)),
+            range: range.map_or(ColorRange::Limited, |name| range_of(&name)),
+        })
     }
 
     /// Whether mpv is still on its way to the target of the last jump: a
@@ -726,6 +792,7 @@ impl MpvBackend {
                 .and_then(micros)
                 .and_then(rate_of),
             video: self.size.map(Self::meta),
+            source_color: self.source_color(),
             sample_rate: self
                 .mpv
                 .int(c"audio-params/samplerate")
@@ -755,9 +822,9 @@ impl MpvBackend {
             width: size.0,
             height: size.1,
             format: PixelFormat::Rgb0,
-            // mpv applies the matrix of the file and leaves primaries and
-            // transfer as they are: R'G'B' in full range. The primaries of
-            // the file are not asked for yet (colour management, Phase 1).
+            // Not what the file names: mpv converted the picture to
+            // BT.709 primaries with the gamma of BT.1886, R'G'B' in full
+            // range (module documentation, measured by the colour tests).
             primaries: ColorPrimaries::Bt709,
             transfer: TransferFunction::Bt709,
             range: ColorRange::Full,
@@ -1111,6 +1178,135 @@ mod tests {
             backend.mpv.string(c"sub-delay").as_deref(),
             Some("-60.000000")
         );
+    }
+
+    #[test]
+    fn the_colour_names_of_mpv_become_types_and_an_unknown_one_is_not_guessed() {
+        assert_eq!(primaries_of("bt.709"), ColorPrimaries::Bt709);
+        assert_eq!(primaries_of("bt.601-525"), ColorPrimaries::Bt601Ntsc);
+        assert_eq!(primaries_of("bt.601-625"), ColorPrimaries::Bt601Pal);
+        assert_eq!(primaries_of("bt.2020"), ColorPrimaries::Bt2020);
+        assert_eq!(primaries_of("dci-p3"), ColorPrimaries::DciP3);
+        assert_eq!(primaries_of("display-p3"), ColorPrimaries::DisplayP3);
+        for unknown in ["bt.470m", "adobe", "apple", "", "BT.709", "bt.709 "] {
+            assert_eq!(
+                primaries_of(unknown),
+                ColorPrimaries::Unknown,
+                "{unknown:?}"
+            );
+        }
+        assert_eq!(transfer_of("bt.1886"), TransferFunction::Bt709);
+        assert_eq!(transfer_of("srgb"), TransferFunction::Srgb);
+        assert_eq!(transfer_of("pq"), TransferFunction::Pq);
+        assert_eq!(transfer_of("hlg"), TransferFunction::Hlg);
+        assert_eq!(transfer_of("linear"), TransferFunction::Linear);
+        for unknown in ["gamma2.2", "gamma2.8", "v-log", "auto", ""] {
+            assert_eq!(
+                transfer_of(unknown),
+                TransferFunction::Unknown,
+                "{unknown:?}"
+            );
+        }
+        assert_eq!(range_of("full"), ColorRange::Full);
+        assert_eq!(range_of("limited"), ColorRange::Limited);
+        assert_eq!(range_of(""), ColorRange::Limited);
+    }
+
+    /// One of the colour files (`scripts/make-colour-clips.py`): the same
+    /// encoded picture in all of them, only the tags differ.
+    fn colour_clip(name: &str) -> String {
+        format!(
+            "{}/tests/data/colour-{name}.mkv",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    /// Opens a colour file and returns what it names, the description of
+    /// its first frame, and red, green and blue in the middle of it.
+    fn colour_of(name: &str) -> (ColorDescription, FrameMeta, [u8; 3]) {
+        let mut backend = backend(Sources::Files);
+        let info = backend.open(&colour_clip(name)).unwrap();
+        let named = info.source_color.unwrap();
+        assert_eq!(backend.source_color(), Some(named));
+        let mut seen = None;
+        passes(&mut backend, Duration::from_secs(5), |_, frame| {
+            let picture = frame.get();
+            let rows = picture.plane(0).unwrap();
+            let at = 32 * picture.stride(0).unwrap() + 32 * 4;
+            seen = Some((*picture.meta(), [rows[at], rows[at + 1], rows[at + 2]]));
+            false
+        });
+        let (meta, pixel) = seen.expect("a frame of the colour file");
+        (named, meta, pixel)
+    }
+
+    fn near(a: [u8; 3], b: [u8; 3]) -> bool {
+        a.iter().zip(b).all(|(&a, b)| a.abs_diff(b) <= 3)
+    }
+
+    #[test]
+    fn the_frames_are_bt709_whatever_primaries_the_file_names() {
+        let frames = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: TransferFunction::Bt709,
+            range: ColorRange::Full,
+        };
+        let limited = |primaries| ColorDescription {
+            primaries,
+            transfer: TransferFunction::Bt709,
+            range: ColorRange::Limited,
+        };
+
+        // A BT.709 file: named as such, and its picture arrives as it is
+        // (the encoded colour through the BT.709 matrix, nothing else).
+        let (named, meta, plain) = colour_of("bt709");
+        assert_eq!(named, limited(ColorPrimaries::Bt709));
+        assert_eq!(meta.color(), frames);
+        assert!(near(plain, [56, 152, 195]), "{plain:?}");
+
+        // The two BT.601: the same bytes and the same matrix, named apart,
+        // and both frames say BT.709. That they say so rightly shows in the
+        // red: mpv converted the primaries, each kind its own way. Were the
+        // picture left as the file has it, both would be the same.
+        let (named, meta, ntsc) = colour_of("ntsc");
+        assert_eq!(named, limited(ColorPrimaries::Bt601Ntsc));
+        assert_eq!(meta.color(), frames);
+        let (named, meta, pal) = colour_of("pal");
+        assert_eq!(named, limited(ColorPrimaries::Bt601Pal));
+        assert_eq!(meta.color(), frames);
+        assert!(
+            ntsc[0] > pal[0].saturating_add(10),
+            "this libmpv did not convert the primaries (built without zimg?): \
+             the frames would not be BT.709. ntsc {ntsc:?}, pal {pal:?}"
+        );
+
+        // Tags Takt has no type for: unknown, not the nearest name.
+        let (named, meta, _) = colour_of("odd");
+        assert_eq!(named.primaries, ColorPrimaries::Unknown);
+        assert_eq!(named.transfer, TransferFunction::Unknown);
+        assert_eq!(meta.color(), frames);
+    }
+
+    #[test]
+    fn hdr_is_cut_off_at_white_not_tone_mapped() {
+        let (_, _, plain) = colour_of("bt709");
+        for (name, transfer) in [
+            ("hdr10", TransferFunction::Pq),
+            ("hlg", TransferFunction::Hlg),
+        ] {
+            let (named, meta, pixel) = colour_of(name);
+            assert_eq!(named.primaries, ColorPrimaries::Bt2020, "{name}");
+            assert_eq!(named.transfer, transfer, "{name}");
+            assert!(named.is_hdr());
+            // The frame is SDR, and says so.
+            assert!(!meta.is_hdr());
+            assert_eq!(meta.primaries, ColorPrimaries::Bt709);
+            // Green and blue of the file are mid greys of the HDR curve,
+            // brighter than SDR white: a tone mapper would bring them below
+            // white, this path cuts them off at it.
+            assert!(plain[1] < 200 && plain[2] < 200, "{plain:?}");
+            assert!(pixel[1] >= 250 && pixel[2] >= 250, "{name}: {pixel:?}");
+        }
     }
 
     #[test]

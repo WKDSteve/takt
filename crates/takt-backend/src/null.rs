@@ -176,6 +176,8 @@ impl VideoBackend for NullBackend {
             duration: Some(self.duration),
             frame_rate: Some(self.frame_rate),
             video: Some(self.meta),
+            // Gerechnet, nichts umgerechnet: Quelle und Frames sind gleich.
+            source_color: Some(self.meta.color()),
             sample_rate: Some(48_000),
             seekable: true,
         })
@@ -298,6 +300,14 @@ mod tests {
         // Frame 24000 liegt bei exakt 1001 Sekunden.
         let pts = b.pts_of(24_000).unwrap();
         assert_eq!(pts.rescale(Rational::MILLIS).unwrap().ticks(), 1_001_000);
+    }
+
+    #[test]
+    fn die_quelle_nennt_dieselbe_farbe_wie_ihre_frames() {
+        let mut b = backend(Pattern::Flat);
+        let info = b.open("test").unwrap();
+        assert_eq!(info.source_color, Some(meta().color()));
+        assert_eq!(info.source_color, info.video.map(|video| video.color()));
     }
 
     #[test]

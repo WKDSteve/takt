@@ -90,6 +90,8 @@ struct File {
     duration_millis: i64,
     /// Size of the picture, for the diagnostics.
     size: Option<(u32, u32)>,
+    /// What the file says about its colour, for the diagnostics.
+    color: Option<takt_core::ColorDescription>,
 }
 
 enum Kind {
@@ -204,6 +206,7 @@ impl Session {
                     file.source.begin_open(&name).map_err(|e| e.to_string())?;
                     file.duration_millis = 0;
                     file.size = None;
+                    file.color = None;
                     self.pending = Some(Pending::Same);
                 }
                 // The backend that is opening already takes the new file: it
@@ -262,6 +265,7 @@ impl Session {
                     Some(Ok(info)) => {
                         file.duration_millis = duration_millis(&info);
                         file.size = info.video.map(|v| (v.width, v.height));
+                        file.color = info.source_color;
                         Ok(())
                     }
                     Some(Err(e)) => Err(e.to_string()),
@@ -276,6 +280,7 @@ impl Session {
                             clock: source.clock(),
                             duration_millis: duration_millis(&info),
                             size: info.video.map(|v| (v.width, v.height)),
+                            color: info.source_color,
                             source: *source,
                         }));
                         Ok(())
@@ -590,6 +595,10 @@ impl Session {
                         .quantile_micros(num, den)
                         .map_or("-".to_owned(), |us| format!("<{us} us"))
                 };
+                let size = match file.color {
+                    Some(color) => format!("{size}, {}", color_note(color)),
+                    None => size,
+                };
                 format!(
                     "{}, {size}, lead {} us, render p50 {} p99 {}",
                     file.source.name(),
@@ -628,6 +637,37 @@ impl Session {
         };
         (self.stats().queued, size)
     }
+}
+
+/// What the file says about its colour, and what that means on this
+/// path, for the diagnostics: mpv converts every picture to BT.709, and it
+/// does not tone-map, so HDR is cut off at white.
+#[cfg(takt_libmpv)]
+fn color_note(color: takt_core::ColorDescription) -> String {
+    use takt_core::{ColorPrimaries, TransferFunction};
+    let primaries = match color.primaries {
+        ColorPrimaries::Bt709 => "bt.709",
+        ColorPrimaries::Bt601Ntsc => "bt.601-525",
+        ColorPrimaries::Bt601Pal => "bt.601-625",
+        ColorPrimaries::Bt2020 => "bt.2020",
+        ColorPrimaries::DciP3 => "dci-p3",
+        ColorPrimaries::DisplayP3 => "display-p3",
+        _ => "unknown primaries",
+    };
+    let transfer = match color.transfer {
+        TransferFunction::Bt709 => "bt.1886",
+        TransferFunction::Srgb => "srgb",
+        TransferFunction::Pq => "pq",
+        TransferFunction::Hlg => "hlg",
+        TransferFunction::Linear => "linear",
+        _ => "unknown transfer",
+    };
+    let shown = if color.is_hdr() {
+        "shown as bt.709, hdr cut off at white"
+    } else {
+        "shown as bt.709"
+    };
+    format!("file {primaries}/{transfer}, {shown}")
 }
 
 #[cfg(takt_libmpv)]
@@ -739,6 +779,13 @@ mod tests {
         assert!(session.device_stats().is_none(), "mpv has the device");
         assert!(session.master().is_paused(), "the pause went along");
         assert!(session.source_line().contains("160x90 rgb0"));
+        assert!(
+            session
+                .source_line()
+                .contains("file bt.709/bt.1886, shown as bt.709, lead"),
+            "{}",
+            session.source_line()
+        );
 
         // Frames come on the new clock.
         session.set_paused(false);

@@ -24,7 +24,7 @@
 mod null;
 mod scheduler;
 
-use takt_core::{FrameMeta, Rational, Timestamp};
+use takt_core::{ColorDescription, FrameMeta, Rational, Timestamp};
 
 pub use null::{NullBackend, Pattern};
 pub use scheduler::{Presentation, Scheduler, SchedulerStats};
@@ -36,8 +36,14 @@ pub struct MediaInfo {
     pub duration: Option<Timestamp>,
     /// Nominelle Bildwiederholrate, falls bekannt.
     pub frame_rate: Option<Rational>,
-    /// Geometrie und Farbraum des ersten Videostroms.
+    /// Geometrie und Farbraum der Frames, die das Backend herausgibt.
     pub video: Option<FrameMeta>,
+    /// Was die Quelle ueber die Farbe ihres Bildes sagt, bevor das Backend
+    /// etwas umgerechnet hat. Gleich der Farbe der Frames
+    /// ([`FrameMeta::color`]) bei einem Backend, das nicht umrechnet;
+    /// verschieden, wenn es das Bild selbst in einen anderen Farbraum
+    /// bringt. `None` ohne Bild oder solange die Quelle nichts nennt.
+    pub source_color: Option<ColorDescription>,
     /// Abtastrate des ersten Audiostroms.
     pub sample_rate: Option<u32>,
     /// Ob die Quelle Positionierung erlaubt. Netzwerk-Streams oft nicht.
@@ -141,6 +147,7 @@ mod tests {
                 range: ColorRange::Limited,
                 pts: Timestamp::from_millis(0),
             }),
+            source_color: None,
             sample_rate: Some(48_000),
             seekable: true,
         }
