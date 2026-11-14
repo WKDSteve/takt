@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! mpv as the source of pictures, measured without a window: the spike for
-//! `MpvBackend` (`docs/reviews/phase-0.md`, "Spike: mpv über den
-//! Software-Renderer").
+//! libmpv in the player: [`MpvBackend`] behind the `VideoBackend` trait
+//! ([`backend`]), the C interface under it (`ffi`), and the measuring run
+//! without a window ([`measure`]) that the A/B protocol of
+//! `docs/reviews/phase-0.md` is made with.
 //!
-//! libmpv decodes, keeps its own clock and decides when a frame is due; the
-//! player asks once per pass of a simulated display whether a frame waits
-//! and renders it into memory (`rgb0`). The run answers what that way costs
-//! per frame and how far the frame is from the audio position of mpv when
-//! the player gets it. Sound goes to `ao=null`: timed, silent.
+//! The measuring run drives the backend exactly as the window does: one call
+//! of `next_frame` per pass of a simulated display, the error of a frame read
+//! from the clock of the backend. Sound is silent (`ao=null`) unless
+//! `TAKT_AUDIO_DEVICE` names a device.
 //!
 //! Only built when `build.rs` found libmpv (`TAKT_LIBMPV_DIR`,
 //! `docs/BUILD.md`).
@@ -17,38 +17,22 @@
 // fed back into a clock.
 #![allow(clippy::cast_precision_loss)]
 
+pub mod backend;
 mod ffi;
 
-use std::ffi::{CStr, CString};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ffi::{Event, Mpv, Surface};
-use takt_audio::DurationHistogram;
+use takt_backend::VideoBackend;
+use takt_clock::{Clock, SystemMonotonic};
 use takt_core::Rational;
+
+pub use backend::{Config, Early, MpvBackend, Sound, Sources, Track};
 
 /// How long mpv gets to settle before errors count: it starts a file with
 /// the picture some 30 ms ahead of the sound and closes the gap over the
 /// first frames (measured: about 20 frames at 23.976 fps).
 const SETTLE: Duration = Duration::from_secs(1);
-/// How long the file may take to open.
-const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The options of the core. No configuration, scripts or network helper of
-/// the user; no window (`vo=libmpv` is the render API) and no sound device.
-const OPTIONS: [(&CStr, &CStr); 8] = [
-    (c"config", c"no"),
-    (c"load-scripts", c"no"),
-    (c"ytdl", c"no"),
-    (c"vo", c"libmpv"),
-    (c"ao", c"null"),
-    (c"hwdec", c"no"),
-    (c"audio-display", c"no"),
-    (c"keep-open", c"no"),
-];
-
-/// The longest `--mpv-early`: a tenth of a second.
-pub const MAX_EARLY_MICROS: u32 = 100_000;
-
 /// What a run measured.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -58,21 +42,22 @@ pub struct Report {
     pub milli_fps: Option<i64>,
     /// Passes of the simulated display.
     pub passes: u64,
+    /// Where the sound went.
+    pub sound: String,
+    /// The lead mpv handed frames out with, in microseconds.
+    pub early_micros: u32,
     /// Passes with a new frame, rendered.
     pub shown: u64,
     /// Passes without a new frame.
     pub repeated: u64,
-    /// `audio-pts - time-pos` at each frame rendered after the first second,
-    /// in microseconds: positive when the frame is behind the sound.
+    /// The clock of the backend (the sound position of mpv) minus the
+    /// timestamp of each frame handed out after the first second, in
+    /// microseconds: positive when the frame is behind the sound.
     pub errors_micros: Vec<i64>,
     /// What rendering one frame into memory took, `None` before the run.
     pub render: Option<takt_audio::DurationSnapshot>,
-    /// `frame-drop-count`: frames mpv dropped at the output.
-    pub dropped: Option<i64>,
-    /// `decoder-frame-drop-count`.
-    pub decoder_dropped: Option<i64>,
-    /// `vo-delayed-frame-count`.
-    pub delayed: Option<i64>,
+    /// Frames mpv dropped, at the output and in the decoder.
+    pub dropped: u64,
     /// Wall time of the run.
     pub elapsed: Duration,
 }
@@ -131,23 +116,16 @@ fn micros(seconds: f64) -> Option<i64> {
     (micros.is_finite() && micros.abs() < 1e15).then(|| micros.round() as i64)
 }
 
-/// A side of the picture from a property of mpv, 1920x1080 without one.
-fn side(value: Option<i64>, fallback: u32) -> u32 {
-    value
-        .and_then(|v| u32::try_from(v).ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(fallback)
-}
-
 /// Plays `source` for at most `seconds` and measures it: one pass per period
 /// of a display with `hz` refreshes, on a fixed grid.
 ///
-/// mpv hands a frame out `early_micros` before its time
-/// (`video-timing-offset`) and never holds it back for the player, which
-/// renders when its pass comes. With 0 a frame is due at its timestamp and
-/// waits for the next pass, half a period on average; with half a period it
-/// goes to the pass nearest its time, the rule of `NullBackend`
-/// (`VideoBackend::set_display_period`).
+/// `early_micros` is how long before its time mpv hands a frame out
+/// (`video-timing-offset`); `None` leaves it to the backend, which takes
+/// half the display period. mpv never holds a frame back for the player,
+/// which takes it when its pass comes. With 0 a frame is due at its
+/// timestamp and waits for the next pass, half a period on average; with
+/// half a period it goes to the pass nearest its time, the rule of
+/// `NullBackend` (`VideoBackend::set_display_period`).
 ///
 /// # Errors
 ///
@@ -157,81 +135,54 @@ pub fn measure(
     source: &str,
     hz: Rational,
     seconds: i64,
-    early_micros: u32,
+    early_micros: Option<u32>,
 ) -> Result<Report, String> {
-    let early = early_micros.min(MAX_EARLY_MICROS);
-    // Seconds with six decimals, from whole numbers: no float is formatted.
-    let early = CString::new(format!("{}.{:06}", early / 1_000_000, early % 1_000_000))
-        .map_err(|e| e.to_string())?;
-    let mut options = OPTIONS.to_vec();
-    options.push((c"video-timing-offset", &early));
-    let mut mpv = Mpv::new(&options).map_err(|e| format!("libmpv: {e}"))?;
-    mpv.load(source).map_err(|e| format!("libmpv: {e}"))?;
-
-    let opened = Instant::now();
-    loop {
-        match mpv.poll() {
-            Event::FileLoaded => break,
-            Event::EndFile { .. } | Event::Shutdown => {
-                return Err(format!("mpv cannot open {source}"));
-            }
-            Event::None => {
-                if opened.elapsed() > OPEN_TIMEOUT {
-                    return Err(format!("mpv did not open {source} within {OPEN_TIMEOUT:?}"));
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Event::Other => {}
-        }
-    }
-
-    let size = (
-        side(mpv.int(c"width"), 1920),
-        side(mpv.int(c"height"), 1080),
-    );
-    let mut surface = Surface::new(size.0, size.1)
-        .ok_or_else(|| format!("a picture of {}x{} is beyond 8K", size.0, size.1))?;
-    let mut report = Report {
-        size,
-        // Frames per second as frames per 1000 s: the same rounding as for
-        // seconds to microseconds, then a thousandth of it.
-        milli_fps: mpv
-            .double(c"container-fps")
-            .and_then(micros)
-            .map(|micro_fps| micro_fps / 1_000),
-        ..Report::default()
+    let config = Config {
+        // The caller wrote the source: test patterns of lavfi are welcome.
+        sources: Sources::Any,
+        // A measuring run is silent unless a device is named.
+        sound: Sound::from_env(Sound::Silent),
+        early: early_micros.map_or(Early::HalfDisplayPeriod, Early::Fixed),
     };
+    let mut backend = MpvBackend::new(config, Arc::new(SystemMonotonic::new()))
+        .map_err(|e| format!("libmpv: {e}"))?;
+    let info = backend.open(source).map_err(|e| format!("{source}: {e}"))?;
+    let video = info
+        .video
+        .ok_or_else(|| format!("{source}: no picture to measure"))?;
 
     let period_nanos = 1_000_000_000_i128 * i128::from(hz.den()) / i128::from(hz.num().max(1));
     let period_nanos = u64::try_from(period_nanos).unwrap_or(u64::MAX);
+    backend.set_display_period(i64::try_from(period_nanos).ok());
+    let mut report = Report {
+        size: (video.width, video.height),
+        milli_fps: info.frame_rate.and_then(|rate| {
+            let milli = i128::from(rate.num()) * 1_000 / i128::from(rate.den().max(1));
+            i64::try_from(milli).ok()
+        }),
+        sound: backend.sound_line().to_owned(),
+        early_micros: backend.early_micros(),
+        ..Report::default()
+    };
+
+    let clock = backend.clock();
     let length = Duration::from_secs(u64::try_from(seconds).unwrap_or(0));
-    let render = DurationHistogram::default();
     let started = Instant::now();
-    'passes: while started.elapsed() < length {
-        loop {
-            match mpv.poll() {
-                Event::None => break,
-                Event::EndFile { .. } | Event::Shutdown => break 'passes,
-                Event::FileLoaded | Event::Other => {}
+    while started.elapsed() < length {
+        let frame = backend
+            .next_frame(clock.as_ref())
+            .map_err(|e| format!("libmpv: {e}"))?;
+        match frame {
+            Some(frame) => {
+                report.shown += 1;
+                // Positive: the frame comes after its time on the clock.
+                let error = -clock.until_nanos(frame.get().meta().pts) / 1_000;
+                if started.elapsed() >= SETTLE {
+                    report.errors_micros.push(error);
+                }
             }
-        }
-        if mpv.frame_ready() {
-            let before = Instant::now();
-            mpv.render(&mut surface)
-                .map_err(|e| format!("libmpv: {e}"))?;
-            render.record(u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX));
-            report.shown += 1;
-            let error = mpv
-                .double(c"audio-pts")
-                .zip(mpv.double(c"time-pos"))
-                .and_then(|(audio, video)| micros(audio - video));
-            if let Some(error) = error
-                && started.elapsed() >= SETTLE
-            {
-                report.errors_micros.push(error);
-            }
-        } else {
-            report.repeated += 1;
+            None if backend.is_eof() => break,
+            None => report.repeated += 1,
         }
         report.passes += 1;
         std::thread::sleep(crate::headless::until_next_refresh(
@@ -240,21 +191,15 @@ pub fn measure(
         ));
     }
     report.elapsed = started.elapsed();
-    report.render = Some(render.snapshot());
-    report.dropped = mpv.int(c"frame-drop-count");
-    report.decoder_dropped = mpv.int(c"decoder-frame-drop-count");
-    report.delayed = mpv.int(c"vo-delayed-frame-count");
-    // The picture is not shown anywhere; one byte says it was written at all.
-    if report.shown > 0 && surface.pixels().iter().all(|&b| b == 0) {
-        return Err("mpv rendered only black: no picture reached the surface".to_owned());
-    }
+    report.render = Some(backend.render_times());
+    report.dropped = backend.refresh_stats().dropped;
     Ok(report)
 }
 
 /// Prints the report of [`measure`] and its `takt-ab` line.
-pub fn print(source: &str, hz: Rational, seconds: i64, early_micros: u32, report: &Report) {
+pub fn print(source: &str, hz: Rational, seconds: i64, report: &Report) {
+    let early_micros = report.early_micros;
     let number = |n: Option<u64>| n.map_or("-".to_owned(), |n| n.to_string());
-    let count = |n: Option<i64>| n.map_or("-".to_owned(), |n| n.to_string());
     let fps = report.milli_fps.map_or("-".to_owned(), |milli| {
         format!("{}.{:03}", milli / 1_000, milli % 1_000)
     });
@@ -265,20 +210,15 @@ pub fn print(source: &str, hz: Rational, seconds: i64, early_micros: u32, report
     println!("  Geometrie    {}x{} rgb0", report.size.0, report.size.1);
     println!("  Rate         {fps} fps");
     println!("  Anzeige      {hz} Hz simuliert");
-    println!("  Audio        ao=null (mpv, stumm)");
+    println!("  Audio        {}", report.sound);
     println!("  Vorlauf      {early_micros} us (video-timing-offset)");
     println!();
     println!("Messwerte");
     println!("  dargestellt     {}", report.shown);
     println!("  wiederholt      {}", report.repeated);
+    println!("  verworfen       {}", report.dropped);
     println!(
-        "  verworfen       {} (Decoder {}), verspaetet {}",
-        count(report.dropped),
-        count(report.decoder_dropped),
-        count(report.delayed)
-    );
-    println!(
-        "  Fehler Mittel   {} us (audio-pts - time-pos)",
+        "  Fehler Mittel   {} us (Uhr von mpv - Zeitstempel des Frames)",
         number(report.mean_abs_micros())
     );
     println!(
@@ -295,16 +235,20 @@ pub fn print(source: &str, hz: Rational, seconds: i64, early_micros: u32, report
     println!();
     println!(
         "takt-ab backend=mpv-sw fps={fps} hz={hz} seconds={seconds} elapsed_ms={} passes={} shown={} \
-         repeated={} dropped={} mean_us={} p99_us={} late_us={late} early_us={early} audio=mpv-null \
-         xruns=- delayed={} render_p50_us={} render_p99_us={} render_max_us={} offset_us={early_micros}",
+         repeated={} dropped={} mean_us={} p99_us={} late_us={late} early_us={early} audio={} \
+         xruns=- render_p50_us={} render_p99_us={} render_max_us={} offset_us={early_micros}",
         report.elapsed.as_millis(),
         report.passes,
         report.shown,
         report.repeated,
-        count(report.dropped),
+        report.dropped,
         number(report.mean_abs_micros()),
         number(report.quantile_abs_micros(99, 100)),
-        count(report.delayed),
+        if report.sound.contains("silent") {
+            "mpv-null"
+        } else {
+            "mpv-device"
+        },
         quantile(1, 2),
         quantile(99, 100),
         report.render_max_nanos() / 1_000,
@@ -343,19 +287,32 @@ mod tests {
     #[test]
     fn a_test_pattern_is_rendered_into_memory() {
         let source = "av://lavfi:testsrc2=size=320x240:rate=25";
-        let report = measure(source, Rational::lit(60, 1), 2, 8_333).unwrap();
+        let report = measure(source, Rational::lit(60, 1), 2, None).unwrap();
         assert_eq!(report.size, (320, 240));
+        assert_eq!(report.early_micros, 8_333, "half a period of 60 Hz");
+        assert!(report.sound.starts_with("mpv: silent"), "{}", report.sound);
         assert_eq!(report.milli_fps, Some(25_000));
         // 25 frames a second for two seconds; the start may cost a few.
         // A loaded machine shows fewer; none at all would be the fault.
         assert!((10..=51).contains(&report.shown), "{report:?}");
         assert_eq!(report.passes, report.shown + report.repeated);
-        assert_eq!(report.render.map(|r| r.total()), Some(report.shown));
+        assert_eq!(
+            report
+                .render
+                .as_ref()
+                .map(takt_audio::DurationSnapshot::total),
+            Some(report.shown)
+        );
+        // The frames go to the pass nearest their time: within a period.
+        assert!(
+            report.mean_abs_micros().is_some_and(|mean| mean < 16_667),
+            "{report:?}"
+        );
     }
 
     #[test]
     fn a_source_that_does_not_exist_is_an_error() {
-        let error = measure("takt-no-such-file.mkv", Rational::lit(60, 1), 1, 0).unwrap_err();
+        let error = measure("takt-no-such-file.mkv", Rational::lit(60, 1), 1, Some(0)).unwrap_err();
         assert!(error.contains("cannot open"), "{error}");
     }
 }

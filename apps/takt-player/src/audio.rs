@@ -116,7 +116,20 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
             Err(e) => e.to_string(),
         }
     };
+    simulated_with(source, reason, stop)
+}
 
+/// A clock with a simulated callback thread and no device at all, whatever
+/// the environment says: for tests, which must never open an output device.
+pub fn simulated(source: &Arc<SystemMonotonic>, reason: &str) -> (AudioMasterClock, AudioPath) {
+    simulated_with(source, reason.to_owned(), Arc::new(AtomicBool::new(false)))
+}
+
+fn simulated_with(
+    source: &Arc<SystemMonotonic>,
+    reason: String,
+    stop: Arc<AtomicBool>,
+) -> (AudioMasterClock, AudioPath) {
     let clock = new_clock(source);
     let writer = clock.writer().expect("the writer of a new clock is free");
     let thread = {

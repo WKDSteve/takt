@@ -71,6 +71,9 @@ pub struct ProcessLoad {
 /// Everything the overlay shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
+    /// What plays, in one line: the backend, the picture, and for mpv the
+    /// lead and the cost of rendering.
+    pub source: String,
     /// The presentation counters of the scheduler.
     pub scheduler: SchedulerStats,
     /// Frames the source dropped as late.
@@ -126,6 +129,7 @@ impl Snapshot {
     pub fn lines(&self) -> Vec<(&'static str, String)> {
         let s = &self.scheduler;
         let mut lines = vec![
+            ("source", self.source.clone()),
             (
                 "presented",
                 format!(
@@ -427,6 +431,7 @@ mod tests {
         scheduler.histogram[10] = 3;
         scheduler.histogram[11] = 1;
         Snapshot {
+            source: "mpv-sw, 1920x1080 rgb0, lead 4166 us".to_owned(),
             scheduler,
             dropped: 2,
             pool: (1, 6),
@@ -457,6 +462,7 @@ mod tests {
     fn the_report_names_every_counter() {
         let text = snapshot().report("takt diagnostics");
         for expected in [
+            "source      mpv-sw, 1920x1080 rgb0, lead 4166 us",
             "4 shown, 4 repeated (50.0 %), 2 dropped",
             "mean 2.000 ms",
             "30.000 ms (limit 20.000 ms)  STALE",

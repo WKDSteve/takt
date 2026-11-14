@@ -11,6 +11,8 @@ Erzeugt aus `BINDINGS` in `apps/takt-player/src/app.rs`; der Test `docs_keys_md_
 | `9` | quieter (5 %) |
 | `0` | louder (5 %) |
 | `m` | mute / unmute |
+| `j` | next subtitle track of the file (then none) |
+| `#` | next sound track of the file |
 | `>` | next entry of the playlist |
 | `<` | entry before in the playlist |
 | `F8` | show / hide the playlist |

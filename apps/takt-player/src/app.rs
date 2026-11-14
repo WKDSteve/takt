@@ -34,6 +34,10 @@ pub enum Command {
     TogglePlaylist,
     /// Show or hide the list of keys.
     ToggleHelp,
+    /// The next subtitle track of the file (after the last: none).
+    CycleSubtitles,
+    /// The next sound track of the file.
+    CycleAudio,
 }
 
 /// How far the volume keys move the volume.
@@ -73,11 +77,15 @@ pub enum Key {
     F8,
     /// `?`, the list of keys.
     Question,
+    /// `j`, the next subtitle track (as in mpv).
+    J,
+    /// `#`, the next sound track (as in mpv).
+    Hash,
 }
 
 /// Every key with its label and what it does: the one table the help overlay
 /// and `docs/KEYS.md` are made from (a test holds the file to it).
-pub const BINDINGS: [(Key, &str, &str); 14] = [
+pub const BINDINGS: [(Key, &str, &str); 16] = [
     (Key::Space, "Space", "play / pause"),
     (Key::Left, "Left", "jump back 5 s"),
     (Key::Right, "Right", "jump forward 5 s"),
@@ -85,6 +93,8 @@ pub const BINDINGS: [(Key, &str, &str); 14] = [
     (Key::Nine, "9", "quieter (5 %)"),
     (Key::Zero, "0", "louder (5 %)"),
     (Key::M, "m", "mute / unmute"),
+    (Key::J, "j", "next subtitle track of the file (then none)"),
+    (Key::Hash, "#", "next sound track of the file"),
     (Key::Greater, ">", "next entry of the playlist"),
     (Key::Less, "<", "entry before in the playlist"),
     (Key::F8, "F8", "show / hide the playlist"),
@@ -143,6 +153,8 @@ pub fn command_for(key: Key) -> Command {
         Key::Less => Command::Previous,
         Key::F8 => Command::TogglePlaylist,
         Key::Question => Command::ToggleHelp,
+        Key::J => Command::CycleSubtitles,
+        Key::Hash => Command::CycleAudio,
     }
 }
 
@@ -272,6 +284,8 @@ impl PlayerState {
             | Command::SeekTo(_)
             | Command::Next
             | Command::Previous
+            | Command::CycleSubtitles
+            | Command::CycleAudio
             | Command::SaveDiagnostics => false,
         }
     }
@@ -353,7 +367,9 @@ mod tests {
             | Key::Greater
             | Key::Less
             | Key::F8
-            | Key::Question => (),
+            | Key::Question
+            | Key::J
+            | Key::Hash => (),
         };
         for (key, _, _) in BINDINGS {
             all(key);
@@ -363,7 +379,7 @@ mod tests {
                 "{key:?}"
             );
         }
-        assert_eq!(BINDINGS.len(), 14, "every variant of Key, once");
+        assert_eq!(BINDINGS.len(), 16, "every variant of Key, once");
     }
 
     #[test]
@@ -375,6 +391,17 @@ mod tests {
         state.apply(command_for(Key::Question));
         assert!(state.playlist() && state.help());
         assert!(!state.apply(Command::Next) && state.playing());
+    }
+
+    #[test]
+    fn the_track_keys_are_those_of_mpv_and_change_no_state() {
+        assert_eq!(command_for(Key::J), Command::CycleSubtitles);
+        assert_eq!(command_for(Key::Hash), Command::CycleAudio);
+        let mut state = PlayerState::default();
+        let before = state.clone();
+        assert!(!state.apply(Command::CycleSubtitles));
+        assert!(!state.apply(Command::CycleAudio));
+        assert_eq!(state, before);
     }
 
     #[test]

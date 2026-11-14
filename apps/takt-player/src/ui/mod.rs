@@ -2,8 +2,10 @@
 //! The window: egui through eframe, rendered with wgpu. A bar with play and
 //! pause, the position and the volume, above it the video surface.
 //!
-//! The source is the moving test picture of [`NullBackend`] (NV12, BT.709,
-//! limited range), drawn through the colour path of [`render`].
+//! What plays is a [`Session`]: at start the moving test picture of
+//! `NullBackend` (NV12, BT.709, limited range), and a file through the
+//! `MpvBackend` (`rgb0`) once one is dropped on the window, in a build that
+//! links libmpv. Both are drawn by [`render`], each on its own texture path.
 //!
 //! # The render loop
 //!
@@ -11,10 +13,10 @@
 //! sleep anywhere). Each call asks the source for the frame that is due on the
 //! clock and gives the answer to the [`Scheduler`], exactly as the headless
 //! loop does, so the measurements of both can be compared. While paused,
-//! nothing is asked and nothing counted. The clock is the audio master clock
-//! wrapped in a [`SeekableClock`]: a jump moves the media position, resets
-//! source and scheduler (their numbers are about the old position), and the
-//! device plays on.
+//! the source is still asked (a jump shows its picture) but nothing is
+//! counted. The clock is the one of the session, an audio master clock in
+//! both cases; a jump moves the media position and resets the scheduler (its
+//! numbers are about the old position).
 //!
 //! F3 shows the diagnostic overlay ([`crate::diagnostics`]): presentation
 //! counters with the histogram of the errors, anchor age, pool, audio
@@ -25,35 +27,31 @@
 //! Files and folders dropped on the window become the playlist (Shift
 //! appends); `>` and `<` go to the next and the entry before, the end of an
 //! entry goes on to the next, F8 shows the playlist (select, remove,
-//! shuffle) and `?` the keys of [`crate::app::BINDINGS`]. Until the
-//! MpvBackend comes, an entry plays as the test picture of the NullBackend:
-//! the list, the keys and the drop work, the file itself is not read.
+//! shuffle) and `?` the keys of [`crate::app::BINDINGS`]. An entry plays
+//! through mpv; `j` and `#` step through its subtitle and sound tracks. In a
+//! build without libmpv an entry plays as the test picture: the list, the
+//! keys and the drop work, the file itself is not read. An empty playlist
+//! shows the test picture again.
 //!
 //! The source learns the display period ([`RefreshMeter`], the median of the
 //! passes), so a frame is due at the refresh nearest its timestamp.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use std::time::{Duration, Instant};
 
-use takt_backend::{NullBackend, Pattern, Presentation, Scheduler, SeekMode, VideoBackend};
-use takt_clock::{AudioMasterClock, Clock, SeekableClock, SystemMonotonic};
-use takt_core::{
-    ColorPrimaries, ColorRange, FrameMeta, PixelFormat, Rational, Timestamp, TransferFunction,
-};
+use takt_backend::{Presentation, Scheduler};
+use takt_clock::SystemMonotonic;
+use takt_core::{Rational, Timestamp};
 
 use crate::app::{BINDINGS, Command, Key, MOUSE, PlayerState, command_for, seek_target};
-use crate::audio::{self, AudioPath};
 use crate::diagnostics::{self, AudioCounters, ProcessMeter, Snapshot};
 use crate::playlist::{self, Playlist};
 use crate::refresh::RefreshMeter;
 use crate::render::{self, Picture, Shown};
+use crate::session::{Session, TrackKind};
 
-/// Length of the test source.
-const SOURCE_MILLIS: i64 = 3_600_000;
-/// Frames of the pool of the test source.
-const POOL_FRAMES: usize = 6;
 /// What the overlay read last: when, its lines and the error classes.
 type ShownDiagnostics = (Instant, Vec<diagnostics::Line>, [u32; 16]);
 
@@ -63,41 +61,17 @@ const OVERLAY_LINES_PER_PASS: usize = 1;
 /// How often the overlay reads the counters again.
 const OVERLAY_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The test source: the moving block of `NullBackend`, 1920x1080 NV12 at the
-/// NTSC rate, one hour long.
-fn test_source() -> NullBackend {
-    let meta = FrameMeta {
-        width: 1920,
-        height: 1080,
-        format: PixelFormat::Nv12,
-        primaries: ColorPrimaries::Bt709,
-        transfer: TransferFunction::Bt709,
-        range: ColorRange::Limited,
-        pts: Timestamp::from_millis(0),
-    };
-    let mut backend = NullBackend::new(
-        meta,
-        Rational::lit(24_000, 1_001),
-        Timestamp::from_millis(SOURCE_MILLIS),
-        Pattern::Motion,
-        POOL_FRAMES,
-    );
-    // NullBackend opens any name.
-    let _ = backend.open("null://motion");
-    backend
-}
-
 /// The player in its window.
 struct PlayerApp {
     state: PlayerState,
-    clock: SeekableClock<AudioMasterClock>,
+    /// What plays, with the one clock it plays on.
+    session: Session,
     scheduler: Scheduler,
     /// `--seconds N`: close after N seconds (a measuring run).
     close_at: Option<Instant>,
-    // Kept for its life; dropping it stops the sound.
-    _audio: AudioPath,
-    audio_line: String,
-    source: NullBackend,
+    /// The track chosen last, or why a file does not play: one line in the
+    /// bar. Foreign text (names of tracks and files), shown as it is.
+    notice: Option<String>,
     shown: Option<Shown>,
     refresh: RefreshMeter,
     started: Instant,
@@ -125,26 +99,27 @@ struct PlayerApp {
 }
 
 impl PlayerApp {
-    fn new(cc: &eframe::CreationContext<'_>, seconds: Option<u64>, overlay: bool) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        seconds: Option<u64>,
+        overlay: bool,
+        files: &[PathBuf],
+    ) -> Self {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             render::install(state);
         }
         crate::theme::install(&cc.egui_ctx);
-        let time = Arc::new(SystemMonotonic::new());
-        let (clock, audio) = audio::start(&time);
-        let audio_line = audio.describe();
+        let session = Session::test(Arc::new(SystemMonotonic::new()));
         let mut state = PlayerState::default();
         if overlay {
             state.apply(Command::ToggleOverlay);
         }
-        Self {
+        let mut app = Self {
             state,
-            clock: SeekableClock::new(clock),
+            session,
             scheduler: Scheduler::new(),
             close_at: seconds.map(|s| Instant::now() + Duration::from_secs(s)),
-            _audio: audio,
-            audio_line,
-            source: test_source(),
+            notice: None,
             shown: None,
             refresh: RefreshMeter::default(),
             started: Instant::now(),
@@ -159,7 +134,9 @@ impl PlayerApp {
             scrub: None,
             playlist: Playlist::default(),
             drop_problems: Vec::new(),
-        }
+        };
+        app.take_paths(files, false);
+        app
     }
 
     /// One pass of the render loop: the frame that is due now, judged by the
@@ -167,33 +144,40 @@ impl PlayerApp {
     fn take_due_frame(&mut self) {
         let elapsed = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.refresh.pass(elapsed);
-        self.source.set_display_period(self.refresh.period_nanos());
-        if !self.state.playing() {
-            return;
-        }
-        let frame = match self.source.next_frame(&self.clock) {
+        self.session.set_display_period(self.refresh.period_nanos());
+        let frame = match self.session.next_frame() {
             Ok(frame) => frame,
             Err(e) => {
                 eprintln!("takt-player: source: {e}");
                 return;
             }
         };
-        let eof = self.source.is_eof();
-        if eof && frame.is_none() {
-            // The end of an entry: on to the next one, if there is one.
-            if let Some(next) = self.playlist.next().map(Path::to_path_buf) {
-                self.play(&next);
+        if self.state.playing() {
+            let eof = self.session.is_eof();
+            if eof && frame.is_none() {
+                // The end of an entry: on to the next one, if there is one.
+                if let Some(next) = self.playlist.next().map(Path::to_path_buf) {
+                    self.play(&next);
+                    return;
+                }
+            }
+            if !matches!(
+                self.scheduler
+                    .accept(self.session.clock(), frame.as_ref(), eof),
+                Presentation::Shown { .. }
+            ) {
                 return;
             }
         }
-        if !matches!(
-            self.scheduler.accept(&self.clock, frame.as_ref(), eof),
-            Presentation::Shown { .. }
-        ) {
-            return;
-        }
+        // While paused nothing is counted: a frame that comes all the same
+        // (the picture of a jump) is shown.
         if let Some(frame) = frame {
-            if let Some(target) = self.seek_probe.take() {
+            // The first frame once the source has arrived at the target; one
+            // that was on its way before the jump does not count.
+            if self.seek_probe.is_some()
+                && self.session.seek_settled()
+                && let Some(target) = self.seek_probe.take()
+            {
                 let landed = frame
                     .get()
                     .meta()
@@ -217,12 +201,24 @@ impl PlayerApp {
 
     /// Opens `path` and plays it from the start.
     fn play(&mut self, path: &Path) {
-        let name = path.to_string_lossy();
-        if let Err(e) = self.source.open(&name) {
-            eprintln!("takt-player: cannot open {name}: {e}");
+        if let Err(e) = self.session.open_file(path) {
+            let line = format!("cannot play {}: {e}", Playlist::label(path));
+            eprintln!("takt-player: {line}");
+            self.notice = Some(line);
             return;
         }
-        self.seek_to(0);
+        self.notice = None;
+        self.scheduler.reset();
+        self.seek_probe = None;
+        self.last_seek = None;
+        self.shown = None;
+    }
+
+    /// The playlist is empty: the test picture again.
+    fn stop(&mut self) {
+        self.session.show_test_picture();
+        self.scheduler.reset();
+        self.notice = None;
         self.shown = None;
     }
 
@@ -239,11 +235,17 @@ impl PlayerApp {
                 i.modifiers.shift,
             )
         });
-        if dropped.is_empty() {
+        self.take_paths(&dropped, append);
+    }
+
+    /// Makes `paths` (files, or folders of media files) the playlist, or
+    /// appends them, and plays the entry the playlist starts with.
+    fn take_paths(&mut self, paths: &[PathBuf], append: bool) {
+        if paths.is_empty() {
             return;
         }
         let base = std::env::current_dir().unwrap_or_default();
-        let (entries, problems) = playlist::expand(&dropped, &base);
+        let (entries, problems) = playlist::expand(paths, &base);
         self.drop_problems = problems;
         let start = if append {
             self.playlist.append(entries)
@@ -314,7 +316,7 @@ impl PlayerApp {
         {
             match self.playlist.current_entry().map(Path::to_path_buf) {
                 Some(path) => self.play(&path),
-                None => self.shown = None,
+                None => self.stop(),
             }
         }
         if let Some(path) = play
@@ -358,20 +360,13 @@ impl PlayerApp {
 
     /// Jumps to `millis`: clock, source and scheduler.
     fn seek_to(&mut self, millis: i64) {
-        let to = Timestamp::from_millis(millis);
-        self.clock.seek(to);
-        if let Err(e) = self.source.seek(to, SeekMode::Keyframe) {
-            eprintln!("takt-player: seek: {e}");
-        }
+        self.session.seek_to(millis);
         self.scheduler.reset();
         self.seek_probe = Some(millis);
     }
 
     fn now_millis(&self) -> i64 {
-        self.clock
-            .now()
-            .rescale(Rational::MILLIS)
-            .map_or(0, Timestamp::ticks)
+        self.session.now_millis()
     }
 
     fn run(&mut self, ctx: &egui::Context, command: Command) {
@@ -379,9 +374,24 @@ impl PlayerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         match command {
-            Command::SeekBy(by) => self.seek_to(seek_target(self.now_millis(), by, SOURCE_MILLIS)),
+            Command::SeekBy(by) => {
+                let limit = self.session.seek_limit();
+                self.seek_to(seek_target(self.now_millis(), by, limit));
+            }
             Command::SeekStart => self.seek_to(0),
-            Command::SeekTo(to) => self.seek_to(to.clamp(0, SOURCE_MILLIS)),
+            Command::SeekTo(to) => self.seek_to(to),
+            Command::CycleSubtitles | Command::CycleAudio => {
+                let kind = if command == Command::CycleAudio {
+                    TrackKind::Audio
+                } else {
+                    TrackKind::Subtitle
+                };
+                self.notice = Some(
+                    self.session
+                        .cycle_track(kind)
+                        .unwrap_or_else(|| "the test picture has no tracks".to_owned()),
+                );
+            }
             Command::Next => {
                 if let Some(path) = self.playlist.next().map(Path::to_path_buf) {
                     self.play(&path);
@@ -402,23 +412,25 @@ impl PlayerApp {
             | Command::TogglePlaylist
             | Command::ToggleHelp => {}
         }
-        self.clock.set_paused(!self.state.playing());
-        self._audio.set_volume(self.state.effective_volume());
+        self.session.set_paused(!self.state.playing());
+        self.session.set_volume(self.state.effective_volume());
     }
 
     /// All counters, read now.
     fn snapshot(&mut self) -> Snapshot {
-        let clock = self.clock.inner();
+        let clock = self.session.master();
         Snapshot {
+            source: self.session.source_line(),
             scheduler: self.scheduler.stats().clone(),
-            dropped: self.source.stats().dropped,
-            pool: (self.source.stats().queued, POOL_FRAMES),
+            dropped: self.session.stats().dropped,
+            pool: self.session.pool(),
             anchor_age_nanos: clock.anchor_age_nanos(),
             max_extrapolation_nanos: clock.max_extrapolation_nanos(),
             display_period_nanos: self.refresh.period_nanos(),
-            audio_line: self.audio_line.clone(),
-            audio: self._audio.device_stats().map(|s| AudioCounters::read(&s)),
+            audio_line: self.session.audio_line(),
+            audio: self.session.device_stats().map(|s| AudioCounters::read(&s)),
             seek: self.last_seek,
+            // Only read with the counters of the device, which a file has not.
             sample_rate: clock.sample_rate(),
             process: self.process.load(),
             overlay_cost: diagnostics::overlay_cost(&self.overlay_cost.snapshot()),
@@ -429,7 +441,7 @@ impl PlayerApp {
     fn save_diagnostics(&mut self, ctx: &egui::Context) {
         let text = self.snapshot().report(&format!(
             "takt diagnostics at {}",
-            self.clock.now().format_hms()
+            self.session.clock().now().format_hms()
         ));
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -512,11 +524,12 @@ impl PlayerApp {
             .period_nanos()
             .map_or("-".to_owned(), |p| format!("{:.1} Hz", 1e9 / p as f64));
         format!(
-            "shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms, display {refresh}",
+            "{}: shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms, display {refresh}",
+            self.session.backend_name(),
             s.shown,
             s.repeated,
             s.repeat_ratio(),
-            self.source.stats().dropped
+            self.session.stats().dropped
         )
     }
 }
@@ -545,6 +558,7 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     egui::Key::Num0 => Some(command_for(Key::Zero)),
                     egui::Key::M => Some(command_for(Key::M)),
                     egui::Key::F8 => Some(command_for(Key::F8)),
+                    egui::Key::J => Some(command_for(Key::J)),
                     _ => None,
                 },
                 // Characters that sit on different keys per layout come as text.
@@ -552,6 +566,7 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     "?" => Some(command_for(Key::Question)),
                     ">" => Some(command_for(Key::Greater)),
                     "<" => Some(command_for(Key::Less)),
+                    "#" => Some(command_for(Key::Hash)),
                     _ => None,
                 },
                 _ => None,
@@ -593,11 +608,15 @@ impl eframe::App for PlayerApp {
                 }
                 // The timeline: the jump happens when the drag ends or on a
                 // click, the label follows the drag before that.
-                let mut position = self.scrub.unwrap_or_else(|| self.now_millis());
+                let duration = self.session.duration_millis();
+                let mut position = self
+                    .scrub
+                    .unwrap_or_else(|| self.now_millis())
+                    .clamp(0, duration);
                 ui.spacing_mut().slider_width = 320.0;
                 let timeline = ui
                     .add(
-                        egui::Slider::new(&mut position, 0..=SOURCE_MILLIS)
+                        egui::Slider::new(&mut position, 0..=duration)
                             .show_value(false)
                             .trailing_fill(true),
                     )
@@ -612,7 +631,7 @@ impl eframe::App for PlayerApp {
                 ui.monospace(format!(
                     "{} / {}",
                     Timestamp::from_millis(position).format_hms(),
-                    Timestamp::from_millis(SOURCE_MILLIS).format_hms()
+                    Timestamp::from_millis(duration).format_hms()
                 ));
                 ui.separator();
                 let mute = if self.state.muted() { "Unmute" } else { "Mute" };
@@ -621,19 +640,23 @@ impl eframe::App for PlayerApp {
                 }
                 let mut volume = self.state.volume();
                 ui.spacing_mut().slider_width = 100.0;
-                // The test source plays silence; the volume goes to the device all the same.
+                // The test picture plays silence; the volume goes to the device all the same.
                 if ui
                     .add(egui::Slider::new(&mut volume, 0.0..=1.0).text("Volume"))
                     .on_hover_text("9 quieter, 0 louder")
                     .changed()
                 {
                     self.state.set_volume(volume);
-                    self._audio.set_volume(self.state.effective_volume());
+                    self.session.set_volume(self.state.effective_volume());
+                }
+                if let Some(notice) = &self.notice {
+                    ui.separator();
+                    ui.label(notice);
                 }
                 ui.separator();
                 ui.weak(self.summary());
                 ui.separator();
-                ui.weak(&self.audio_line);
+                ui.weak(self.session.audio_line());
                 if let Some(u) = uploads.filter(|u| u.total() > 0) {
                     ui.separator();
                     let p50 = u.quantile_micros(1, 2).unwrap_or(0);
@@ -680,6 +703,8 @@ impl Drop for PlayerApp {
     /// The measurements of the run, when the window closes.
     fn drop(&mut self) {
         println!("takt-player: {}", self.summary());
+        println!("takt-player: source {}", self.session.source_line());
+        println!("takt-player: audio {}", self.session.audio_line());
         let cost = self.overlay_cost.snapshot();
         if let Some((p50, max)) = diagnostics::overlay_cost(&cost) {
             println!(
@@ -692,12 +717,13 @@ impl Drop for PlayerApp {
     }
 }
 
-/// Opens the window and runs until it closes, or for `seconds`.
+/// Opens the window and runs until it closes, or for `seconds`. `files`
+/// (files, or folders of media files) are the playlist it starts with.
 ///
 /// # Errors
 ///
 /// When no window or no wgpu device could be created.
-pub fn run(seconds: Option<u64>, overlay: bool) -> eframe::Result {
+pub fn run(seconds: Option<u64>, overlay: bool, files: Vec<PathBuf>) -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -709,6 +735,6 @@ pub fn run(seconds: Option<u64>, overlay: bool) -> eframe::Result {
     eframe::run_native(
         "Takt",
         options,
-        Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds, overlay)))),
+        Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds, overlay, &files)))),
     )
 }

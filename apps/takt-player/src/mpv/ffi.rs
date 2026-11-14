@@ -53,13 +53,24 @@ struct RawEndFile {
     error: c_int,
 }
 
+/// `mpv_event_hook`, the data of [`EVENT_HOOK`].
+#[repr(C)]
+struct RawHook {
+    name: *const c_char,
+    id: u64,
+}
+
+const FORMAT_FLAG: c_int = 3;
 const FORMAT_INT64: c_int = 4;
 const FORMAT_DOUBLE: c_int = 5;
 
 const EVENT_NONE: c_int = 0;
 const EVENT_SHUTDOWN: c_int = 1;
+const EVENT_START_FILE: c_int = 6;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_FILE_LOADED: c_int = 8;
+const EVENT_VIDEO_RECONFIG: c_int = 17;
+const EVENT_HOOK: c_int = 25;
 
 const END_FILE_REASON_ERROR: c_int = 4;
 
@@ -92,6 +103,19 @@ unsafe extern "C" {
     fn mpv_set_option_string(ctx: *mut Handle, name: *const c_char, data: *const c_char) -> c_int;
     /// `args` is an array of C strings that ends with a null pointer.
     fn mpv_command(ctx: *mut Handle, args: *const *const c_char) -> c_int;
+    fn mpv_set_property_string(ctx: *mut Handle, name: *const c_char, data: *const c_char)
+    -> c_int;
+    /// A string of mpv's own, to give back with `mpv_free`; null on error.
+    fn mpv_get_property_string(ctx: *mut Handle, name: *const c_char) -> *mut c_char;
+    /// Frees memory mpv handed out; null is allowed.
+    fn mpv_free(data: *mut c_void);
+    fn mpv_hook_add(
+        ctx: *mut Handle,
+        reply_userdata: u64,
+        name: *const c_char,
+        priority: c_int,
+    ) -> c_int;
+    fn mpv_hook_continue(ctx: *mut Handle, id: u64) -> c_int;
     /// `data` points at the type `format` names (`i64`, `f64`).
     fn mpv_get_property(
         ctx: *mut Handle,
@@ -151,13 +175,25 @@ fn check(step: &'static str, code: c_int) -> Result<(), MpvError> {
 pub enum Event {
     /// The queue is empty.
     None,
+    /// mpv begins to open a file: what comes after belongs to that file,
+    /// what came before to the one it replaces.
+    StartFile,
     /// The file is open and playback starts.
     FileLoaded,
+    /// The video changed (its size, its aspect): the picture may need
+    /// another surface.
+    VideoReconfig,
     /// Playback of the file ended; `failed` when it ended with an error
     /// (the file could not be opened or decoded).
     EndFile {
         /// Ended by an error, not by its end or a stop.
         failed: bool,
+    },
+    /// mpv is about to open a source and waits ([`Mpv::hook_on_load`]):
+    /// it goes on with [`Mpv::hook_continue`] and this number.
+    Hook {
+        /// What `hook_continue` takes.
+        id: u64,
     },
     /// The core shuts down.
     Shutdown,
@@ -178,14 +214,18 @@ impl Drop for Core {
 }
 
 /// An mpv core that renders into memory ([`Surface`]) instead of a window.
-///
-/// Not `Send`: it stays on the thread that made it, which is all the player
-/// needs (mpv itself would allow more).
 pub struct Mpv {
     render: NonNull<RenderContext>,
     // Dropped after `render` was freed in `drop`.
     core: Core,
 }
+
+// SAFETY: the two pointers are handles of libmpv, which binds them to no
+// thread: client.h calls the client API thread-safe, and render.h allows the
+// render calls of the software renderer on any thread as long as they do not
+// run at the same time. Every method takes `&mut self`, so a moved `Mpv` is
+// still used by one thread at a time. It is not `Sync`.
+unsafe impl Send for Mpv {}
 
 impl Mpv {
     /// A core with `options` set before it starts (`mpv_set_option_string`,
@@ -241,16 +281,110 @@ impl Mpv {
     ///
     /// [`MpvError`] when the text holds a NUL byte or mpv refuses the command.
     pub fn load(&mut self, source: &str) -> Result<(), MpvError> {
-        let source = CString::new(source).map_err(|_| MpvError {
-            step: "loadfile",
+        self.command("loadfile", &["loadfile", source])
+    }
+
+    /// Runs a command of mpv (`mpv_command`): its name and its arguments,
+    /// each one text, taken as they are (no quoting, no expansion of
+    /// `${...}`). `step` names the call in an error.
+    ///
+    /// # Errors
+    ///
+    /// [`MpvError`] when a text holds a NUL byte or mpv refuses the command.
+    pub fn command(&mut self, step: &'static str, args: &[&str]) -> Result<(), MpvError> {
+        let invalid = MpvError {
+            step,
+            code: ERROR_INVALID_PARAMETER,
+        };
+        let owned = args
+            .iter()
+            .map(|&arg| CString::new(arg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid)?;
+        let mut pointers: Vec<*const c_char> = owned.iter().map(|arg| arg.as_ptr()).collect();
+        pointers.push(ptr::null());
+        // SAFETY: the handle is live; `pointers` holds NUL-terminated
+        // strings owned by `owned`, which outlives the call, and ends with a
+        // null pointer.
+        check(step, unsafe {
+            mpv_command(self.core.0.as_ptr(), pointers.as_ptr())
+        })
+    }
+
+    /// Sets a property from its text form (`mpv_set_property_string`).
+    ///
+    /// # Errors
+    ///
+    /// [`MpvError`] when the value holds a NUL byte, the property does not
+    /// exist or mpv refuses the value.
+    pub fn set(&mut self, name: &CStr, value: &str) -> Result<(), MpvError> {
+        let step = "mpv_set_property_string";
+        let value = CString::new(value).map_err(|_| MpvError {
+            step,
             code: ERROR_INVALID_PARAMETER,
         })?;
-        let args = [c"loadfile".as_ptr(), source.as_ptr(), ptr::null()];
-        // SAFETY: the handle is live; `args` holds two NUL-terminated
-        // strings that outlive the call and ends with a null pointer.
-        check("loadfile", unsafe {
-            mpv_command(self.core.0.as_ptr(), args.as_ptr())
-        })
+        // SAFETY: the handle is live, name and value are NUL-terminated and
+        // outlive the call; mpv copies them.
+        let code =
+            unsafe { mpv_set_property_string(self.core.0.as_ptr(), name.as_ptr(), value.as_ptr()) };
+        check(step, code)
+    }
+
+    /// A property in its text form, `None` while mpv has none. The text is
+    /// foreign (titles, device names): shown, never interpreted.
+    pub fn string(&mut self, name: &CStr) -> Option<String> {
+        // SAFETY: the handle is live and the name NUL-terminated. A non-null
+        // result is a NUL-terminated string owned by mpv until `mpv_free`;
+        // it is copied before it is freed, exactly once, and not used after.
+        unsafe {
+            let raw = mpv_get_property_string(self.core.0.as_ptr(), name.as_ptr());
+            if raw.is_null() {
+                return None;
+            }
+            let text = CStr::from_ptr(raw).to_string_lossy().into_owned();
+            mpv_free(raw.cast());
+            Some(text)
+        }
+    }
+
+    /// Makes mpv stop before it opens any source (the hook `on_load`): it
+    /// reports [`Event::Hook`] and waits for [`Mpv::hook_continue`]. Between
+    /// the two the property `stream-open-filename` names what it is about
+    /// to open and may be set to something else.
+    ///
+    /// # Errors
+    ///
+    /// [`MpvError`] when mpv refuses the hook.
+    pub fn hook_on_load(&mut self) -> Result<(), MpvError> {
+        // SAFETY: the handle is live and the name a static C string.
+        let code = unsafe { mpv_hook_add(self.core.0.as_ptr(), 0, c"on_load".as_ptr(), 0) };
+        check("mpv_hook_add", code)
+    }
+
+    /// Lets mpv go on after [`Event::Hook`].
+    ///
+    /// # Errors
+    ///
+    /// [`MpvError`] when the number names no waiting hook.
+    pub fn hook_continue(&mut self, id: u64) -> Result<(), MpvError> {
+        // SAFETY: the handle is live; a wrong id is an error code, nothing more.
+        let code = unsafe { mpv_hook_continue(self.core.0.as_ptr(), id) };
+        check("mpv_hook_continue", code)
+    }
+
+    /// A property as yes or no, `None` while mpv has none.
+    pub fn flag(&mut self, name: &CStr) -> Option<bool> {
+        let mut value: c_int = 0;
+        // SAFETY: as in `double`, with the int FORMAT_FLAG asks for.
+        let code = unsafe {
+            mpv_get_property(
+                self.core.0.as_ptr(),
+                name.as_ptr(),
+                FORMAT_FLAG,
+                (&raw mut value).cast(),
+            )
+        };
+        (code >= 0).then_some(value != 0)
     }
 
     /// The next event of the queue, without waiting.
@@ -259,12 +393,23 @@ impl Mpv {
         // the event stays valid until the next call on this handle; it is
         // read here and not kept (`&mut self` rules out a second call
         // meanwhile). The data of an END_FILE event is an
-        // mpv_event_end_file, whose head `RawEndFile` mirrors.
+        // mpv_event_end_file, whose head `RawEndFile` mirrors; the data of
+        // a HOOK event is an mpv_event_hook, which `RawHook` mirrors.
         unsafe {
             let event = &*mpv_wait_event(self.core.0.as_ptr(), 0.0);
             match event.event_id {
                 EVENT_NONE => Event::None,
+                EVENT_START_FILE => Event::StartFile,
                 EVENT_FILE_LOADED => Event::FileLoaded,
+                EVENT_VIDEO_RECONFIG => Event::VideoReconfig,
+                EVENT_HOOK => {
+                    let hook = event.data.cast::<RawHook>();
+                    if hook.is_null() {
+                        Event::Other
+                    } else {
+                        Event::Hook { id: (*hook).id }
+                    }
+                }
                 EVENT_SHUTDOWN => Event::Shutdown,
                 EVENT_END_FILE => {
                     let end = event.data.cast::<RawEndFile>();
@@ -416,9 +561,16 @@ impl Surface {
     }
 
     /// Bytes from one row to the next.
-    #[cfg(test)]
-    fn stride(&self) -> usize {
+    pub fn stride(&self) -> usize {
         self.stride
+    }
+
+    /// Width and height in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (
+            u32::try_from(self.width).unwrap_or(0),
+            u32::try_from(self.height).unwrap_or(0),
+        )
     }
 
     /// The rows of the picture, `stride * height` bytes.
@@ -479,5 +631,44 @@ mod tests {
         assert_eq!(mpv.load("a\0b").unwrap_err().code, ERROR_INVALID_PARAMETER);
         assert_eq!(mpv.double(c"time-pos"), None, "no file, no position");
         assert!(!mpv.frame_ready());
+    }
+
+    #[test]
+    fn properties_are_set_and_read_as_text_and_as_a_flag() {
+        let mut mpv =
+            Mpv::new(&[(c"config", c"no"), (c"vo", c"libmpv"), (c"ao", c"null")]).unwrap();
+        assert_eq!(mpv.flag(c"pause"), Some(false));
+        mpv.set(c"pause", "yes").unwrap();
+        assert_eq!(mpv.flag(c"pause"), Some(true));
+        mpv.set(c"volume", "40").unwrap();
+        assert_eq!(mpv.double(c"volume"), Some(40.0));
+        assert!(mpv.string(c"volume").is_some_and(|v| v.starts_with("40")));
+        assert_eq!(mpv.string(c"no-such-property-of-takt"), None);
+        assert!(mpv.set(c"volume", "loud").is_err());
+        assert_eq!(
+            mpv.set(c"volume", "1\0x").unwrap_err().code,
+            ERROR_INVALID_PARAMETER
+        );
+        // A command with arguments, and one mpv does not know.
+        mpv.command("set", &["set", "pause", "no"]).unwrap();
+        assert_eq!(mpv.flag(c"pause"), Some(false));
+        assert!(
+            mpv.command("nonsense", &["no-such-command-of-takt"])
+                .is_err()
+        );
+        assert_eq!(
+            mpv.command("seek", &["seek", "1\0"]).unwrap_err().code,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+
+    #[test]
+    fn the_core_moves_to_another_thread() {
+        let mut mpv =
+            Mpv::new(&[(c"config", c"no"), (c"vo", c"libmpv"), (c"ao", c"null")]).unwrap();
+        let volume = std::thread::spawn(move || mpv.double(c"volume"))
+            .join()
+            .unwrap();
+        assert_eq!(volume, Some(100.0));
     }
 }

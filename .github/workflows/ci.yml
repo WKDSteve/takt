@@ -102,9 +102,14 @@ jobs:
           grep -q "test libmpv::license_state_matches_build_md ... ok" test.log
           # The module mpv exists only with the cfg: no other job compiles, lints or tests it.
           cargo clippy -p takt-player --all-targets --all-features
-          cargo test -p takt-player mpv:: -- --nocapture 2>&1 | tee -a test.log
+          # All tests of the player in the build with libmpv: the MpvBackend plays the test file of the repository
+          # (apps/takt-player/tests/data), silent (ao=null), and the session swaps its clock.
+          cargo test -p takt-player -- --nocapture 2>&1 | tee -a test.log
           grep -q "test mpv::tests::a_test_pattern_is_rendered_into_memory ... ok" test.log
           grep -q "test mpv::ffi::tests::a_text_with_a_nul_byte_is_no_source ... ok" test.log
+          grep -q "test mpv::backend::tests::a_file_plays_pauses_jumps_and_ends ... ok" test.log
+          grep -q "test mpv::backend::tests::a_core_for_files_fetches_nothing_from_the_network ... ok" test.log
+          grep -q "test session::tests::a_file_swaps_the_clock_and_the_test_picture_swaps_it_back ... ok" test.log
       - name: SKIPs in die Zusammenfassung
         if: always()
         run: python3 scripts/ci-skip-summary.py test.log --title "libmpv (Ubuntu)"

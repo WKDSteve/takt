@@ -44,8 +44,9 @@ pub struct Options {
     /// the test source; `--fps` is then the rate of the file.
     pub mpv: Option<String>,
     /// `--mpv-early MICROS`: how long before its time mpv hands a frame out
-    /// (`video-timing-offset`). Default 0; at most a tenth of a second.
-    pub mpv_early_micros: u32,
+    /// (`video-timing-offset`), at most a tenth of a second. Without the
+    /// option the backend takes half the display period.
+    pub mpv_early_micros: Option<u32>,
 }
 
 impl Default for Options {
@@ -55,7 +56,7 @@ impl Default for Options {
             hz: Rational::lit(60, 1),
             seconds: 3,
             mpv: None,
-            mpv_early_micros: 0,
+            mpv_early_micros: None,
         }
     }
 }
@@ -83,13 +84,14 @@ impl Options {
                 "--mpv" => options.mpv = Some(value()?.to_owned()),
                 "--mpv-early" => {
                     let text = value()?;
-                    options.mpv_early_micros = text
+                    let micros = text
                         .parse()
                         .ok()
                         .filter(|&us: &u32| us <= MAX_EARLY_MICROS)
                         .ok_or_else(|| {
                             format!("{arg} {text}: 0 to {MAX_EARLY_MICROS} microseconds")
                         })?;
+                    options.mpv_early_micros = Some(micros);
                 }
                 "--seconds" => {
                     let text = value()?;
@@ -159,7 +161,7 @@ pub fn run(options: &Options) -> Result<(), String> {
 fn run_mpv(source: &str, options: &Options) -> Result<(), String> {
     let early = options.mpv_early_micros;
     let report = crate::mpv::measure(source, options.hz, options.seconds, early)?;
-    crate::mpv::print(source, options.hz, options.seconds, early, &report);
+    crate::mpv::print(source, options.hz, options.seconds, &report);
     Ok(())
 }
 
@@ -381,6 +383,9 @@ mod tests {
         assert_eq!(options.mpv, None);
         let options = Options::parse(&args(&["--headless", "--mpv", "a b.mkv"])).unwrap();
         assert_eq!(options.mpv.as_deref(), Some("a b.mkv"));
+        assert_eq!(options.mpv_early_micros, None, "the backend decides");
+        let options = Options::parse(&args(&["--headless", "--mpv-early", "0"])).unwrap();
+        assert_eq!(options.mpv_early_micros, Some(0));
     }
 
     #[test]
