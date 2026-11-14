@@ -208,7 +208,9 @@ Farb-Tags im Kopf (`scripts/make-colour-clips.py`); was am Ende im Frame steht, 
 - **`ColorPrimaries::Bt601` gab es nur einmal**, obwohl 525 und 625 Zeilen verschiedene Primärwerte haben (die Tabelle
   zeigt den Unterschied im Rot). Es sind jetzt `Bt601Ntsc` und `Bt601Pal`; `DisplayP3` steht neben `DciP3`.
 - **HDR wird nicht tonegemappt.** Was heller ist als SDR-Weiß, wird hart abgeschnitten, in 8 Bit. `rgb0` taugt für
-  HDR nicht; der Weg dafür ist mpvs Render-API in die GPU-Fläche oder die eigene Pipeline (Phase 1).
+  HDR nicht; der Weg dafür ist mpvs Render-API in die GPU-Fläche oder die eigene Pipeline (Phase 1). Entschieden am
+  2026-11-14: bis dahin hinnehmen und sagen. Die Leiste nennt es einmal, wenn eine HDR-Datei geöffnet wird
+  (`Session::limit_note`).
 - **Gilt für libmpv mit zimg.** Gegenprobe mit `sws-allow-zimg=no`: dann wendet mpv nur die Matrix an und das Frame
   behält die Primärwerte der Datei. Die Tests `the_frames_are_bt709_whatever_primaries_the_file_names` und
   `hdr_is_cut_off_at_white_not_tone_mapped` schlagen auf einem solchen Build fehl. Grün auf dem Windows-Build

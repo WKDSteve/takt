@@ -255,6 +255,10 @@ impl PlayerApp {
                 self.seek_probe = None;
                 self.last_seek = None;
                 self.shown = None;
+                // What the person should know about this file, once.
+                if let Some(note) = self.session.limit_note() {
+                    self.notice = Some(note.to_owned());
+                }
             }
             Err(e) => {
                 self.cannot_play(&label, &e);

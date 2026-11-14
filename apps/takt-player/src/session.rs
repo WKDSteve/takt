@@ -636,6 +636,25 @@ impl Session {
         }
     }
 
+    /// What the person should know about how the file that plays is shown,
+    /// said once when it opens; `None` when there is nothing to say.
+    ///
+    /// HDR: mpv brings the picture to BT.709 on this path and does not
+    /// tone-map, so what is brighter than SDR white is cut off. Decided on
+    /// 2026-11-14 to be shown that way until the pipeline of Phase 1, and
+    /// to be said.
+    #[must_use]
+    pub fn limit_note(&self) -> Option<&'static str> {
+        match &self.kind {
+            Kind::Test(_) => None,
+            #[cfg(takt_libmpv)]
+            Kind::File(file) => file
+                .color
+                .is_some_and(|color| color.is_hdr())
+                .then_some("HDR is shown as SDR for now: bright parts are cut off at white"),
+        }
+    }
+
     /// The source in one line, for the diagnostics.
     #[must_use]
     pub fn source_line(&self) -> String {
@@ -793,6 +812,7 @@ mod tests {
         assert!(session.audio_line().starts_with("SIMULATED"));
         assert_eq!(session.cycle_track(TrackKind::Subtitle), None);
         assert!(session.tracks(TrackKind::Audio).is_empty());
+        assert_eq!(session.limit_note(), None);
         assert_eq!(session.select_track(TrackKind::Subtitle, Some(1)), None);
         // A jump of the test picture landed where its next frame is.
         assert_eq!(session.seek_landed(None), None);
@@ -930,6 +950,33 @@ mod tests {
         assert!(!session.is_file());
         assert_eq!(std::ptr::from_ref(session.master()), first);
         assert!(session.next_frame().is_ok());
+    }
+
+    /// An HDR file says once that it is shown as SDR; an SDR file and the
+    /// test picture say nothing.
+    #[cfg(takt_libmpv)]
+    #[test]
+    fn an_hdr_file_says_that_it_is_cut_off_at_white() {
+        let data = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+        let mut session = session();
+        for (name, says) in [
+            ("colour-hdr10.mkv", true),
+            ("colour-bt709.mkv", false),
+            ("colour-hlg.mkv", true),
+            ("colour-ntsc.mkv", false),
+        ] {
+            session.open_file(&Path::new(data).join(name)).unwrap();
+            assert_eq!(opened(&mut session), Ok(()), "{name}");
+            assert_eq!(
+                session.limit_note().is_some(),
+                says,
+                "{name}: {:?}",
+                session.limit_note()
+            );
+        }
+        assert!(session.source_line().contains("shown as bt.709"));
+        session.show_test_picture();
+        assert_eq!(session.limit_note(), None);
     }
 
     /// A jump in a file landed on the keyframe before its target (the test
