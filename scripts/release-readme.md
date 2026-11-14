@@ -2,7 +2,16 @@
 
 The newest green commit of `main`, for looking at the state of the work: not a release, not signed,
 replaced after every green CI run. The player is in Phase 0: a window with the moving test picture of
-the NullBackend, the diagnostic overlay (F3) and the sound path; it opens no media files yet.
+the NullBackend, the diagnostic overlay (F3) and the sound path.
+
+**This build plays no media files.** It is built without libmpv, and libmpv is not part of this zip.
+The player does play files, with sound, when it is built from a checkout with libmpv:
+
+1. Get the source (<https://github.com/WKDSteve/takt>) and a libmpv development archive, and set
+   `TAKT_LIBMPV_DIR` to its folder as `docs/BUILD.md` describes.
+2. `scripts\build-install.ps1` builds and installs that player the same way this zip does.
+3. Put the folder with `libmpv-2.dll` on the `PATH` (or the DLL next to the installed
+   `takt-player.exe`): the install does not copy it.
 
 For private machines only: not for a managed work machine.
 
@@ -26,6 +35,6 @@ administrator rights. Windows (SmartScreen) may ask before the first start: the 
 Space play/pause, arrows jump 5 s, Home to the start, a click on the timeline jumps there, 9/0
 quieter/louder, m mute, > and < next and previous entry, F8 the playlist, ? all keys, F3
 diagnostics, F4 save them, Escape quits. Drop files or folders on the window to play them (Shift
-appends); until the media backend comes, every entry plays as the test picture.
+appends); in this build without libmpv every entry plays as the test picture.
 
 License: GPL-3.0-or-later (`LICENSE`). Source: <https://github.com/WKDSteve/takt>.
