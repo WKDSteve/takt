@@ -172,8 +172,12 @@ impl PlayerApp {
             self.source_fault.clear();
         }
         // What the person should know about this file, once: when it opens,
-        // or with its first frame when mpv names its colour only then.
-        if let Some(note) = self.session.take_limit_note() {
+        // or with its first frame when mpv names its colour only then. A
+        // line that is in the bar already stays (why the entry before did
+        // not play); the diagnostics name the limit as well.
+        if let Some(note) = self.session.take_limit_note()
+            && self.notice.is_none()
+        {
             self.notice = Some(note.to_owned());
         }
         if self.state.playing() {

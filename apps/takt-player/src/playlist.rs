@@ -74,10 +74,20 @@ pub enum Skipped {
     Outside,
     /// It is a playlist file itself: lists are not followed.
     List,
+    /// It is reached through a link (a symbolic link, on Windows also a
+    /// junction): where that leads is not in the folder of the list by
+    /// anything the list says.
+    Link,
 }
 
 impl Skipped {
-    const ALL: [Self; 4] = [Self::Address, Self::Absolute, Self::Outside, Self::List];
+    const ALL: [Self; 5] = [
+        Self::Address,
+        Self::Absolute,
+        Self::Outside,
+        Self::List,
+        Self::Link,
+    ];
 
     const fn what(self) -> &'static str {
         match self {
@@ -85,6 +95,7 @@ impl Skipped {
             Self::Absolute => "absolute paths",
             Self::Outside => "outside the folder of the list",
             Self::List => "lists themselves",
+            Self::Link => "reached through a link",
         }
     }
 }
@@ -132,10 +143,29 @@ pub fn list_entry(line: &str, dir: &Path) -> Result<PathBuf, Skipped> {
     Ok(path)
 }
 
+/// Whether `path`, which lies in `dir` by its name, is reached through a
+/// link: the entry itself or a folder on the way to it is a symbolic link
+/// (on Windows also a junction). A link in the folder of a list can lead
+/// anywhere, to a network share as well, so such an entry is no entry.
+///
+/// The links are looked at, never followed: nothing they point to is
+/// touched. What does not exist is no link; opening it fails later.
+fn through_a_link(path: &Path, dir: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(dir) else {
+        return false;
+    };
+    let mut step = dir.to_path_buf();
+    rest.components().any(|part| {
+        step.push(part);
+        std::fs::symlink_metadata(&step).is_ok_and(|meta| meta.file_type().is_symlink())
+    })
+}
+
 /// The entries of the playlist file `list`, and what was not taken.
 ///
 /// The file is read as text and nothing else: lines that are empty or start
-/// with `#` are skipped, every other line is judged by [`list_entry`]. A file
+/// with `#` are skipped, every other line is judged by [`list_entry`], and
+/// an entry that is reached through a link is skipped as well. A file
 /// larger than a megabyte is not read, and entries beyond the first ten
 /// thousand are left out; both are reported.
 #[must_use]
@@ -164,7 +194,14 @@ pub fn read_list(list: &Path) -> (Vec<PathBuf>, Vec<String>) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        match list_entry(line, dir) {
+        let judged = list_entry(line, dir).and_then(|path| {
+            if through_a_link(&path, &normalise(dir, dir)) {
+                Err(Skipped::Link)
+            } else {
+                Ok(path)
+            }
+        });
+        match judged {
             Ok(_) if entries.len() >= LIST_ENTRIES => beyond += 1,
             Ok(path) => entries.push(path),
             Err(why) => {
@@ -535,6 +572,82 @@ mod tests {
         }
         assert_eq!(no("more.m3u"), Skipped::List);
         assert_eq!(no("sub/MORE.M3U8"), Skipped::List);
+    }
+
+    /// A link in the folder of a list leads anywhere. An entry that is one,
+    /// or lies behind one, is skipped and counted; nothing behind the link
+    /// is asked.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_reached_through_a_link_is_skipped() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("takt-list-links-{}", std::process::id()));
+        let (dir, outside) = (base.join("lists"), base.join("elsewhere"));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("film.mkv"), b"x").unwrap();
+        std::fs::write(dir.join("sub").join("more.mkv"), b"x").unwrap();
+        std::fs::write(outside.join("secret.mkv"), b"x").unwrap();
+        // A link to a file, a link to a folder, and one that leads nowhere.
+        symlink(outside.join("secret.mkv"), dir.join("linked.mkv")).unwrap();
+        symlink(&outside, dir.join("away")).unwrap();
+        symlink(base.join("no-such-place"), dir.join("dangling.mkv")).unwrap();
+        let list = dir.join("list.m3u");
+        std::fs::write(
+            &list,
+            "film.mkv\nlinked.mkv\naway/secret.mkv\nsub/more.mkv\ndangling.mkv\nmissing.mkv\n",
+        )
+        .unwrap();
+
+        let (entries, problems) = read_list(&list);
+        let names: Vec<String> = entries.iter().map(|path| Playlist::label(path)).collect();
+        // What does not exist is an entry: it fails when it is opened.
+        assert_eq!(names, ["film.mkv", "more.mkv", "missing.mkv"]);
+        assert_eq!(
+            problems,
+            ["list.m3u: 3 skipped (reached through a link)".to_owned()]
+        );
+        assert!(through_a_link(&dir.join("away").join("secret.mkv"), &dir));
+        assert!(!through_a_link(&dir.join("sub").join("more.mkv"), &dir));
+        assert!(
+            !through_a_link(&outside.join("secret.mkv"), &dir),
+            "not in it"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// On Windows the link anyone may make is a junction (a symbolic link
+    /// needs a privilege): a folder of the list that is one is not entered.
+    #[cfg(windows)]
+    #[test]
+    fn an_entry_behind_a_junction_is_skipped() {
+        let base = std::env::temp_dir().join(format!("takt-list-junction-{}", std::process::id()));
+        let (dir, outside) = (base.join("lists"), base.join("elsewhere"));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("sub").join("more.mkv"), b"x").unwrap();
+        std::fs::write(outside.join("secret.mkv"), b"x").unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(dir.join("away"))
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let list = dir.join("list.m3u");
+        std::fs::write(&list, "away/secret.mkv\nsub/more.mkv\n").unwrap();
+
+        let (entries, problems) = read_list(&list);
+        let names: Vec<String> = entries.iter().map(|path| Playlist::label(path)).collect();
+        assert_eq!(names, ["more.mkv"]);
+        assert_eq!(
+            problems,
+            ["list.m3u: 1 skipped (reached through a link)".to_owned()]
+        );
+        // The junction first: removing the tree must not follow it.
+        let _ = std::fs::remove_dir(dir.join("away"));
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!outside.exists() || std::fs::remove_dir_all(&outside).is_ok());
     }
 
     #[test]

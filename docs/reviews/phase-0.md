@@ -258,6 +258,9 @@ gerendert und gefragt.
 | eigener Render-Thread, der vor dem Rendern die Bildgröße abfragt (Zwischenstand, nie auf `main`) | etwa 205 ms |
 | eigener Render-Thread, der erst rendert und danach fragt (takt `2f3c1f7`) | etwa 4,5 ms |
 
+- **Öffnen bis zum ersten Bild**, mit dem Ablauf des Fensters (öffnen, je Durchlauf abfragen), vier kleine Dateien,
+  beide Stände am selben Abend unter derselben Nebenlast gemessen: vorher 232 bis 1218 ms, mit dem Render-Thread 26
+  bis 56 ms. Auf ruhiger Maschine nicht wiederholt.
 - **Die Frames rendert jetzt ein eigener Thread des Backends.** mpv weckt ihn über seinen Update-Callback, er rendert
   das Bild sofort in ein Pool-Frame und legt es in ein Fach; `next_frame` nimmt das neueste. Der Thread des Fensters
   steuert: Kommandos, Eigenschaften, Ereignisse. Er darf auf den Kern warten, weil der Kern nicht mehr auf ihn wartet.
@@ -367,7 +370,7 @@ Für Phase 0 ist das nur eine Notiz. Aber die `VideoBackend`-Schnittstelle ist b
 | Bild des `MpvBackend` als `rgb0`, zweiter Texturpfad statt Wandlung nach NV12 | keine doppelte Wandlung, volle Farbauflösung an Untertiteln und Kanten, RGB wird für Bild-Modus, Capture und Compositing gebraucht | ja: mit mpvs Render-API direkt in die GPU-Fläche braucht mpv den Pfad nicht mehr, der Typ und der Texturpfad bleiben |
 | Die Uhr im mpv-Pfad folgt mpvs Tonposition; `Session` hält Testbild oder Datei, nie beides | genau eine Uhr (Invariante 3), mpv ist in Phase 0 der Tonpfad | ja, mit der eigenen Pipeline in Phase 1 |
 | Das Fenster öffnet über mpv nur vorhandene Dateien; `on_load` prüft, was mpv selbst öffnet | Playlist-Dateien führten sonst ins Netz | nein, höchstens um eine Allowlist erweitert |
-| Playlist-Dateien liest Takt selbst; ein Eintrag ist nur ein relativer Pfad im Ordner der Liste (am 2026-11-14 gefragt und bestätigt: absolute Pfade bleiben draußen, auch lokale) | ein Backend, das Listen liest, spielt ihre Einträge am Fenster vorbei; absolute Pfade erreichen Netzwerkfreigaben | ja: absolute lokale Pfade ließen sich erlauben, Freigaben und Adressen nicht |
+| Playlist-Dateien liest Takt selbst; ein Eintrag ist nur ein relativer Pfad im Ordner der Liste (am 2026-11-14 gefragt und bestätigt: absolute Pfade bleiben draußen, auch lokale; ein Eintrag, der über eine Verknüpfung erreicht wird, also ein Symlink oder unter Windows eine Junction im Ordner der Liste, wird übersprungen, ohne dass der Verknüpfung gefolgt wird) | ein Backend, das Listen liest, spielt ihre Einträge am Fenster vorbei; absolute Pfade erreichen Netzwerkfreigaben | ja: absolute lokale Pfade ließen sich erlauben, Freigaben und Adressen nicht |
 | Die Frames des `MpvBackend` sind BT.709; was die Datei nennt, steht daneben (`source_color`) | mpvs Software-Renderer rechnet selbst um, gemessen | ja, mit der Render-API in die GPU-Fläche liefert mpv das Bild nicht mehr als fertiges `rgb0` |
 | Die Frames des `MpvBackend` rendert ein eigener Thread, der erst rendert und danach fragt; keine Kommandos mit späterer Antwort | `render.h` verlangt es, und gemessen kostet jede Frage bei wartendem Bild 200 ms; `mpv_command_async` hat den Kern angehalten, auch mit getrennten Threads | nein für den Thread; das asynchrone `sub-add` kann mit einer anderen mpv-Version neu geprüft werden |
 | Eine Untertiteldatei darf Formatierung, aber keine andere Datei, kein Netz, kein Skript (`access-references=no`) | mit mpvs Standard führt eine `.srt` mit EDL-Inhalt zu beidem | nein |
