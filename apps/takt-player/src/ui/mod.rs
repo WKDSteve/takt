@@ -575,7 +575,10 @@ impl PlayerApp {
             max_extrapolation_nanos: clock.max_extrapolation_nanos(),
             display_period_nanos: self.refresh.period_nanos(),
             audio_line: self.session.audio_line(),
-            audio: self.session.device_stats().map(|s| AudioCounters::read(&s)),
+            audio: self
+                .session
+                .device_stats()
+                .map(|s| AudioCounters::read(&s).with_ring(self.session.feeder_stats().as_deref())),
             seek: self.last_seek,
             // Only read with the counters of the device, which a file has not.
             sample_rate: clock.sample_rate(),

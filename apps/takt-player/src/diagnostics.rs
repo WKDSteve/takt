@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use takt_audio::{DurationSnapshot, OutputStats};
+
+use crate::audio::{FeederStats, RingReading};
 use takt_backend::SchedulerStats;
 
 /// The audio counters of a device path.
@@ -35,6 +37,8 @@ pub struct AudioCounters {
     pub runtime: [Option<u64>; 3],
     /// The longest callback in nanoseconds.
     pub runtime_max_nanos: u64,
+    /// The ring as its feeder saw it since the last reading.
+    pub ring: Option<RingReading>,
 }
 
 impl AudioCounters {
@@ -54,7 +58,16 @@ impl AudioCounters {
                 r.quantile_micros(9_999, 10_000),
             ],
             runtime_max_nanos: r.max_nanos(),
+            ring: None,
         }
+    }
+
+    /// With what the feeder saw of the ring since the last reading (and
+    /// starts that anew).
+    #[must_use]
+    pub fn with_ring(mut self, feeder: Option<&FeederStats>) -> Self {
+        self.ring = feeder.and_then(FeederStats::take);
+        self
     }
 }
 
@@ -220,6 +233,18 @@ impl Snapshot {
                     bound(a.runtime[2]),
                     a.runtime_max_nanos as f64 / 1e3
                 ),
+            ));
+            lines.push((
+                "ring",
+                a.ring
+                    .map_or("no fill since the last reading".to_owned(), |r| {
+                        format!(
+                            "lowest {} frames ({}), longest gap between fills {}",
+                            r.lowest_frames,
+                            ms(r.lowest_frames as f64 * 1e9 / f64::from(self.sample_rate.max(1))),
+                            ms(r.longest_gap_nanos as f64)
+                        )
+                    }),
             ));
         }
         lines.push((
@@ -447,6 +472,10 @@ mod tests {
                 latency_frames: Some(1_531),
                 runtime: [Some(4), Some(5), None],
                 runtime_max_nanos: 6_000,
+                ring: Some(RingReading {
+                    lowest_frames: 2_400,
+                    longest_gap_nanos: 47_000_000,
+                }),
             }),
             sample_rate: 48_000,
             seek: Some((5_000, 5_005)),
@@ -472,6 +501,7 @@ mod tests {
             "1 in 100 callbacks, 380 frames silence, last at 1.500 s",
             "1531 frames (31.896 ms), subtracted",
             "p50 <4 us  p99 <5 us  p99.99 -",
+            "lowest 2400 frames (50.000 ms), longest gap between fills 47.000 ms",
             "CPU 12.5 % of a core, RAM 64.0 MiB",
             "p50 <128 us, max 200.0 us",
             "to 5000 ms, first frame at 5005 ms (+5 ms)",

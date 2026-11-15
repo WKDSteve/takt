@@ -279,8 +279,23 @@ fn run_null(options: &Options) {
     println!("  Endposition     {}", clock.now());
     println!("  Framedauer      {:.3} ms", frame_ns as f64 / 1e6);
     let mut xruns = None;
-    if let Some(DeviceSummary { stats: a, priority }) = device {
+    let mut ring = None;
+    if let Some(DeviceSummary {
+        stats: a,
+        priority,
+        ring: fed,
+    }) = device
+    {
         xruns = Some(a.xruns());
+        ring = fed;
+        if let Some(r) = fed {
+            println!(
+                "  Ring            tiefster Stand {} Frames ({:.1} ms), laengste Luecke zwischen zwei Fuellungen {:.1} ms",
+                r.lowest_frames,
+                r.lowest_frames as f64 * 1e3 / f64::from(crate::audio::SAMPLE_RATE),
+                r.longest_gap_nanos as f64 / 1e6
+            );
+        }
         println!("  Prioritaet      {priority}");
         println!(
             "  Audio           {} Callbacks, {} Xruns, {} Frames Stille",
@@ -331,7 +346,8 @@ fn run_null(options: &Options) {
     let number = |n: Option<u64>| n.map_or("-".to_owned(), |n| n.to_string());
     println!(
         "takt-ab backend={} fps={fps} hz={} seconds={} elapsed_ms={} passes={pass} shown={} \
-         repeated={} dropped={} mean_us={} p99_us={} late_us={} early_us={} audio={} xruns={}",
+         repeated={} dropped={} mean_us={} p99_us={} late_us={} early_us={} audio={} xruns={} \
+         ring_low_frames={} fill_gap_us={}",
         backend.name(),
         options.hz,
         options.seconds,
@@ -345,6 +361,8 @@ fn run_null(options: &Options) {
         s.worst_early_nanos.saturating_abs() / 1_000,
         if simulated { "simulated" } else { "device" },
         number(xruns),
+        number(ring.map(|r| r.lowest_frames as u64)),
+        number(ring.map(|r| r.longest_gap_nanos / 1_000)),
     );
 }
 

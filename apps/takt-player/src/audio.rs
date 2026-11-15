@@ -8,11 +8,16 @@
 //! instead, and the player says so. `TAKT_AUDIO_DEVICE` names another output
 //! device by a part of its name (a measuring run on a silent virtual device);
 //! a name that fits none is simulated too, never the default device.
+//!
+//! The feeder is a thread of normal priority: [`FeederStats`] says how low
+//! the ring ran before it filled it again, and the longest time between two
+//! fills, for the overlay and the measuring run (an xrun under load: did the
+//! feeder starve, or the device?).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use takt_audio::{Gain, Output, OutputCallback, OutputConfig, OutputStats, Priority, ring};
 use takt_clock::{AudioMasterClock, MonotonicSource, SystemMonotonic};
@@ -35,10 +40,58 @@ enum Kind {
         output: Output,
         stats: Arc<OutputStats>,
         gain: Arc<Gain>,
+        feeder: Arc<FeederStats>,
     },
     Simulated {
         reason: String,
     },
+}
+
+/// What the feeder saw of the ring since the last [`FeederStats::take`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RingReading {
+    /// The lowest stock of the ring found before a fill, in frames.
+    pub lowest_frames: usize,
+    /// The longest time between two fills, in nanoseconds.
+    pub longest_gap_nanos: u64,
+}
+
+/// The ring as the feeder sees it: written by the feeder, taken by the
+/// overlay and the measuring run. Nothing here is touched by the callback.
+#[derive(Debug)]
+pub struct FeederStats {
+    // usize::MAX: no fill since the last take.
+    lowest: AtomicUsize,
+    longest_gap: AtomicU64,
+}
+
+impl Default for FeederStats {
+    fn default() -> Self {
+        Self {
+            lowest: AtomicUsize::new(usize::MAX),
+            longest_gap: AtomicU64::new(0),
+        }
+    }
+}
+
+impl FeederStats {
+    /// One fill: the stock found before it, and the time since the fill
+    /// before.
+    fn record(&self, stock_frames: usize, gap_nanos: u64) {
+        self.lowest.fetch_min(stock_frames, Ordering::Relaxed);
+        self.longest_gap.fetch_max(gap_nanos, Ordering::Relaxed);
+    }
+
+    /// What came since the last take, and starts anew; `None` without a
+    /// fill in between.
+    pub fn take(&self) -> Option<RingReading> {
+        let lowest = self.lowest.swap(usize::MAX, Ordering::Relaxed);
+        let gap = self.longest_gap.swap(0, Ordering::Relaxed);
+        (lowest != usize::MAX).then_some(RingReading {
+            lowest_frames: lowest,
+            longest_gap_nanos: gap,
+        })
+    }
 }
 
 /// What a device path measured, read when it stops.
@@ -47,6 +100,8 @@ pub struct DeviceSummary {
     pub stats: Arc<OutputStats>,
     /// What became of the real-time priority.
     pub priority: Priority,
+    /// The ring over the whole run.
+    pub ring: Option<RingReading>,
 }
 
 /// A running sound path. Dropping it stops it too.
@@ -90,13 +145,20 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
         let wanted = std::env::var("TAKT_AUDIO_DEVICE").ok();
         match Output::open_on(config, callback, wanted.as_deref()) {
             Ok(output) => {
+                let stats_of_feeder = Arc::new(FeederStats::default());
                 let feeder = {
                     let stop = Arc::clone(&stop);
+                    let seen = Arc::clone(&stats_of_feeder);
                     std::thread::spawn(move || {
                         let silence = vec![0.0_f32; 480 * 2];
+                        let mut last = Instant::now();
                         while !stop.load(Ordering::Relaxed) {
-                            let frames = tx.free_frames().min(480);
-                            tx.push(&silence[..frames * 2]);
+                            let free = tx.free_frames();
+                            let now = Instant::now();
+                            let gap = u64::try_from((now - last).as_nanos()).unwrap_or(u64::MAX);
+                            seen.record(tx.capacity_frames().saturating_sub(free), gap);
+                            last = now;
+                            tx.push(&silence[..free.min(480) * 2]);
                             std::thread::sleep(Duration::from_millis(2));
                         }
                     })
@@ -107,6 +169,7 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
                         output,
                         stats,
                         gain,
+                        feeder: stats_of_feeder,
                     }),
                     stop,
                     thread: Some(feeder),
@@ -191,6 +254,14 @@ impl AudioPath {
         }
     }
 
+    /// What the feeder saw of the ring, `None` when simulated.
+    pub fn feeder_stats(&self) -> Option<Arc<FeederStats>> {
+        match &self.kind {
+            Some(Kind::Device { feeder, .. }) => Some(Arc::clone(feeder)),
+            _ => None,
+        }
+    }
+
     /// Stops the path; for a device, what it measured.
     pub fn stop(mut self) -> Option<DeviceSummary> {
         self.halt()
@@ -198,11 +269,20 @@ impl AudioPath {
 
     fn halt(&mut self) -> Option<DeviceSummary> {
         let summary = match self.kind.take() {
-            Some(Kind::Device { output, stats, .. }) => {
+            Some(Kind::Device {
+                output,
+                stats,
+                feeder,
+                ..
+            }) => {
                 // Read after the callbacks ran: a refusal comes before the first.
                 let priority = output.priority();
                 drop(output);
-                Some(DeviceSummary { stats, priority })
+                Some(DeviceSummary {
+                    stats,
+                    priority,
+                    ring: feeder.take(),
+                })
             }
             _ => None,
         };
@@ -217,5 +297,29 @@ impl AudioPath {
 impl Drop for AudioPath {
     fn drop(&mut self) {
         let _ = self.halt();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_feeder_keeps_the_lowest_stock_and_the_longest_gap_until_taken() {
+        let stats = FeederStats::default();
+        assert_eq!(stats.take(), None, "no fill yet");
+        stats.record(4_000, 2_000_000);
+        stats.record(1_200, 45_000_000);
+        stats.record(4_700, 2_100_000);
+        assert_eq!(
+            stats.take(),
+            Some(RingReading {
+                lowest_frames: 1_200,
+                longest_gap_nanos: 45_000_000,
+            })
+        );
+        assert_eq!(stats.take(), None, "taken: it starts anew");
+        stats.record(4_800, 1_000_000);
+        assert_eq!(stats.take().map(|r| r.lowest_frames), Some(4_800));
     }
 }

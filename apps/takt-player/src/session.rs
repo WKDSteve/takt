@@ -737,6 +737,17 @@ impl Session {
         }
     }
 
+    /// What the feeder of the test picture saw of its ring; `None` when
+    /// simulated, and for a file.
+    #[must_use]
+    pub fn feeder_stats(&self) -> Option<Arc<crate::audio::FeederStats>> {
+        match &self.kind {
+            Kind::Test(test) => test.audio.feeder_stats(),
+            #[cfg(takt_libmpv)]
+            Kind::File(_) => None,
+        }
+    }
+
     /// Frames of the pool that are out, and its size.
     #[must_use]
     pub fn pool(&self) -> (usize, usize) {
