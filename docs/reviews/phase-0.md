@@ -214,7 +214,10 @@ Farb-Tags im Kopf (`scripts/make-colour-clips.py`); was am Ende im Frame steht, 
 - **Gilt für libmpv mit zimg.** Gegenprobe mit `sws-allow-zimg=no`: dann wendet mpv nur die Matrix an und das Frame
   behält die Primärwerte der Datei. Die Tests `the_frames_are_bt709_whatever_primaries_the_file_names` und
   `hdr_is_cut_off_at_white_not_tone_mapped` schlagen auf einem solchen Build fehl. Grün auf dem Windows-Build
-  (mpv 0.41) und auf Ubuntu mit dem libmpv aus apt.
+  (mpv 0.41) und auf Ubuntu mit dem libmpv aus apt. Seit dem 2026-11-15 merkt das auch die Laufzeit: das Backend
+  lehnt einen Kern ab, der nicht umrechnet (`check_colour_conversion`: die Optionen `zimg-*` gibt es nur in einem Build
+  mit zimg, und `sws-allow-zimg` muss an sein), statt seine Frames falsch als BT.709 zu beschriften; die Leiste nennt
+  den Grund. Test `a_core_that_would_not_convert_the_colours_is_refused`.
 
 ### MpvBackend: Sprünge, Spuren, Formate
 

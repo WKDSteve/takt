@@ -676,13 +676,39 @@ fn label_text(text: &str) -> String {
         .collect()
 }
 
+/// Whether the core converts every picture to BT.709 primaries and gamma, as
+/// [`frame_meta`] says it does. mpv's software renderer does that through
+/// zimg; a libmpv built without it, or a core with `sws-allow-zimg=no`, only
+/// applies the matrix, and the frames would keep the primaries of the file
+/// under a BT.709 label. Such a core is refused rather than mislabelled.
+/// `string` reads a property of the core.
+fn check_colour_conversion(mut string: impl FnMut(&CStr) -> Option<String>) -> Result<(), String> {
+    // The options of zimg exist only in a build with it.
+    if string(c"option-info/zimg-scaler/name").is_none() {
+        return Err(
+            "this libmpv is built without zimg: it would not convert the colours of a file to BT.709 \
+             (docs/BUILD.md names builds that do)"
+                .to_owned(),
+        );
+    }
+    if string(c"sws-allow-zimg").as_deref() != Some("yes") {
+        return Err(
+            "sws-allow-zimg is off: mpv would not convert the colours of a file to BT.709"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 impl MpvBackend {
     /// A core of mpv, set up as `config` says. `time` is the monotonic clock
     /// the anchors of [`MpvBackend::clock`] are stamped with.
     ///
     /// # Errors
     ///
-    /// [`Error::Backend`] when libmpv does not start or refuses an option.
+    /// [`Error::Backend`] when libmpv does not start or refuses an option, or
+    /// when it would not convert the colours of a file to BT.709
+    /// (built without zimg).
     pub fn new(config: Config, time: Arc<dyn MonotonicSource>) -> takt_core::Result<Self> {
         let fixed = match config.early {
             Early::Fixed(micros) => micros.min(MAX_EARLY_MICROS),
@@ -696,6 +722,7 @@ impl MpvBackend {
             options.push((c"ao", c"null"));
         }
         let (mut mpv, renderer) = Mpv::new(&options).map_err(backend_error)?;
+        check_colour_conversion(|name| mpv.string(name)).map_err(Error::Backend)?;
         let guard = config.sources == Sources::Files;
         if guard {
             mpv.hook_on_load().map_err(backend_error)?;
@@ -1682,6 +1709,28 @@ mod tests {
         assert_eq!(named.primaries, ColorPrimaries::Unknown);
         assert_eq!(named.transfer, TransferFunction::Unknown);
         assert_eq!(meta.color(), frames);
+    }
+
+    /// The labels of the frames hold only where mpv converts the colours: a
+    /// core that does not (here `sws-allow-zimg=no`, as a build without zimg)
+    /// is refused, and so is a build without the options of zimg.
+    #[test]
+    fn a_core_that_would_not_convert_the_colours_is_refused() {
+        let (mut mpv, _renderer) = Mpv::new(&OPTIONS).unwrap();
+        assert_eq!(check_colour_conversion(|name| mpv.string(name)), Ok(()));
+
+        let mut without = OPTIONS.to_vec();
+        without.push((c"sws-allow-zimg", c"no"));
+        let (mut mpv, _renderer) = Mpv::new(&without).unwrap();
+        let refused = check_colour_conversion(|name| mpv.string(name)).unwrap_err();
+        assert!(refused.contains("sws-allow-zimg is off"), "{refused}");
+
+        // A build without zimg has no option of it.
+        let refused = check_colour_conversion(|name| {
+            (name != c"option-info/zimg-scaler/name").then(|| "yes".to_owned())
+        })
+        .unwrap_err();
+        assert!(refused.contains("built without zimg"), "{refused}");
     }
 
     #[test]
