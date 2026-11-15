@@ -19,8 +19,9 @@
 //! - `bad`: three `sub-add` of the EDL file, one after another;
 //! - `load`: eight good `sub-add` and `loadfile` at once.
 //!
-//! It then waits for every reply (10 s) and asks the core a question (`time-pos`, synchronously): a core that
-//! hangs never answers, and the parent kills the run.
+//! It then waits for every reply (10 s) and asks the core a question (`playlist-count`, synchronously): a core
+//! that hangs never answers, and the parent kills the run. `run` prints where it got to (`STEP ...`), and with
+//! `MPV_REPRO_LOG=<file>` mpv writes its log there at `msg-level=all=debug`.
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -296,6 +297,14 @@ fn run(vo: &str, trigger: &str, clip: &str) -> ExitCode {
         // SAFETY: before initialize; NUL-terminated strings.
         unsafe { mpv_set_option_string(core.0, name.as_ptr(), value.as_ptr()) };
     }
+    if let Ok(log) = std::env::var("MPV_REPRO_LOG") {
+        let log = CString::new(log).unwrap();
+        // SAFETY: before initialize; NUL-terminated strings.
+        unsafe {
+            mpv_set_option_string(core.0, c"log-file".as_ptr(), log.as_ptr());
+            mpv_set_option_string(core.0, c"msg-level".as_ptr(), c"all=debug".as_ptr());
+        }
+    }
     // SAFETY: the core was created and not yet initialized.
     assert!(unsafe { mpv_initialize(core.0) } >= 0);
     if hook {
@@ -368,11 +377,13 @@ fn run(vo: &str, trigger: &str, clip: &str) -> ExitCode {
         }
         other => panic!("unknown trigger {other}"),
     };
+    println!("STEP waiting for {asked} replies");
     let left = wait_replies(&core, asked, Duration::from_secs(10));
     if left > 0 {
         println!("HANG {left} of {asked} replies missing");
         return ExitCode::from(3);
     }
+    println!("STEP all replies came, asking the core");
     // The core answers (a hanging core blocks here; the parent kills the run).
     // SAFETY: the core lives; the string is freed with mpv_free.
     let pos = unsafe { mpv_get_property_string(core.0, c"playlist-count".as_ptr()) };

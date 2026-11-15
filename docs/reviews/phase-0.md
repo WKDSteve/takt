@@ -304,12 +304,16 @@ gerendert und gefragt.
   | Windows, mpv 0.41, mit Hook `on_load` | `null` / `libmpv` | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
   | Ubuntu 24.04, libmpv aus apt (2.2.0, mpv 0.37), Container | `null` | 0 | 0 | 0 | 0 |
   | Ubuntu 24.04, libmpv aus apt | `libmpv` | **4** | 0 | 0 | 0 |
+  | Arch Linux, mpv 0.41.0 aus pacman, Container | `null` | 0 | 0 | 0 | 0 |
+  | Arch Linux, mpv 0.41.0 | `libmpv` | **3** | 0 | 0 | 0 |
 
-  Lesart: mit dem libmpv aus apt hängt der Kern **ohne Takt**, nur mit der Render-API und nur in der ganzen Folge,
-  keiner der drei Auslöser allein. Auf dem Windows-Build, mit dem Takt 20 bis 30 % Hänger zählte, hängt der Nachbau
-  in 400 Läufen nie; dort liegt der Unterschied also in Takt (etwa die Fragen des Fensters je Durchlauf, die der
-  Nachbau nicht stellt). Ob das bei mpv gemeldet wird, ist eine offene Entscheidung; der Nachbau ist der Anhang
-  dafür.
+  Lesart: unter Linux hängt der Kern **ohne Takt**, auch mit dem aktuellen mpv 0.41.0, nur mit der Render-API und nur
+  in der ganzen Folge, keiner der drei Auslöser allein. Im hängenden Lauf kommen alle Antworten der `sub-add`, dann
+  beantwortet der Kern keine synchrone Frage mehr; sein Protokoll endet nach `seek done` (wie in Takt). Auf dem
+  Windows-Build, mit dem Takt 20 bis 30 % Hänger zählte, hängt der Nachbau in 400 Läufen nie; dort liegt der
+  Unterschied also in Takt (etwa die Fragen des Fensters je Durchlauf, die der Nachbau nicht stellt). Entschieden am
+  2026-11-15: erst gegen ein aktuelles mpv prüfen, dann melden; die Meldung ist vorbereitet (tasks-vault,
+  `takt/mpv-sub-add-haenger-bei-mpv-melden`), abgeschickt wird sie von Hand.
 
 ### A/V-Sync von Hand
 
