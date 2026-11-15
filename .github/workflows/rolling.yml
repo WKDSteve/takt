@@ -57,7 +57,7 @@ jobs:
       short: ${{ steps.prepare.outputs.short }}
     steps:
       - id: prepare
-        uses: WKDSteve/appkit/release-kit/prepare@22039af47757bb4ba69770600fc647cd304d3b30 # v0.47.0
+        uses: WKDSteve/appkit/release-kit/prepare@20802f7ad082042bcdbaedcd27fa97eab75562e2 # v0.60.0
         with:
           sha: ${{ github.event.workflow_run.head_sha }}
           token: ${{ github.token }}
@@ -119,6 +119,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write        # the attestation of the files (appkit release-kit, see its README)
+      attestations: write
     steps:
       # A publish that waited behind a newer one must not put its older commit over it.
       - name: Is it still the tip
@@ -151,7 +153,7 @@ jobs:
           path: dist
           merge-multiple: true
       - if: ${{ steps.tip.outputs.current == 'true' }}
-        uses: WKDSteve/appkit/release-kit/publish@22039af47757bb4ba69770600fc647cd304d3b30 # v0.47.0
+        uses: WKDSteve/appkit/release-kit/publish@20802f7ad082042bcdbaedcd27fa97eab75562e2 # v0.60.0
         with:
           token: ${{ github.token }}
           tag: latest

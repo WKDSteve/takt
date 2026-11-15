@@ -8,6 +8,7 @@ Nothing is built here. The zip holds, in one folder, exactly what scripts\instal
 
   takt-player.exe     the player (with its icon compiled in)
   install.ps1         installs this zip's content for the current user
+  uninstall-entry.ps1 (the Settings > Apps entry install.ps1 writes; appkit's release kit),
   uninstall.ps1, LICENSE (GPL-3.0-or-later), README.md (how to install), VERSION
 
 VERSION says <version of takt-player>+<short commit>. The zip is reproducible: entries sorted, a fixed
@@ -91,6 +92,7 @@ try {
     Copy-Item -LiteralPath $exe -Destination (Join-Path $stage 'takt-player.exe') -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1') -Destination (Join-Path $stage 'install.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination (Join-Path $stage 'uninstall.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall-entry.ps1') -Destination (Join-Path $stage 'uninstall-entry.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $root 'LICENSES\GPL-3.0-or-later.txt') -Destination (Join-Path $stage 'LICENSE') -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release-readme.md') -Destination (Join-Path $stage 'README.md') -Force
     # LF and no BOM: it is read by install.ps1 and by people.

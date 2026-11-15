@@ -57,7 +57,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $packager = Join-Path $PSScriptRoot 'package-release.ps1'
-$expected = @('LICENSE', 'README.md', 'VERSION', 'install.ps1', 'takt-player.exe', 'uninstall.ps1')
+$expected = @('LICENSE', 'README.md', 'VERSION', 'install.ps1', 'takt-player.exe', 'uninstall-entry.ps1', 'uninstall.ps1')
 $script:failed = 0
 
 function Write-Check([bool] $Passed, [string] $Name) {
@@ -91,39 +91,12 @@ function Invoke-Child([string] $Script, [string[]] $Arguments, [string] $Shell =
 }
 
 # The command of a Settings > Apps entry, run as it stands plus --yes (no window asks) and
-# --allow-elevated (the hosted runners run elevated). The program gets a temp folder of the test and no
-# CLAUDECODE; nothing of this process changes.
+# --allow-elevated (the hosted runners run elevated): the release kit's runner (uninstall-entry.ps1). The
+# program gets a temp folder of the test and no CLAUDECODE; nothing of this process changes.
+. (Join-Path $PSScriptRoot 'uninstall-entry.ps1')
 function Invoke-Entry([string] $Command) {
-    if ($Command -notmatch '^"([^"]+)"(.*)$') { return [pscustomobject]@{ Code = -1; Output = "not a command: $Command" } }
-    $exe = $Matches[1]
-    $info = New-Object Diagnostics.ProcessStartInfo
-    $info.FileName = $exe
-    $info.Arguments = @($Matches[2].Trim(), '--yes', '--allow-elevated') -join ' '
-    $info.UseShellExecute = $false
-    $info.CreateNoWindow = $true
-    $info.RedirectStandardOutput = $true
-    $info.RedirectStandardError = $true
-    $info.StandardOutputEncoding = [Text.Encoding]::UTF8
-    $info.StandardErrorEncoding = [Text.Encoding]::UTF8
-    # From inside the folder that is to go, as a terminal standing in it would.
-    $info.WorkingDirectory = Split-Path -Parent $exe
-    $info.EnvironmentVariables.Remove('CLAUDECODE')
-    $info.EnvironmentVariables['TEMP'] = $script:appTemp
-    $info.EnvironmentVariables['TMP'] = $script:appTemp
-    $process = [Diagnostics.Process]::Start($info)
-    try {
-        $out = $process.StandardOutput.ReadToEndAsync()
-        $err = $process.StandardError.ReadToEndAsync()
-        # A window that asks would wait for ever: that is a failure, not a hang of the test.
-        if (-not $process.WaitForExit(60000)) {
-            $process.Kill()
-            return [pscustomobject]@{ Code = -1; Output = 'did not end within a minute (does a window ask?)' }
-        }
-        return [pscustomobject]@{ Code = $process.ExitCode; Output = ($out.Result + $err.Result) }
-    }
-    finally {
-        $process.Dispose()
-    }
+    $r = Invoke-UninstallEntry -Command $Command -Temp $script:appTemp -Extra @('--yes', '--allow-elevated')
+    return [pscustomobject]@{ Code = $r.Code; Output = $r.Text }
 }
 
 # The entries of a zip, sorted, and the folder it was unpacked into.
@@ -144,7 +117,7 @@ function Test-Zip([string] $Path, [string] $Exe, [string] $WantLabel, [string] $
     $dir = Expand-Zip $Path
     Write-Check ((Get-Names $dir) -join ',' -ceq ($expected -join ',')) "${Title}: the zip holds exactly $($expected -join ', ')"
     Write-Check ((Get-Sha (Join-Path $dir 'takt-player.exe')) -eq (Get-Sha $Exe)) "${Title}: takt-player.exe has the bytes of the build"
-    foreach ($name in 'install.ps1', 'uninstall.ps1') {
+    foreach ($name in 'install.ps1', 'uninstall-entry.ps1', 'uninstall.ps1') {
         Write-Check ((Get-Sha (Join-Path $dir $name)) -eq (Get-Sha (Join-Path $PSScriptRoot $name))) "${Title}: $name has the bytes of scripts\$name"
     }
     $label = [IO.File]::ReadAllText((Join-Path $dir 'VERSION'))
@@ -212,6 +185,10 @@ try {
         Write-Check ($null -ne $entry -and $entry.DisplayVersion -ceq "$version+0123456" -and $entry.UninstallString -ceq $entryCommand) "${shell}: the Settings > Apps entry names the version, and its command is the installed player with --uninstall and the places of this install"
         if ($null -ne $entry -and $entry.UninstallString -cne $entryCommand) { Write-Output "  it says: $($entry.UninstallString)" }
         Write-Check ($null -ne $entry -and $entry.UninstallString -notmatch '(powershell|pwsh|cmd)\.exe|\.ps1|-File') "${shell}: the command names no PowerShell, no shell and no script"
+        $problems = @(Test-UninstallEntry -RegistryRoot $regRoot -Name 'takt' -DisplayName 'Takt' -Version "$version+0123456" `
+                -InstallDir ([IO.Path]::GetFullPath($install)) -App $app -StartMenuDir $startMenu -DesktopDir $desktop)
+        Write-Check ($problems.Count -eq 0) "${shell}: the entry is the one of the release kit"
+        if ($problems.Count) { $problems | ForEach-Object { Write-Output "  $_" } }
 
         $r = Invoke-Child (Join-Path $payload 'install.ps1') $places $shell
         Write-Check ($r.Code -eq 0 -and -not (Get-ChildItem -LiteralPath $install -Filter '*.old')) "${shell}: an update over the install leaves no .old"

@@ -11,7 +11,8 @@ folder holds, all in one folder (%LOCALAPPDATA%\takt\bin):
 
 plus a Start menu entry "Takt" with the icon of the program, on request a desktop shortcut, and an
 entry in Settings > Apps (which runs the installed player as "takt-player.exe --uninstall": no
-PowerShell, no console window; uninstall.ps1 is the same for the terminal). No administrator rights. The files
+PowerShell, no console window; uninstall.ps1 is the same for the terminal; the entry is written by
+uninstall-entry.ps1 beside this script, appkit's release kit, which is not installed). No administrator rights. The files
 are all copied first and then swapped in; a copy or a swap that fails puts the old ones back, so the
 install is never a mix of versions. A takt that runs goes on with the old program until it is closed.
 
@@ -66,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 
 $program = 'takt-player'
 # What a payload holds, no more and no less: anything else is a folder that is not a release.
-$payloadFiles = @('takt-player.exe', 'install.ps1', 'uninstall.ps1', 'LICENSE', 'README.md', 'VERSION')
+$payloadFiles = @('takt-player.exe', 'install.ps1', 'uninstall-entry.ps1', 'uninstall.ps1', 'LICENSE', 'README.md', 'VERSION')
 
 function Exit-Install([string] $Message) {
     throw "install.ps1: $Message"
@@ -141,7 +142,8 @@ if ((Test-Path -LiteralPath $InstallDir -PathType Container) -and -not (Test-Ins
     Exit-Install "$InstallDir holds files but no takt install: nothing was installed; use an empty folder (-InstallDir) or none"
 }
 
-$files = @($payloadFiles | Where-Object { $_ -cne 'install.ps1' })
+# The text of the entry (uninstall-entry.ps1) is used by this script only: it is not installed.
+$files = @($payloadFiles | Where-Object { $_ -cne 'install.ps1' -and $_ -cne 'uninstall-entry.ps1' })
 
 Write-Output "==> copying takt $version to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -212,33 +214,11 @@ if ($DesktopShortcut) {
 # removes the folder it lies in, in its own process, and asks in a window. No PowerShell and no console
 # window. The other places are named only when they are not the ones of the user (a test, or a folder
 # you chose); Get-Place left no quote and no trailing backslash in them.
-$uninstallKey = "$RegistryRoot\Microsoft\Windows\CurrentVersion\Uninstall\takt"
-Write-Output "==> Settings > Apps entry ($uninstallKey)"
-$command = "`"$app`" --uninstall"
-# An account without such a folder (a service account) has no place of its own to compare with.
-$ownStartMenu = [Environment]::GetFolderPath('Programs')
-$ownDesktop = [Environment]::GetFolderPath('Desktop')
-if (-not $ownStartMenu -or $StartMenuDir -ne $ownStartMenu.TrimEnd('\')) { $command += " --start-menu-dir `"$StartMenuDir`"" }
-if (-not $ownDesktop -or $DesktopDir -ne $ownDesktop.TrimEnd('\')) { $command += " --desktop-dir `"$DesktopDir`"" }
-if ($RegistryRoot -ne 'HKCU:\Software') { $command += " --registry-root `"$RegistryRoot`"" }
-$size = [int](((Get-ChildItem -LiteralPath $InstallDir -File | Measure-Object -Property Length -Sum).Sum) / 1KB)
-if (Test-Path -LiteralPath $uninstallKey) { Remove-Item -LiteralPath $uninstallKey -Recurse -Force }
-New-Item -Path $uninstallKey -Force | Out-Null
-$values = [ordered]@{
-    DisplayName     = 'Takt'
-    DisplayVersion  = [string]$version
-    Publisher       = 'WKDSteve'
-    InstallLocation = $InstallDir
-    DisplayIcon     = "$app,0"
-    UninstallString = $command
-}
-foreach ($k in $values.Keys) {
-    New-ItemProperty -LiteralPath $uninstallKey -Name $k -Value $values[$k] -PropertyType String -Force | Out-Null
-}
-foreach ($k in 'NoModify', 'NoRepair') {
-    New-ItemProperty -LiteralPath $uninstallKey -Name $k -Value 1 -PropertyType DWord -Force | Out-Null
-}
-New-ItemProperty -LiteralPath $uninstallKey -Name 'EstimatedSize' -Value $size -PropertyType DWord -Force | Out-Null
+# The text of the entry is the release kit's (appkit release-kit/scripts/uninstall-entry.ps1), shipped beside
+# this script; tools/check-release-kit-copy.py holds the copy to the kit.
+. (Join-Path $PSScriptRoot 'uninstall-entry.ps1')
+Set-UninstallEntry -RegistryRoot $RegistryRoot -Name 'takt' -DisplayName 'Takt' -Version ([string]$version) `
+    -InstallDir $InstallDir -App $app -StartMenuDir $StartMenuDir -DesktopDir $DesktopDir
 
 Write-Output ''
 Write-Output "installed takt $version to $InstallDir"

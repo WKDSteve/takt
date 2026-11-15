@@ -85,6 +85,10 @@ jobs:
         run: python3 scripts/check-control-chars.py
       - name: Jede uses-Zeile per SHA gepinnt (NREL-03)
         run: python3 scripts/check-action-pins.py
+      # scripts/uninstall-entry.ps1 is the file of appkit's release kit at the commit the workflows pin it to (copy of
+      # appkit's tools/check-release-kit-copy.py).
+      - name: uninstall-entry.ps1 ist die Datei des gepinnten release-kit
+        run: python3 scripts/check-release-kit-copy.py
 
   # libmpv from the distribution (a GPL build, accepted for zone 2 on 2026-10-31): the link smoke test runs for
   # real here; without it the test says SKIP. FFmpeg of Ubuntu is a GPL build and stays out (build_is_lgpl).
