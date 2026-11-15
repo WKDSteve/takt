@@ -148,8 +148,11 @@ const TRACK_LIST_ENTRIES: i64 = 256;
 
 /// The options of every core. No configuration, scripts or network helper of
 /// the user, no window (`vo=libmpv` is the render API), no text of mpv in
-/// the picture, and a file pulls in no other file.
-const OPTIONS: [(&CStr, &CStr); 10] = [
+/// the picture, and a file pulls in no other file. A video of a single frame
+/// without sound (mpv takes it for an image) ends after its frame instead of
+/// standing for `image-display-duration`, 5 s by default, before the
+/// playlist goes on; picture files are no entries of the playlist anyway.
+const OPTIONS: [(&CStr, &CStr); 11] = [
     (c"config", c"no"),
     (c"load-scripts", c"no"),
     (c"ytdl", c"no"),
@@ -160,6 +163,7 @@ const OPTIONS: [(&CStr, &CStr); 10] = [
     (c"osd-level", c"0"),
     (c"ordered-chapters", c"no"),
     (c"access-references", c"no"),
+    (c"image-display-duration", c"0"),
 ];
 
 /// What [`VideoBackend::open`] takes.
@@ -2424,6 +2428,37 @@ mod tests {
         println!("dropping a backend that opens: {took:?}");
         assert!(took < Duration::from_millis(500), "{took:?}");
         drop(slow);
+    }
+
+    /// A file of a single frame and no sound
+    /// (`scripts/make-one-frame-clip.py`): mpv takes it for an image and
+    /// showed it for 5 s (`image-display-duration`), so a playlist stood
+    /// still there. It shows its frame and ends.
+    #[test]
+    fn a_file_of_a_single_frame_shows_it_and_ends() {
+        let mut backend = backend(Sources::Files);
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/one-frame.mkv");
+        let asked = Instant::now();
+        // Its length (40 ms) may be gone already when the description is
+        // read: the file can end while it opens.
+        backend.open(file).unwrap();
+        let clock = backend.clock();
+        let mut frames = 0;
+        passes(&mut backend, Duration::from_secs(4), |_, _| {
+            frames += 1;
+            true
+        });
+        assert!(backend.is_eof(), "not ended after {:?}", asked.elapsed());
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "ended only after {:?}",
+            asked.elapsed()
+        );
+        // Its picture was there to be shown, also when the end came first.
+        if frames == 0 {
+            frames += usize::from(backend.next_frame(clock.as_ref()).unwrap().is_some());
+        }
+        assert_eq!(frames, 1, "its one picture");
     }
 
     #[test]
