@@ -16,3 +16,6 @@ test.log
 # Own workspaces under tools/ (tools/mpv-sub-add-repro)
 /tools/*/target
 /tools/*/Cargo.lock
+
+# Pictures and results of the test sheets (testing.nvim)
+TESTS/sheets/out/
