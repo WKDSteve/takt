@@ -48,6 +48,20 @@ pub fn has_console() -> bool {
     true
 }
 
+/// Whether the process was given a stderr at all (a console, a file, a pipe). A window program
+/// started from the Start menu has none.
+#[cfg(windows)]
+pub fn has_stderr() -> bool {
+    use std::os::windows::io::AsRawHandle as _;
+    !std::io::stderr().as_raw_handle().is_null()
+}
+
+/// Elsewhere stderr is where it always was.
+#[cfg(not(windows))]
+pub fn has_stderr() -> bool {
+    true
+}
+
 /// Shows `text` in a message window of the system and waits until it is closed.
 #[cfg(windows)]
 pub fn show_error(text: &str) {

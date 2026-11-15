@@ -7,6 +7,12 @@
 //! too; not under `%LOCALAPPDATA%\takt`, which the uninstall removes only when it is empty), and
 //! without a console a message window of the system shows them (`console::show_error`). Started
 //! from a terminal, everything is written there as before.
+//!
+//! Only on Windows: there the folder for temporary files belongs to the user. Elsewhere it is the
+//! shared `/tmp`, where a file of a fixed name could be a link another user laid out; and there
+//! stderr goes where the desktop sends it (the journal) anyway. The message window comes only
+//! when nobody can read stderr: no console and no stderr at all. A start whose stderr goes to a
+//! file or a pipe (a scheduled task, a script) must not wait for a click nobody can give.
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -16,9 +22,26 @@ use std::path::{Path, PathBuf};
 /// A log larger than this starts anew: it only has to hold the last failures.
 const LIMIT: u64 = 64 * 1024;
 
-/// The log file: `takt-player.log` in the folder for temporary files.
-pub fn path() -> PathBuf {
-    std::env::temp_dir().join("takt-player.log")
+/// The log file: `takt-player.log` in the folder for temporary files of the user; none outside
+/// Windows (module documentation).
+pub fn path() -> Option<PathBuf> {
+    cfg!(windows).then(|| std::env::temp_dir().join("takt-player.log"))
+}
+
+/// Whether a message has to go into a window: nothing reads stderr, neither a console nor a file
+/// or pipe it was given.
+const fn needs_window(has_console: bool, has_stderr: bool) -> bool {
+    !has_console && !has_stderr
+}
+
+/// Shows `text` in a message window when nobody reads stderr, naming the log.
+fn show_when_unread(text: &str) {
+    if needs_window(crate::console::has_console(), crate::console::has_stderr()) {
+        let place = path().map_or(String::new(), |p| {
+            format!("\n\nThe message is also in {}.", p.display())
+        });
+        crate::console::show_error(&format!("{text}{place}"));
+    }
 }
 
 /// Appends `message` as one line to the log at `path`, with the time (seconds since 1970) and
@@ -43,16 +66,13 @@ pub fn record_at(path: &Path, message: &str) {
     }
 }
 
-/// A failure of the start: to the log, and into a message window when there is no console to
-/// read stderr in. The caller has written it to stderr already.
+/// A failure of the start: to the log, and into a message window when nobody reads stderr. The
+/// caller has written it to stderr already.
 pub fn report(message: &str) {
-    record_at(&path(), message);
-    if !crate::console::has_console() {
-        crate::console::show_error(&format!(
-            "{message}\n\nThe message is also in {}.",
-            path().display()
-        ));
+    if let Some(log) = path() {
+        record_at(&log, message);
     }
+    show_when_unread(message);
 }
 
 /// What a panic says: where, and its message when it has one.
@@ -70,19 +90,18 @@ fn panic_text(info: &PanicHookInfo<'_>) -> String {
 }
 
 /// Lets every panic go to the log as well, after the default hook has written it to stderr. A
-/// panic of the main thread without a console is shown in a message window: the process ends
-/// with it, and nothing else would tell.
+/// panic of the main thread is shown in a message window when nobody reads stderr: the process
+/// ends with it, and nothing else would tell.
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default(info);
         let text = panic_text(info);
-        record_at(&path(), &text);
-        if std::thread::current().name() == Some("main") && !crate::console::has_console() {
-            crate::console::show_error(&format!(
-                "takt-player stopped: {text}\n\nThe message is also in {}.",
-                path().display()
-            ));
+        if let Some(log) = path() {
+            record_at(&log, &text);
+        }
+        if std::thread::current().name() == Some("main") {
+            show_when_unread(&format!("takt-player stopped: {text}"));
         }
     }));
 }
@@ -127,20 +146,48 @@ mod tests {
     }
 
     #[test]
+    fn only_windows_keeps_a_log_and_only_in_the_temp_folder_of_the_user() {
+        // Elsewhere the temp folder is the shared /tmp (module documentation).
+        assert_eq!(path().is_some(), cfg!(windows));
+        if let Some(log) = path() {
+            assert_eq!(log, std::env::temp_dir().join("takt-player.log"));
+        }
+    }
+
+    #[test]
+    fn a_window_only_when_nobody_reads_stderr() {
+        assert!(
+            needs_window(false, false),
+            "Start menu: no console, no stderr"
+        );
+        assert!(!needs_window(true, true), "a terminal");
+        assert!(!needs_window(true, false), "a console of its own");
+        assert!(
+            !needs_window(false, true),
+            "stderr to a file or a pipe: no click to wait for"
+        );
+    }
+
+    #[test]
     fn a_panic_names_where_and_what() {
-        // The hook is global: it keeps only the panic of this thread, so a test that panics
-        // meanwhile on another thread changes nothing here.
+        // The hook is global: it keeps only the panic of this thread and hands a panic of
+        // another test, on another thread meanwhile, to the hook before, which reports it as
+        // always.
+        type Hook = dyn Fn(&PanicHookInfo<'_>) + Send + Sync;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let into = std::sync::Arc::clone(&seen);
         let me = std::thread::current().id();
-        let before = std::panic::take_hook();
+        let before: std::sync::Arc<Hook> = std::panic::take_hook().into();
+        let others = std::sync::Arc::clone(&before);
         std::panic::set_hook(Box::new(move |info| {
             if std::thread::current().id() == me {
                 *into.lock().unwrap() = panic_text(info);
+            } else {
+                others(info);
             }
         }));
         let _ = std::panic::catch_unwind(|| panic!("no adapter {}", 7));
-        std::panic::set_hook(before);
+        std::panic::set_hook(Box::new(move |info| before(info)));
         let text = seen.lock().unwrap().clone();
         assert!(text.starts_with("panic at "), "{text}");
         assert!(text.contains("startlog.rs:"), "{text}");
