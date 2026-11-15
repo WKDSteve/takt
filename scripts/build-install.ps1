@@ -12,8 +12,9 @@ its scripts\install.ps1: %LOCALAPPDATA%\takt\bin (or $env:TAKT_INSTALL_DIR), the
 Mark-of-the-Web.
 
 The build links libmpv and FFmpeg only when TAKT_LIBMPV_DIR / FFMPEG_DIR point at them
-(docs/BUILD.md); without them it is the NullBackend build the CI makes. At run time the DLLs must be
-on the PATH or next to the exe: this script does not copy them.
+(docs/BUILD.md); without them it is the NullBackend build the CI makes. With TAKT_LIBMPV_DIR the
+install takes libmpv-2.dll from there and puts it next to takt-player.exe (install.ps1 -LibmpvDir), so
+the installed player needs nothing on the PATH. The DLLs of FFMPEG_DIR are not copied.
 
 Run it in a normal terminal: a Claude session (the Claude app redirects AppData and HKCU) may
 build (-BuildOnly), installing there is refused.
@@ -91,6 +92,9 @@ try {
     try {
         & (Join-Path $PSScriptRoot 'package-release.ps1') -BuildDir (Split-Path -Parent $exe) -StageDir $stage -NoZip -Sha $sha
         $installArgs = @{ PayloadDir = $stage }
+        # The build links libmpv: its DLL goes next to the program, by its own checked way (the
+        # stage stays the shape of the zip).
+        if ($env:TAKT_LIBMPV_DIR) { $installArgs.LibmpvDir = $env:TAKT_LIBMPV_DIR }
         if ($AllowElevated) { $installArgs.AllowElevated = $true }
         if ($DesktopShortcut) { $installArgs.DesktopShortcut = $true }
         & (Join-Path $stage 'install.ps1') @installArgs

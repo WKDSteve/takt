@@ -200,6 +200,36 @@ try {
         Write-Check ($r.Code -eq 0 -and $r.Output -match 'nothing to remove') "${shell}: a second uninstall finds nothing and says so"
     }
 
+    # libmpv of a build from the checkout (build-install.ps1 passes TAKT_LIBMPV_DIR as -LibmpvDir): next to
+    # the program, replaced by an update, removed by an install without it and by uninstall.ps1.
+    $mpvDir = Join-Path $work 'libmpv one'
+    $mpvDir2 = Join-Path $work 'libmpv two'
+    New-Item -ItemType Directory -Force -Path $mpvDir, $mpvDir2 | Out-Null
+    Set-Content -LiteralPath (Join-Path $mpvDir 'libmpv-2.dll') -Value 'first'
+    Set-Content -LiteralPath (Join-Path $mpvDir2 'libmpv-2.dll') -Value 'second'
+    $install = Join-Path $work 'mpv-install\takt\bin'
+    $startMenu = Join-Path $work 'mpv-startmenu'
+    $places = @('-InstallDir', $install, '-StartMenuDir', $startMenu, '-DesktopDir', (Join-Path $work 'mpv-desktop'), '-RegistryRoot', $regRoot, '-AllowElevated')
+    $dll = Join-Path $install 'libmpv-2.dll'
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') ($places + @('-LibmpvDir', $mpvDir))
+    Write-Check ($r.Code -eq 0 -and ((Get-Names $install) -join ',') -ceq 'LICENSE,README.md,VERSION,libmpv-2.dll,takt-player.exe,uninstall.ps1' -and
+        (Get-Sha $dll) -eq (Get-Sha (Join-Path $mpvDir 'libmpv-2.dll'))) 'libmpv: -LibmpvDir puts libmpv-2.dll next to the program'
+    if ($r.Code -ne 0) { Write-Output $r.Output }
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') ($places + @('-LibmpvDir', $mpvDir2))
+    Write-Check ($r.Code -eq 0 -and (Get-Sha $dll) -eq (Get-Sha (Join-Path $mpvDir2 'libmpv-2.dll')) -and -not (Get-ChildItem -LiteralPath $install -Filter '*.old')) 'libmpv: an update replaces the DLL and leaves no .old'
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') ($places + @('-LibmpvDir', (Join-Path $work 'no libmpv here')))
+    Write-Check ($r.Code -ne 0 -and $r.Output -match 'no libmpv-2.dll' -and (Get-Sha $dll) -eq (Get-Sha (Join-Path $mpvDir2 'libmpv-2.dll'))) 'libmpv: a -LibmpvDir without the DLL is refused, the install is unchanged'
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') $places
+    Write-Check ($r.Code -eq 0 -and -not (Test-Path -LiteralPath $dll)) 'libmpv: an install without -LibmpvDir removes the DLL of the one before'
+    $r = Invoke-Child (Join-Path $payload 'install.ps1') ($places + @('-LibmpvDir', $mpvDir))
+    $r = Invoke-Child (Join-Path $install 'uninstall.ps1') $places
+    Write-Check ($r.Code -eq 0 -and -not (Test-Path -LiteralPath $install)) 'libmpv: uninstall.ps1 removes the DLL and the folder with it'
+    $extra = Join-Path $work 'extra-mpv'
+    Copy-Item -LiteralPath $payload -Destination $extra -Recurse
+    Copy-Item -LiteralPath (Join-Path $mpvDir 'libmpv-2.dll') -Destination $extra
+    $r = Invoke-Child (Join-Path $extra 'install.ps1') @('-InstallDir', (Join-Path $work 'extra-mpv-install'), '-StartMenuDir', $startMenu, '-RegistryRoot', $regRoot, '-AllowElevated')
+    Write-Check ($r.Code -ne 0 -and $r.Output -match 'libmpv-2.dll' -and -not (Test-Path -LiteralPath (Join-Path $work 'extra-mpv-install'))) 'libmpv: a payload (zip) with the DLL in it is still refused'
+
     $startMenu = Join-Path $work 'refuse-startmenu'
     $foreign = Join-Path $work 'foreign'
     New-Item -ItemType Directory -Force -Path $foreign | Out-Null
@@ -279,6 +309,8 @@ try {
         # program itself, which is moved to the temp folder.
         $r = Invoke-Child (Join-Path $real 'install.ps1') $places
         Set-Content -LiteralPath (Join-Path $install 'README.md.new') -Value 'cut short'
+        # The DLL of an install from the checkout goes with it (PRODUCT.files of src/uninstall.rs).
+        Set-Content -LiteralPath (Join-Path $install 'libmpv-2.dll') -Value 'libmpv'
         Get-ChildItem -LiteralPath $script:appTemp -Force | Remove-Item -Force
         Set-Content -LiteralPath (Join-Path $script:appTemp 'takt-player-removed-1.exe') -Value 'left by an earlier removal'
         $r = Invoke-Entry ([string](Get-ItemProperty -LiteralPath $key).UninstallString)

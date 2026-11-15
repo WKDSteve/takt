@@ -9,6 +9,8 @@ folder holds, all in one folder (%LOCALAPPDATA%\takt\bin):
 
   takt-player.exe, uninstall.ps1, LICENSE, README.md, VERSION
 
+and, from a build that links libmpv (-LibmpvDir, scripts\build-install.ps1), libmpv-2.dll,
+
 plus a Start menu entry "Takt" with the icon of the program, on request a desktop shortcut, and an
 entry in Settings > Apps (which runs the installed player as "takt-player.exe --uninstall": no
 PowerShell, no console window; uninstall.ps1 is the same for the terminal; the entry is written by
@@ -24,6 +26,12 @@ this script.
 
 .PARAMETER PayloadDir
 The folder to install from (default: the folder of this script, i.e. the unpacked zip).
+
+.PARAMETER LibmpvDir
+A folder with libmpv-2.dll (the TAKT_LIBMPV_DIR of a build that links libmpv): the DLL is installed
+next to takt-player.exe, swapped with the other files. Only scripts\build-install.ps1 passes it; the
+payload folder itself stays the shape of the zip (a DLL in it is refused). Without it, a libmpv-2.dll
+of an earlier install is removed: the program installed now does not use it.
 
 .PARAMETER DesktopShortcut
 Also put a shortcut on the desktop (off by default; the Start menu entry is always made).
@@ -57,6 +65,7 @@ param(
     [switch] $DesktopShortcut,
     [string] $DesktopDir = '',
     [string] $PayloadDir = '',
+    [string] $LibmpvDir = '',
     [string] $InstallDir = '',
     [string] $StartMenuDir = '',
     [string] $RegistryRoot = ''
@@ -68,6 +77,8 @@ $ErrorActionPreference = 'Stop'
 $program = 'takt-player'
 # What a payload holds, no more and no less: anything else is a folder that is not a release.
 $payloadFiles = @('takt-player.exe', 'install.ps1', 'uninstall-entry.ps1', 'uninstall.ps1', 'LICENSE', 'README.md', 'VERSION')
+# libmpv of a build from the checkout: never part of a payload, only given by -LibmpvDir.
+$libmpv = 'libmpv-2.dll'
 
 function Exit-Install([string] $Message) {
     throw "install.ps1: $Message"
@@ -144,13 +155,22 @@ if ((Test-Path -LiteralPath $InstallDir -PathType Container) -and -not (Test-Ins
 
 # The text of the entry (uninstall-entry.ps1) is used by this script only: it is not installed.
 $files = @($payloadFiles | Where-Object { $_ -cne 'install.ps1' -and $_ -cne 'uninstall-entry.ps1' })
+# Where each file comes from: the payload, and the DLL from -LibmpvDir.
+$sources = @{}
+foreach ($name in $files) { $sources[$name] = Join-Path $PayloadDir $name }
+if ($LibmpvDir) {
+    $dll = Join-Path $LibmpvDir $libmpv
+    if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { Exit-Install "no $libmpv in $LibmpvDir (-LibmpvDir): nothing was installed" }
+    $files += $libmpv
+    $sources[$libmpv] = (Resolve-Path -LiteralPath $dll).ProviderPath
+}
 
 Write-Output "==> copying takt $version to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # All files go to .new first and are renamed only when every copy succeeded.
 try {
     foreach ($name in $files) {
-        Copy-Item -LiteralPath (Join-Path $PayloadDir $name) -Destination (Join-Path $InstallDir "$name.new") -Force
+        Copy-Item -LiteralPath $sources[$name] -Destination (Join-Path $InstallDir "$name.new") -Force
     }
 }
 catch {
@@ -188,6 +208,17 @@ catch {
 # An .old still held by a running takt stays; the next install or uninstall.ps1 takes it away.
 foreach ($name in $files) {
     Remove-Item -LiteralPath (Join-Path $InstallDir "$name.old") -Force -ErrorAction SilentlyContinue
+}
+# A libmpv of an earlier install from the checkout, when this install brings none: the program now
+# installed does not load it. One that a running takt holds stays until the next install.
+if (-not $LibmpvDir) {
+    foreach ($suffix in '', '.old') {
+        $stale = Join-Path $InstallDir "$libmpv$suffix"
+        if (Test-Path -LiteralPath $stale -PathType Leaf) {
+            Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $stale)) { Write-Output "removed $stale of an earlier install" }
+        }
+    }
 }
 $app = Join-Path $InstallDir "$program.exe"
 

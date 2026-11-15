@@ -26,6 +26,8 @@ pub const PRODUCT: Product = Product {
         "LICENSE",
         "README.md",
         "VERSION",
+        // Next to the program in an install from the checkout (`install.ps1 -LibmpvDir`).
+        "libmpv-2.dll",
     ],
     folders: &[],
     run_value: None,

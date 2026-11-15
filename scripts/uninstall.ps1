@@ -50,7 +50,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$files = @('takt-player.exe', 'uninstall.ps1', 'LICENSE', 'README.md', 'VERSION')
+# libmpv-2.dll: the DLL an install from the checkout puts next to the program (install.ps1 -LibmpvDir).
+$files = @('takt-player.exe', 'uninstall.ps1', 'LICENSE', 'README.md', 'VERSION', 'libmpv-2.dll')
 
 function Get-Setting([string] $Given, [string] $EnvName, [string] $Default) {
     if ($Given) { return $Given }
