@@ -55,7 +55,7 @@ Der Release-Build von `takt-player.exe` ist ein Fenster-Programm: aus dem Startm
 Quelle: die vorgebauten Archive `mpv-dev-x86_64-<Datum>-git-<Hash>.7z` aus [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake/releases), die Variante **ohne** `-v3` im Namen (`-v3` setzt AVX2 voraus). Sie enthalten `libmpv-2.dll`, die Header unter `include/mpv/` und die GNU-Importbibliothek `libmpv.dll.a`, aber keine `mpv.lib` für den MSVC-Linker. Die erzeugt man aus den Exporten der DLL:
 
 ```powershell
-7z x mpv-dev-x86_64-20261021-git-e471496c56.7z -oE:\deps\mpv-dev
+7z x mpv-dev-x86_64-20261111-git-bcde6b93cc.7z -oE:\deps\mpv-dev
 cd E:\deps\mpv-dev
 
 # Nur die mpv_*-Funktionen: die DLL exportiert zusätzlich Symbole statisch
@@ -79,8 +79,8 @@ lib /def:mpv.def /machine:x64 /out:mpv.lib
 
 Die shinchiro-Builds sind **GPL-Builds**, in zweierlei Hinsicht:
 
-- mpv selbst baut ohne `-Dgpl=false` als GPL (Standard) und bindet GPL-Teile wie rubberband und dvdnav ein. Nachprüfbar über die Eigenschaft `mpv-configuration` (Stand Build 20261021: kein `-Dgpl=false`).
-- Die DLL enthält eine **statisch eingebundene FFmpeg** (Build 20261021: `N-127893-g9a861e968`) mit libx264, libx265 und postproc, also ein `--enable-gpl`-Build. Sie lädt keine `av*.dll`; diese FFmpeg ist weder austauschbar noch LGPL. `build_is_lgpl` sieht sie nicht, denn der Test prüft nur das separat gelinkte FFmpeg aus `FFMPEG_DIR`.
+- mpv selbst baut ohne `-Dgpl=false` als GPL (Standard) und bindet GPL-Teile wie rubberband und dvdnav ein. Nachprüfbar über die Eigenschaft `mpv-configuration` (Stand Build 20261111: kein `-Dgpl=false`).
+- Die DLL enthält eine **statisch eingebundene FFmpeg** (Build 20261111: `N-128766-gcd4e96eb3`) mit libx264, libx265 und postproc, also ein `--enable-gpl`-Build. Sie lädt keine `av*.dll`; diese FFmpeg ist weder austauschbar noch LGPL. `build_is_lgpl` sieht sie nicht, denn der Test prüft nur das separat gelinkte FFmpeg aus `FFMPEG_DIR`.
 
 Was das bedeutet: `takt-player` steht ohnehin unter `GPL-3.0-or-later`, und mpv unter „GPLv2 or later“ ist damit verträglich. Die Zone-1-Crates linken libmpv nie und bleiben permissiv. Ausgeschlossen ist, eine Binärdatei mit dieser libmpv unter einer anderen Lizenz als GPL weiterzugeben. Technisch liegen außerdem zwei FFmpeg-Kopien verschiedener Version im Prozess, sobald takt selbst FFmpeg linkt; Frames lassen sich zwischen libmpv und einer eigenen FFmpeg-Schicht dann nicht direkt austauschen. Eine LGPL-libmpv gibt es nicht vorgebaut; sie bräuchte einen eigenen Build mit `-Dgpl=false` gegen eine LGPL-FFmpeg (ohne rubberband, dvdnav, x264 und weitere GPL-Teile). **Entschieden am 2026-10-31** (`takt/entscheidung-libmpv-lizenz-build` im Vault): der vorgebaute GPL-Build bleibt, GPL-libmpv nur in Zone 2, nie in Zone 1. Der Smoke-Test `license_state_matches_build_md` liest `mpv-configuration` und schlägt fehl, sobald ein LGPL-Build (`-Dgpl=false`) auftaucht, damit dieser Abschnitt dann nachgezogen wird. Er sieht nur die meson-Option auf der Kommandozeile (Groß-/Kleinschreibung egal): ein LGPL-Build, der `gpl=false` über eine Native- oder Cross-Datei setzt, oder ein Tausch nur der eingebauten FFmpeg fällt ihm nicht auf. Beim Aktualisieren der DLL deshalb diesen Abschnitt prüfen (`mpv-version`, `ffmpeg-version`, `mpv-configuration`). Ein robusteres Signal wäre die Log-Zeile „List of enabled features: … gpl …“, die libmpv beim Initialisieren auf Log-Level `v` ausgibt; sie braucht im Test allerdings eine kleine Ereignisschleife (`mpv_request_log_messages`, `mpv_wait_event`).
 

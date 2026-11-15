@@ -135,9 +135,9 @@ jobs:
     name: libmpv gelinkt (Windows, Archiv gepinnt)
     runs-on: windows-latest
     env:
-      MPV_TAG: "20261021"
-      MPV_ARCHIVE: mpv-dev-x86_64-20261021-git-e471496c56.7z
-      MPV_SHA256: efc719eff3dc5954b4a5efc800632808bcec01cc9034940dd14e5eb7fe9ea633
+      MPV_TAG: "20261111"
+      MPV_ARCHIVE: mpv-dev-x86_64-20261111-git-bcde6b93cc.7z
+      MPV_SHA256: 273c079b11ea5575822f972756f4c9a71149a5c10130353abeb8586738938452
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-12
         # The tests load a library that is not ours: the token of the run does not stay in the checkout.
