@@ -31,6 +31,13 @@ winit = { version = "0.30", default-features = false, features = ["wayland-dlope
 assert_no_alloc = { version = "1.1", default-features = false }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
+[target.'cfg(windows)'.dependencies]
+# `takt-player --uninstall`, what the entry in Settings > Apps runs (src/uninstall.rs): the program removes its
+# install in its own process. A crate of the author's kit (MIT, no dependency of its own), by tag; Cargo.lock
+# pins the commit. Zone 2 only: the zone 1 crates never see it.
+# The version is the one the kit's crates carry (the tag is the version); named so cargo deny sees no wildcard.
+appkit-uninstall = { git = "https://github.com/WKDSteve/appkit", tag = "v0.55.1", version = "0.0.0" }
+
 [dev-dependencies]
 # Blocks on the adapter and device of the GPU test.
 pollster = "0.4"

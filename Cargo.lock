@@ -184,6 +184,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "appkit-uninstall"
+version = "0.0.0"
+source = "git+https://github.com/WKDSteve/appkit?tag=v0.55.1#2fd03ecda6ce3ca660d5484a7f4c88d5101d4c51"
+
+[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2982,6 +2987,7 @@ version = "0.0.1"
 name = "takt-player"
 version = "0.0.1"
 dependencies = [
+ "appkit-uninstall",
  "assert_no_alloc",
  "cpal",
  "eframe",

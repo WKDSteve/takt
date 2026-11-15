@@ -65,3 +65,5 @@ ignore = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The author's own kit, for appkit-uninstall of takt-player (Windows), pinned by tag and by Cargo.lock.
+allow-git = ["https://github.com/WKDSteve/appkit"]
