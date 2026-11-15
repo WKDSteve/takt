@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A reproduction of a hang of mpv without Takt (docs/reviews/phase-0.md); its own workspace, no member of Takt's.
+[package]
+name = "mpv-sub-add-repro"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[dependencies]

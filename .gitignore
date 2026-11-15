@@ -12,3 +12,7 @@
 .idea/
 *.swp
 test.log
+
+# Own workspaces under tools/ (tools/mpv-sub-add-repro)
+/tools/*/target
+/tools/*/Cargo.lock

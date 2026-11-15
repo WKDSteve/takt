@@ -290,8 +290,26 @@ gerendert und gefragt.
 
   mpvs Kern (0.41, Windows-Build) bleibt stehen, sobald ein asynchrones `sub-add` abgebrochen oder von einem Laden
   eingeholt wird. `sub-add` wartet deshalb weiter auf mpv; an einem schlafenden Laufwerk hält das Lesen einer
-  Untertiteldatei das Fenster so lange an. Nicht nachgestellt: derselbe Ablauf ohne Takt (ein kleines Programm gegen
-  dieselbe libmpv) und auf dem libmpv aus apt.
+  Untertiteldatei das Fenster so lange an.
+- **Ohne Takt nachgestellt (2026-11-15).** `tools/mpv-sub-add-repro` ist ein kleines Programm nur gegen die C-API von
+  libmpv (für `vo=libmpv` mit dem Software-Renderer in einem eigenen Thread, der nach jedem Bild `time-pos` fragt
+  wie Takt; wahlweise mit dem Hook `on_load`, beantwortet wie Takt). Je Lauf ein Prozess, der nach 15 s als hängend
+  gilt; 50 Läufe je Zeile. `all` ist die Folge des Takt-Tests (drei `sub-add`, eine davon keine Untertiteldatei,
+  dann acht und sofort `loadfile`), `abort`, `bad` und `load` sind die drei Auslöser einzeln:
+
+  | libmpv | `vo` | `all` | `abort` | `bad` | `load` |
+  |---|---|---|---|---|---|
+  | Windows, mpv 0.41 (`E:/deps/mpv-dev`, 20261111) | `null` | 0 | 0 | 0 | 0 |
+  | Windows, mpv 0.41 | `libmpv` | 0 | 0 | 0 | 0 |
+  | Windows, mpv 0.41, mit Hook `on_load` | `null` / `libmpv` | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+  | Ubuntu 24.04, libmpv aus apt (2.2.0, mpv 0.37), Container | `null` | 0 | 0 | 0 | 0 |
+  | Ubuntu 24.04, libmpv aus apt | `libmpv` | **4** | 0 | 0 | 0 |
+
+  Lesart: mit dem libmpv aus apt hängt der Kern **ohne Takt**, nur mit der Render-API und nur in der ganzen Folge,
+  keiner der drei Auslöser allein. Auf dem Windows-Build, mit dem Takt 20 bis 30 % Hänger zählte, hängt der Nachbau
+  in 400 Läufen nie; dort liegt der Unterschied also in Takt (etwa die Fragen des Fensters je Durchlauf, die der
+  Nachbau nicht stellt). Ob das bei mpv gemeldet wird, ist eine offene Entscheidung; der Nachbau ist der Anhang
+  dafür.
 
 ### A/V-Sync von Hand
 
