@@ -1988,6 +1988,74 @@ mod tests {
         format!("1\n00:00:00,000 --> 00:00:03,000\n{text}\n")
     }
 
+    /// An ASS file made to be expensive to draw: `lines` events at once, each
+    /// a long text with a wide border and a strong blur, scaled up, so that
+    /// libass works on every frame of the three seconds.
+    fn costly_ass(lines: usize) -> String {
+        let mut ass = String::from(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n\
+             [V4+ Styles]\n\
+             Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, \
+             Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, \
+             Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+             Style: Default,Arial,90,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,\
+             30,20,5,0,0,0,1\n\n\
+             [Events]\n\
+             Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+        );
+        let text = "TAKT-COSTLY ".repeat(20);
+        for line in 0..lines {
+            // Every event moves and turns a little in every frame: nothing of
+            // the frame before can be reused.
+            ass.push_str(&format!(
+                "Dialogue: {line},0:00:00.00,0:00:03.00,Default,,0,0,0,,\
+                 {{\\blur40\\bord40\\move(0,{y},1920,{y2})\\t(\\frz360\\fscx400\\fscy400)}}{text}\n",
+                y = line * 7 % 1080,
+                y2 = (line * 13 + 500) % 1080,
+            ));
+        }
+        ass
+    }
+
+    /// A subtitle file that takes libass long to draw must hold up the
+    /// render thread only, not the window: the passes of the window stay
+    /// short while the frames take long to come.
+    ///
+    /// Known red (measured 2026-11-15, mpv 0.41): a pass waits as long as a
+    /// frame takes to draw (about 150 ms with this file), because every
+    /// question to the core (`audio-pts` in `publish_position`) waits while
+    /// the render thread draws the subtitles. Bug
+    /// `takt/mpv-backend-teure-untertitel-halten-das-fenster-an`; the test
+    /// runs with `--ignored`.
+    #[test]
+    #[ignore = "known red: a pass waits for the core while libass draws (takt/mpv-backend-teure-untertitel-halten-das-fenster-an)"]
+    fn subtitles_that_are_costly_to_draw_do_not_hold_up_the_window() {
+        let folder = Folder::new("costly-ass");
+        let subtitles = folder.write("film.ass", &costly_ass(60));
+        let mut backend = backend(Sources::Files);
+        backend.open(&folder.film()).unwrap();
+        backend.add_subtitles(&subtitles).unwrap();
+        let clock = backend.clock();
+        let started = Instant::now();
+        let mut longest = Duration::ZERO;
+        while started.elapsed() < Duration::from_secs(2) && !backend.is_eof() {
+            let pass = Instant::now();
+            let _ = backend.next_frame(clock.as_ref()).unwrap();
+            longest = longest.max(pass.elapsed());
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        // The file is costly indeed: else the test would show nothing.
+        let drawing = Duration::from_nanos(backend.render_times().max_nanos());
+        assert!(
+            drawing >= Duration::from_millis(50),
+            "drawing took only {drawing:?}"
+        );
+        assert!(
+            longest < Duration::from_millis(50),
+            "a pass took {longest:?} while drawing took up to {drawing:?}"
+        );
+    }
+
     /// An EDL of mpv with one entry (`%length%name` takes any character).
     fn edl(entry: &str) -> String {
         format!("# mpv EDL v0\n%{}%{entry}\n", entry.len())
