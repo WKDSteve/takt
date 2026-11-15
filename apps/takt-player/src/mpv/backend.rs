@@ -2220,7 +2220,11 @@ mod tests {
         );
         assert!(asked.elapsed() < Duration::from_secs(5));
 
-        // And the next file plays.
+        // And the next file plays, with the limit of the player again: the
+        // 300 ms above are for the source that never answers, and a loaded
+        // machine opens the test file slower than that (measured: 15 of 80
+        // parallel runs gave "not open after 300ms" here).
+        backend.open_timeout = OPEN_TIMEOUT;
         backend.open(&clip()).unwrap();
         let mut frames = 0;
         passes(&mut backend, Duration::from_secs(2), |_, _| {
