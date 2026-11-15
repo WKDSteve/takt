@@ -1107,9 +1107,15 @@ mod tests {
             landed = session.seek_landed(shown);
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
-        // The keyframe at 2 s, not the target at 2.5 s. On a busy machine the
-        // position was read a frame or two after the keyframe (2060 ms in
-        // one run of twelve, also while held; why is not known).
+        // The keyframe at 2 s, not the target at 2.5 s. Or a little after
+        // it: mpv names the position of the sound once the sound runs
+        // (`time-pos` is then `audio-pts`), and after the change of the
+        // subtitle track above the sound of the jump sometimes starts one or
+        // two of its packets (about 21 ms each) after the keyframe, at 2039
+        // or 2060 ms. Measured without load: 8 of 200 jumps with the track
+        // change, none of 200 without it. The events of the jump are not
+        // mistaken for those of another one: when the end of the jump was
+        // taken, mpv itself already named 2060 ms and no longer seeked.
         assert!(
             landed.is_some_and(|ms| (2_000..=2_120).contains(&ms)),
             "{landed:?}"
