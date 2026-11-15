@@ -116,6 +116,22 @@ pub struct Snapshot {
     pub overlay_cost: Option<(u64, u64)>,
 }
 
+/// Writes the text of F4 into a new file at `path`. A file or a link that is there already is
+/// never written through: outside Windows the folder for temporary files is the shared `/tmp`,
+/// and the name (`takt-diagnostics-<seconds>.txt`) can be guessed.
+///
+/// # Errors
+///
+/// When the file exists already or cannot be written.
+pub fn save_new(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(text.as_bytes())
+}
+
 fn ms(nanos: f64) -> String {
     format!("{:.3} ms", nanos / 1e6)
 }
@@ -510,6 +526,19 @@ mod tests {
         ] {
             assert!(text.contains(expected), "{expected:?} missing in\n{text}");
         }
+    }
+
+    #[test]
+    fn the_diagnostics_go_into_a_new_file_never_through_one_that_is_there() {
+        let path =
+            std::env::temp_dir().join(format!("takt-test-diagnostics-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        save_new(&path, "first").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        // A second save with the same name (or a file laid out under it) is refused.
+        assert!(save_new(&path, "second").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

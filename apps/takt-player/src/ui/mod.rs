@@ -597,7 +597,7 @@ impl PlayerApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let path = std::env::temp_dir().join(format!("takt-diagnostics-{secs}.txt"));
-        let line = match std::fs::write(&path, &text) {
+        let line = match diagnostics::save_new(&path, &text) {
             Ok(()) => format!("saved: {} (and the clipboard)", path.display()),
             Err(e) => format!("not saved ({e}), in the clipboard"),
         };
