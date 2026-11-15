@@ -1,6 +1,6 @@
 # Bauen
 
-Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` über `NullBackend`, und genau so baut die CI. Einzige Systemvoraussetzung ist unter Linux die Audio-Ausgabe (`cpal` über ALSA): `sudo apt-get install libasound2-dev` (Fedora: `alsa-lib-devel`); Windows und macOS brauchen nichts. Die nativen Bibliotheken werden nur eingebunden, wenn eine Umgebungsvariable auf sie zeigt. Dieses Dokument beschreibt, wie man sie beschafft.
+Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` über `NullBackend`, und genau so baut die CI. Systemvoraussetzung ist unter Linux nur die Audio-Ausgabe (`cpal` über ALSA, die Echtzeit-Priorität über rtkit und D-Bus): `sudo apt-get install libasound2-dev libdbus-1-dev` (Fedora: `alsa-lib-devel dbus-devel`); Windows und macOS brauchen nichts. Die nativen Bibliotheken werden nur eingebunden, wenn eine Umgebungsvariable auf sie zeigt. Dieses Dokument beschreibt, wie man sie beschafft.
 
 ## Table of content
 
@@ -142,7 +142,7 @@ Geprüft auf Ubuntu (Runner `ubuntu-latest` der CI, libmpv aus `apt`); noch nich
 
 ### Priorität des Audio-Threads
 
-`takt-player` lässt `cpal` den Audio-Thread auf Echtzeit-Priorität (`SCHED_FIFO`) heben. Ein normaler Benutzer darf das unter Linux nur mit einer rtprio-Grenze; ohne sie läuft der Ton mit normaler Priorität weiter, und der Player meldet am Ende `Prioritaet refused: …`. Einrichtung, einmal, danach ab- und wieder anmelden:
+`takt-player` lässt `cpal` den Audio-Thread auf Echtzeit-Priorität (`SCHED_FIFO`) heben. Unter Linux fragt es dafür zuerst rtkit über D-Bus (Feature `realtime-dbus` von `cpal`, seit dem 2026-11-15): auf einem Desktop mit rtkit (die meisten mit PipeWire oder PulseAudio) geht das ohne Einrichtung. Zum Bauen braucht es die Header von D-Bus (`sudo apt install libdbus-1-dev`, Arch: `dbus`). Ohne rtkit braucht ein normaler Benutzer eine rtprio-Grenze; ohne beides läuft der Ton mit normaler Priorität weiter, und der Player meldet am Ende `Prioritaet refused: …`. Einrichtung der Grenze, einmal, danach ab- und wieder anmelden:
 
 ```bash
 # Gruppe audio (Debian/Ubuntu: gibt es schon; Arch: mit realtime-privileges die Gruppe realtime)
@@ -150,7 +150,7 @@ sudo usermod -aG audio "$USER"
 printf '@audio - rtprio 95\n@audio - memlock unlimited\n' | sudo tee /etc/security/limits.d/95-audio.conf
 ```
 
-Prüfen: `ulimit -r` zeigt danach `95`. Ohne Anmeldung über PAM (etwa in einem Container) greift `limits.d` nicht. Der Weg über rtkit (D-Bus, ohne Gruppe) ist noch nicht eingebaut: er braucht das Feature `realtime-dbus` von `cpal` und `libdbus-1-dev`.
+Prüfen: `ulimit -r` zeigt danach `95`. Ohne Anmeldung über PAM (etwa in einem Container) greift `limits.d` nicht.
 
 Unter Windows fordert `cpal` über `audio_thread_priority` die MMCSS-Klasse „Audio“ an (nicht „Pro Audio“), ohne Einrichtung, und nimmt bei einer Ablehnung `THREAD_PRIORITY_TIME_CRITICAL`; unter macOS ist der CoreAudio-Thread schon ein Echtzeit-Thread.
 

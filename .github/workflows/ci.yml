@@ -39,9 +39,9 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
-      - name: ALSA-Header (cpal unter Linux)
+      - name: ALSA- und D-Bus-Header (cpal unter Linux, rtkit)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libdbus-1-dev
       - name: Formatierung
         run: cargo fmt --all --check
       - name: Clippy
@@ -104,8 +104,8 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
-      - name: ALSA- und libmpv-Header
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libmpv-dev pkg-config
+      - name: ALSA-, D-Bus- und libmpv-Header
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libdbus-1-dev libmpv-dev pkg-config
       # The recipe of docs/BUILD.md (section Linux), word for word.
       - name: Link-Test gegen libmpv (Rezept aus BUILD.md)
         run: |
@@ -269,7 +269,7 @@ jobs:
         with:
           toolchain: 1.90.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
-      - name: ALSA-Header (cpal unter Linux)
+      - name: ALSA- und D-Bus-Header (cpal unter Linux, rtkit)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libdbus-1-dev
       - run: cargo check --workspace --all-features
