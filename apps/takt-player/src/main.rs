@@ -35,6 +35,7 @@ mod playlist;
 mod refresh;
 mod render;
 mod session;
+mod startlog;
 mod theme;
 mod ui;
 #[cfg(windows)]
@@ -74,6 +75,8 @@ fn files(args: &[String]) -> Vec<PathBuf> {
 fn main() -> ExitCode {
     // Before the first line is written: a window program has no console of its own.
     console::attach_parent();
+    // A panic also goes to the log, and without a console into a message window (`startlog`).
+    startlog::install_panic_hook();
     // `--uninstall`: the entry in Settings > Apps. The program removes its own install, in this
     // process and with a question in a window (`uninstall`).
     #[cfg(windows)]
@@ -114,7 +117,10 @@ fn main() -> ExitCode {
     match ui::run(seconds, overlay, files(&args[1..])) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("takt-player: no window: {e} (--headless runs without one)");
+            let message = format!("no window: {e} (--headless runs without one)");
+            eprintln!("takt-player: {message}");
+            // Started from the Start menu nobody reads stderr: a log and a message window.
+            startlog::report(&message);
             ExitCode::FAILURE
         }
     }

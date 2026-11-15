@@ -16,7 +16,58 @@ const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn AttachConsole(process_id: u32) -> i32;
+    fn GetConsoleWindow() -> *mut core::ffi::c_void;
 }
+
+/// `MB_OK | MB_ICONERROR`: one button, the icon of an error.
+#[cfg(windows)]
+const MB_ICONERROR: u32 = 0x10;
+
+#[cfg(windows)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn MessageBoxW(
+        owner: *mut core::ffi::c_void,
+        text: *const u16,
+        caption: *const u16,
+        kind: u32,
+    ) -> i32;
+}
+
+/// Whether the process has a console to write to: its own (a debug build) or the one of the
+/// terminal it was attached to. Started from the Start menu, a release build has none.
+#[cfg(windows)]
+pub fn has_console() -> bool {
+    // SAFETY: GetConsoleWindow takes nothing and only returns a handle (null without a console).
+    !unsafe { GetConsoleWindow() }.is_null()
+}
+
+/// Elsewhere stderr is where it always was.
+#[cfg(not(windows))]
+pub fn has_console() -> bool {
+    true
+}
+
+/// Shows `text` in a message window of the system and waits until it is closed.
+#[cfg(windows)]
+pub fn show_error(text: &str) {
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (text, caption) = (wide(text), wide("Takt"));
+    // SAFETY: both strings are NUL-terminated UTF-16 buffers that live until the call returns;
+    // a null owner is allowed and means the window has no parent.
+    let _ = unsafe {
+        MessageBoxW(
+            core::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_ICONERROR,
+        )
+    };
+}
+
+/// Elsewhere there is no message window: stderr has the text already.
+#[cfg(not(windows))]
+pub fn show_error(_text: &str) {}
 
 /// Lets `print!` and `eprintln!` reach the terminal the player was started from.
 ///
