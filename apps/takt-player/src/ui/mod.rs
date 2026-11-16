@@ -103,6 +103,9 @@ struct PlayerApp {
     /// The upload times of the texture path used last, as read in the last
     /// pass: the window is gone when the run prints its numbers.
     uploads: Option<takt_audio::DurationSnapshot>,
+    /// The request of the render thread for real-time priority: the handle
+    /// to give it back with, or why there is none.
+    priority: Result<audio_thread_priority::RtPriorityHandle, String>,
 }
 
 impl PlayerApp {
@@ -144,6 +147,7 @@ impl PlayerApp {
             playlist: Playlist::default(),
             drop_problems: Vec::new(),
             uploads: None,
+            priority: raise_priority(),
         };
         app.take_paths(files, false);
         app
@@ -575,6 +579,7 @@ impl PlayerApp {
             max_extrapolation_nanos: clock.max_extrapolation_nanos(),
             display_period_nanos: self.refresh.period_nanos(),
             pass_gaps: self.refresh.gaps(),
+            render_priority: priority_label(&self.priority),
             audio_line: self.session.audio_line(),
             audio: self
                 .session
@@ -874,6 +879,13 @@ fn histogram(ui: &mut egui::Ui, classes: &[u32; 16]) {
 impl Drop for PlayerApp {
     /// The measurements of the run, when the window closes.
     fn drop(&mut self) {
+        let priority = std::mem::replace(&mut self.priority, Err("given back".to_owned()));
+        let rt = u8::from(priority.is_ok());
+        if let Ok(handle) = priority {
+            // The window is closing; a failed demotion changes nothing for it.
+            let _ = audio_thread_priority::demote_current_thread_from_real_time(handle);
+        }
+        println!("takt-player: render thread ui_rt={rt}");
         println!("takt-player: {}", self.summary());
         println!("takt-player: source {}", self.session.source_line());
         println!("takt-player: audio {}", self.session.audio_line());
@@ -898,6 +910,30 @@ impl Drop for PlayerApp {
     }
 }
 
+/// Asks real-time priority for the thread that calls it, the render thread
+/// of the window, sized for one refresh at 60 Hz.
+///
+/// Measured under 77 to 100 % load on the machine, five minutes of the test
+/// picture each (`docs/reviews/phase-0.md`, „Präsentation unter Nebenlast“):
+/// at normal priority 25 refreshes went without a pass, at real time 11, and
+/// the thread used 9 % of a core, so `present` waits for vsync and does not
+/// spin.
+fn raise_priority() -> Result<audio_thread_priority::RtPriorityHandle, String> {
+    audio_thread_priority::promote_current_thread_to_real_time(
+        crate::audio::SAMPLE_RATE / 60,
+        crate::audio::SAMPLE_RATE,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The render thread's priority in words, as the feeder's is named.
+fn priority_label<T>(priority: &Result<T, String>) -> String {
+    match priority {
+        Ok(_) => "real time".to_owned(),
+        Err(why) => format!("normal, real time refused: {why}"),
+    }
+}
+
 /// Opens the window and runs until it closes, or for `seconds`. `files`
 /// (files, or folders of media files) are the playlist it starts with.
 ///
@@ -918,4 +954,35 @@ pub fn run(seconds: Option<u64>, overlay: bool, files: Vec<PathBuf>) -> eframe::
         options,
         Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds, overlay, &files)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_render_thread_asks_for_real_time_priority_and_says_what_it_got() {
+        // On a thread of its own: the priority must not stay with a thread
+        // of the test harness.
+        let label = std::thread::spawn(|| {
+            let priority = raise_priority();
+            let label = priority_label(&priority);
+            if let Ok(handle) = priority {
+                let _ = audio_thread_priority::demote_current_thread_from_real_time(handle);
+            }
+            label
+        })
+        .join()
+        .unwrap();
+        // Windows grants it to every process (MMCSS); Linux only with rtkit
+        // or an rtprio limit, which a CI runner need not have.
+        #[cfg(windows)]
+        assert_eq!(label, "real time");
+        #[cfg(not(windows))]
+        assert!(label.starts_with("real time") || label.starts_with("normal, real time refused: "));
+        assert_eq!(
+            priority_label::<()>(&Err("no rtkit".to_owned())),
+            "normal, real time refused: no rtkit"
+        );
+    }
 }
