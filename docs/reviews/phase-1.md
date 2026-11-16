@@ -25,7 +25,8 @@ Performance-Grenzen? Welche Angriffsfläche ist neu entstanden? Dazu kommt die G
 > bleiben und darauf weiterbauen. Kein Gesichtsverlust; der Trait war genau dafür da. (KONZEPT, Roadmap mit Gates)
 
 „mpv-Niveau“ braucht Zahlen, bevor die eigene Pipeline die erste Zeile Bild liefert, sonst wird das Kriterium
-nachträglich an das Ergebnis angepasst. **Vorschlag, noch nicht entschieden:**
+nachträglich an das Ergebnis angepasst. **Entschieden am 2026-11-16** (Auswahl des Autors, der Vorschlag dieses
+Dokuments unverändert):
 
 | Größe | Messweg | Bestanden, wenn |
 |---|---|---|
