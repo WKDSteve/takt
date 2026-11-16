@@ -147,7 +147,7 @@ impl PlayerApp {
             playlist: Playlist::default(),
             drop_problems: Vec::new(),
             uploads: None,
-            priority: raise_priority(),
+            priority: raise_priority(std::env::consts::OS),
         };
         app.take_paths(files, false);
         app
@@ -918,19 +918,32 @@ impl Drop for PlayerApp {
 /// at normal priority 25 refreshes went without a pass, at real time 11, and
 /// the thread used 9 % of a core, so `present` waits for vsync and does not
 /// spin.
-fn raise_priority() -> Result<audio_thread_priority::RtPriorityHandle, String> {
+///
+/// Only under Windows (`os` as [`std::env::consts::OS`] names it). There
+/// MMCSS only throttles a thread that takes too much. Under Linux the crate
+/// sets a soft `RLIMIT_RTTIME` of the budget asked for (one refresh) for the
+/// whole process, and a real-time thread that computes longer than that
+/// without blocking gets `SIGXCPU`, which ends the process: a heavy pass of
+/// egui (a large playlist) would end the player. The feeder and the headless
+/// loop do microseconds of work per wake-up; the render thread does not.
+fn raise_priority(os: &str) -> Result<audio_thread_priority::RtPriorityHandle, String> {
+    if os != "windows" {
+        return Err(format!(
+            "not asked under {os} (a long pass would end the process with SIGXCPU)"
+        ));
+    }
     audio_thread_priority::promote_current_thread_to_real_time(
         crate::audio::SAMPLE_RATE / 60,
         crate::audio::SAMPLE_RATE,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("real time refused: {e}"))
 }
 
-/// The render thread's priority in words, as the feeder's is named.
+/// The render thread's priority in words.
 fn priority_label<T>(priority: &Result<T, String>) -> String {
     match priority {
         Ok(_) => "real time".to_owned(),
-        Err(why) => format!("normal, real time refused: {why}"),
+        Err(why) => format!("normal, {why}"),
     }
 }
 
@@ -965,7 +978,7 @@ mod tests {
         // On a thread of its own: the priority must not stay with a thread
         // of the test harness.
         let label = std::thread::spawn(|| {
-            let priority = raise_priority();
+            let priority = raise_priority(std::env::consts::OS);
             let label = priority_label(&priority);
             if let Ok(handle) = priority {
                 let _ = audio_thread_priority::demote_current_thread_from_real_time(handle);
@@ -974,15 +987,36 @@ mod tests {
         })
         .join()
         .unwrap();
-        // Windows grants it to every process (MMCSS); Linux only with rtkit
-        // or an rtprio limit, which a CI runner need not have.
         #[cfg(windows)]
         assert_eq!(label, "real time");
         #[cfg(not(windows))]
-        assert!(label.starts_with("real time") || label.starts_with("normal, real time refused: "));
         assert_eq!(
-            priority_label::<()>(&Err("no rtkit".to_owned())),
+            label,
+            format!(
+                "normal, not asked under {} (a long pass would end the process with SIGXCPU)",
+                std::env::consts::OS
+            )
+        );
+        assert_eq!(
+            priority_label::<()>(&Err("real time refused: no rtkit".to_owned())),
             "normal, real time refused: no rtkit"
         );
+    }
+
+    #[test]
+    fn the_render_thread_stays_at_normal_priority_where_a_long_pass_would_end_the_process() {
+        // Not even asked: under Linux the request itself sets the limit.
+        for os in ["linux", "macos", "freebsd"] {
+            let priority = raise_priority(os);
+            assert_eq!(
+                priority_label(&priority),
+                format!(
+                    "normal, not asked under {os} (a long pass would end the process with SIGXCPU)"
+                )
+            );
+            if let Ok(handle) = priority {
+                let _ = audio_thread_priority::demote_current_thread_from_real_time(handle);
+            }
+        }
     }
 }
