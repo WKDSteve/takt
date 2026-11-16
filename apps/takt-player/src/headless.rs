@@ -129,6 +129,50 @@ pub fn until_next_refresh(elapsed: Duration, period_nanos: u64) -> Duration {
     Duration::from_nanos(u64::try_from(next - elapsed).unwrap_or(u64::MAX))
 }
 
+/// Where the time of the passes goes: the work of a pass, how late the loop
+/// wakes after the refresh it slept towards, and the refreshes it missed.
+///
+/// A pass aims at a refresh of the grid (`target`, the first at zero), wakes
+/// at `started` and is done at `ended`, all measured from the start of the
+/// run. Long work points at the pass itself; a late wake-up with short work
+/// points at a thread that is not given the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PassTimes {
+    /// Longest time between the starts of two passes.
+    pub longest_gap: Duration,
+    /// Longest work of one pass (`started` to `ended`).
+    pub longest_work: Duration,
+    /// Latest wake-up after the refresh a pass aimed at.
+    pub latest_wake: Duration,
+    /// Refreshes of the grid that no pass aimed at.
+    pub missed: u64,
+    previous: Option<(Duration, Duration)>,
+}
+
+impl PassTimes {
+    /// Records one pass on a grid of `period_nanos`.
+    pub fn record(
+        &mut self,
+        target: Duration,
+        started: Duration,
+        ended: Duration,
+        period_nanos: u64,
+    ) {
+        self.longest_work = self.longest_work.max(ended.saturating_sub(started));
+        self.latest_wake = self.latest_wake.max(started.saturating_sub(target));
+        if let Some((previous_target, previous_started)) = self.previous {
+            self.longest_gap = self
+                .longest_gap
+                .max(started.saturating_sub(previous_started));
+            let span = target.saturating_sub(previous_target).as_nanos();
+            let refreshes = span / u128::from(period_nanos.max(1));
+            let skipped = u64::try_from(refreshes.saturating_sub(1)).unwrap_or(u64::MAX);
+            self.missed = self.missed.saturating_add(skipped);
+        }
+        self.previous = Some((target, started));
+    }
+}
+
 /// A rate as `N` or `N/D`, from 1 to 1000 per second.
 fn rate(option: &str, text: &str) -> Result<Rational, String> {
     let (num, den) = text.split_once('/').unwrap_or((text, "1"));
@@ -228,7 +272,10 @@ fn run_null(options: &Options) {
     backend.set_display_period(i64::try_from(period_ns).ok());
     let started = Instant::now();
     let mut pass = 0_u64;
+    let mut times = PassTimes::default();
+    let mut target = Duration::ZERO;
     loop {
+        let pass_started = started.elapsed();
         let frame = match backend.next_frame(&clock) {
             Ok(f) => f,
             Err(e) => {
@@ -242,7 +289,11 @@ fn run_null(options: &Options) {
         }
         drop(frame); // Frame zurueck in den Pool
         pass += 1;
-        std::thread::sleep(until_next_refresh(started.elapsed(), period_ns));
+        let pass_ended = started.elapsed();
+        times.record(target, pass_started, pass_ended, period_ns);
+        let wait = until_next_refresh(pass_ended, period_ns);
+        target = pass_ended + wait;
+        std::thread::sleep(wait);
     }
     let elapsed = started.elapsed();
 
@@ -275,6 +326,13 @@ fn run_null(options: &Options) {
     println!(
         "  Fehler max frueh {:.3} ms",
         s.worst_early_nanos as f64 / 1e6
+    );
+    println!(
+        "  Durchlaeufe     laengste Luecke {:.1} ms, Arbeit max {:.1} ms, Aufwachen max {:.1} ms spaet, {} Refreshes ausgefallen",
+        times.longest_gap.as_micros() as f64 / 1e3,
+        times.longest_work.as_micros() as f64 / 1e3,
+        times.latest_wake.as_micros() as f64 / 1e3,
+        times.missed
     );
     println!("  Endposition     {}", clock.now());
     println!("  Framedauer      {:.3} ms", frame_ns as f64 / 1e6);
@@ -353,7 +411,8 @@ fn run_null(options: &Options) {
     println!(
         "takt-ab backend={} fps={fps} hz={} seconds={} elapsed_ms={} passes={pass} shown={} \
          repeated={} dropped={} mean_us={} p99_us={} late_us={} early_us={} audio={} xruns={} \
-         ring_low_frames={} fill_gap_us={} feeder_rt={}",
+         ring_low_frames={} fill_gap_us={} feeder_rt={} pass_gap_us={} work_max_us={} \
+         wake_late_us={} missed={}",
         backend.name(),
         options.hz,
         options.seconds,
@@ -370,6 +429,10 @@ fn run_null(options: &Options) {
         number(ring.map(|r| r.lowest_frames as u64)),
         number(ring.map(|r| r.longest_gap_nanos / 1_000)),
         number(feeder_rt),
+        times.longest_gap.as_micros(),
+        times.longest_work.as_micros(),
+        times.latest_wake.as_micros(),
+        times.missed,
     );
 }
 
@@ -424,6 +487,34 @@ mod tests {
         // A pass of 50 ms missed two refreshes; the wait is to the fourth, never zero.
         assert_eq!(after(50_000_000), 4 * 16_666_666 - 50_000_000);
         assert_eq!(until_next_refresh(Duration::from_secs(1), 0).as_nanos(), 1);
+    }
+
+    #[test]
+    fn a_pass_that_wakes_late_is_told_apart_from_one_that_works_long() {
+        let period = 16_666_666;
+        let ms = Duration::from_millis;
+        let refresh = |n: u32| Duration::from_nanos(period) * n;
+        let mut times = PassTimes::default();
+        // On time: the first pass at zero, the next one refresh later.
+        times.record(ms(0), ms(0), ms(1), period);
+        times.record(refresh(1), refresh(1), refresh(1) + ms(1), period);
+        assert_eq!(times.missed, 0);
+        assert_eq!(times.latest_wake, Duration::ZERO);
+        assert_eq!(times.longest_work, ms(1));
+        assert_eq!(times.longest_gap, refresh(1));
+        // Woken 50 ms late for refresh 2: three refreshes ahead, two missed.
+        times.record(refresh(2), refresh(2) + ms(50), refresh(2) + ms(51), period);
+        times.record(refresh(5), refresh(5), refresh(5) + ms(1), period);
+        assert_eq!(times.latest_wake, ms(50));
+        assert_eq!(times.longest_work, ms(1), "the work stayed short");
+        assert_eq!(times.missed, 2);
+        assert_eq!(times.longest_gap, refresh(1) + ms(50));
+        // A pass of 40 ms on time misses the two refreshes during its work.
+        times.record(refresh(6), refresh(6), refresh(6) + ms(40), period);
+        times.record(refresh(9), refresh(9), refresh(9) + ms(1), period);
+        assert_eq!(times.longest_work, ms(40));
+        assert_eq!(times.latest_wake, ms(50));
+        assert_eq!(times.missed, 4);
     }
 
     #[test]

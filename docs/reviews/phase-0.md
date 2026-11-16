@@ -126,6 +126,17 @@ Die Ursache ist der Füll-Thread, nicht das Gerät: der Callback bleibt unter 30
 
 Nicht behoben ist der Präsentationsfehler unter derselben Last: im letzten Lauf p99 116 ms und rund 1700 der 18 000 Durchläufe ausgefallen; die Hauptschleife des kopflosen Laufs hat normale Priorität (Task `takt/praesentation-unter-nebenlast`).
 
+### Präsentation unter Nebenlast: die Hauptschleife wacht zu spät auf
+
+Gemessen am 2026-11-16, gleicher Aufbau wie oben (STEVESPC, Release, `Voicemeeter In 4`, 300 s, 23,976 fps auf 60 Hz, Nebenlast durch andere Sitzungen). Seit dem Commit dieses Abschnitts nennt der kopflose Lauf je Durchlauf, wo die Zeit bleibt: `pass_gap_us` (längste Lücke zwischen zwei Durchläufen), `work_max_us` (längste Arbeit eines Durchlaufs), `wake_late_us` (spätestes Aufwachen nach dem Refresh, auf den der Durchlauf zielte) und `missed` (Refreshes, auf die kein Durchlauf zielte).
+
+| Lauf | CPU-Last | Durchläufe | ausgefallen | verworfen | Fehler Mittel / p99 / max spät | längste Lücke | Arbeit max | Aufwachen max spät |
+|---|---|---|---|---|---|---|---|---|
+| Hauptschleife normale Priorität | 47 bis 100 % | 17 813 | 188 | 26 | 4,4 / < 16,4 / 52,4 ms | 337,6 ms | 38,2 ms | 322,9 ms |
+| Hauptschleife Echtzeit (Versuch, nicht im Code) | 99 bis 100 % | 18 001 | 0 | 0 | 4,2 / < 10,2 / 10,2 ms | 17,3 ms | 1,5 ms | 0,7 ms |
+
+Die Zeit geht beim Einplanen verloren, nicht in der Arbeit: mit normaler Priorität wacht die Schleife bis 323 ms nach ihrem Refresh auf, die Arbeit eines Durchlaufs bleibt unter 40 ms (die Spitze ist selbst eine verlorene Zeitscheibe, ruhig liegt sie unter 2 ms). Mit Echtzeitpriorität (Versuch: `audio_thread_priority` wie beim Füll-Thread, nur für diese Messung gebaut) fällt unter mehr Last kein Refresh aus, und das p99 liegt mit 10,2 ms nahe am ruhigen Wert (8,3 ms). Ein ruhiger Lauf mit den neuen Spalten steht aus: die Maschine war während der Messung durchgehend ausgelastet. Ob der Präsentations-Thread (im Fenster der UI-/Render-Thread) erhöhte Priorität bekommt, entscheidet der Autor (Task `takt/praesentation-unter-nebenlast`).
+
 ### Spike: mpv über den Software-Renderer
 
 `MpvBackend` hat zwei Wege zum Bild (`takt/mpv-backend-hinter-videobackend`): (a) mpv zeichnet per OpenGL in ein Ziel, das wgpu importiert, oder (b) mpv rendert in den Speicher und Takt lädt das Bild hoch. (b) ist einfach, aber `render.h` nennt den Software-Renderer selbst „extremely simple (but slow)“. Der Spike (`apps/takt-player/src/mpv`, `--headless --mpv`) beantwortet deshalb zwei Fragen, bevor das Backend gebaut wird.
