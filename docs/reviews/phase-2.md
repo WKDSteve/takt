@@ -24,7 +24,7 @@ Performance-Grenzen? Welche Angriffsfläche ist neu entstanden? Dazu kommen die 
 > **Ein einstündiger Stream ohne Verbindungsabbruch und ohne Frame-Drops über einem Prozent?** (KONZEPT, Roadmap
 > mit Gates)
 
-**Vorschlag, noch nicht entschieden**, was gezählt wird:
+**Entschieden am 2026-11-16** (Auswahl des Autors, der Vorschlag dieses Dokuments unverändert), was gezählt wird:
 
 | Größe | Bestanden, wenn |
 |---|---|

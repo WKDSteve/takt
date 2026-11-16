@@ -23,7 +23,7 @@ die DAW-Schicht (Phase 4).
 
 > **Flüssiges Scrubben über drei parallele 4K-Spuren?** (KONZEPT, Roadmap mit Gates)
 
-**Vorschlag, noch nicht entschieden**, was „flüssig“ heißt:
+**Entschieden am 2026-11-16** (Auswahl des Autors, der Vorschlag dieses Dokuments unverändert), was „flüssig“ heißt:
 
 | Größe | Bestanden, wenn |
 |---|---|
