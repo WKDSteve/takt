@@ -9,17 +9,21 @@
 //! device by a part of its name (a measuring run on a silent virtual device);
 //! a name that fits none is simulated too, never the default device.
 //!
-//! The feeder is a thread of normal priority: [`FeederStats`] says how low
-//! the ring ran before it filled it again, and the longest time between two
-//! fills, for the overlay and the measuring run (an xrun under load: did the
-//! feeder starve, or the device?).
+//! The feeder asks for real-time priority, as the callback does: at normal
+//! priority it waited up to 165 ms for its time slice under load and the
+//! ring ran dry (`docs/reviews/phase-0.md`, "Xruns unter Nebenlast").
+//! [`FeederStats`] says what became of that request, how low the ring ran
+//! before a fill and the longest time between two fills, for the overlay
+//! and the measuring run.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use takt_audio::{Gain, Output, OutputCallback, OutputConfig, OutputStats, Priority, ring};
+use takt_audio::{
+    Gain, Output, OutputCallback, OutputConfig, OutputStats, Priority, Producer, ring,
+};
 use takt_clock::{AudioMasterClock, MonotonicSource, SystemMonotonic};
 
 /// Frames per second of the clock and the device.
@@ -30,6 +34,8 @@ const MAX_EXTRAPOLATION_NANOS: u64 = 20_000_000;
 const RING_FRAMES: usize = 4_800;
 /// Frames per period of the simulated callback (10 ms).
 const PERIOD_FRAMES: u64 = 480;
+/// Frames the feeder pushes at most per fill, every 2 ms.
+const FEED_FRAMES: usize = 480;
 
 enum Kind {
     Device {
@@ -63,6 +69,8 @@ pub struct FeederStats {
     // usize::MAX: no fill since the last take.
     lowest: AtomicUsize,
     longest_gap: AtomicU64,
+    // Set once by the feeder before its first fill: `Err` holds the refusal.
+    priority: OnceLock<Result<(), String>>,
 }
 
 impl Default for FeederStats {
@@ -70,6 +78,7 @@ impl Default for FeederStats {
         Self {
             lowest: AtomicUsize::new(usize::MAX),
             longest_gap: AtomicU64::new(0),
+            priority: OnceLock::new(),
         }
     }
 }
@@ -80,6 +89,15 @@ impl FeederStats {
     fn record(&self, stock_frames: usize, gap_nanos: u64) {
         self.lowest.fetch_min(stock_frames, Ordering::Relaxed);
         self.longest_gap.fetch_max(gap_nanos, Ordering::Relaxed);
+    }
+
+    /// What became of the feeder's request for real-time priority, `None`
+    /// before it asked.
+    pub fn priority(&self) -> Option<String> {
+        self.priority.get().map(|asked| match asked {
+            Ok(()) => "real time".to_owned(),
+            Err(why) => format!("normal, real time refused: {why}"),
+        })
     }
 
     /// What came since the last take, and starts anew; `None` without a
@@ -102,6 +120,8 @@ pub struct DeviceSummary {
     pub priority: Priority,
     /// The ring over the whole run.
     pub ring: Option<RingReading>,
+    /// What became of the feeder's real-time priority.
+    pub feeder_priority: Option<String>,
 }
 
 /// A running sound path. Dropping it stops it too.
@@ -149,19 +169,7 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
                 let feeder = {
                     let stop = Arc::clone(&stop);
                     let seen = Arc::clone(&stats_of_feeder);
-                    std::thread::spawn(move || {
-                        let silence = vec![0.0_f32; 480 * 2];
-                        let mut last = Instant::now();
-                        while !stop.load(Ordering::Relaxed) {
-                            let free = tx.free_frames();
-                            let now = Instant::now();
-                            let gap = u64::try_from((now - last).as_nanos()).unwrap_or(u64::MAX);
-                            seen.record(tx.capacity_frames().saturating_sub(free), gap);
-                            last = now;
-                            tx.push(&silence[..free.min(480) * 2]);
-                            std::thread::sleep(Duration::from_millis(2));
-                        }
-                    })
+                    std::thread::spawn(move || feed(tx, &stop, &seen))
                 };
                 let path = AudioPath {
                     kind: Some(Kind::Device {
@@ -180,6 +188,33 @@ pub fn start(source: &Arc<SystemMonotonic>) -> (AudioMasterClock, AudioPath) {
         }
     };
     simulated_with(source, reason, stop)
+}
+
+/// The feeder: asks for real-time priority, then keeps the ring full of
+/// silence, a fill every 2 ms, until `stop`.
+fn feed(mut tx: Producer, stop: &AtomicBool, seen: &FeederStats) {
+    let raised = audio_thread_priority::promote_current_thread_to_real_time(
+        u32::try_from(FEED_FRAMES).unwrap_or(u32::MAX),
+        SAMPLE_RATE,
+    );
+    let _ = seen
+        .priority
+        .set(raised.as_ref().map(|_| ()).map_err(ToString::to_string));
+    let silence = vec![0.0_f32; FEED_FRAMES * 2];
+    let mut last = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        let free = tx.free_frames();
+        let now = Instant::now();
+        let gap = u64::try_from((now - last).as_nanos()).unwrap_or(u64::MAX);
+        seen.record(tx.capacity_frames().saturating_sub(free), gap);
+        last = now;
+        tx.push(&silence[..free.min(FEED_FRAMES) * 2]);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    if let Ok(handle) = raised {
+        // The thread ends anyway; a failed demotion changes nothing.
+        let _ = audio_thread_priority::demote_current_thread_from_real_time(handle);
+    }
 }
 
 /// A clock with a simulated callback thread and no device at all, whatever
@@ -282,6 +317,7 @@ impl AudioPath {
                     stats,
                     priority,
                     ring: feeder.take(),
+                    feeder_priority: feeder.priority(),
                 })
             }
             _ => None,
@@ -321,5 +357,30 @@ mod tests {
         assert_eq!(stats.take(), None, "taken: it starts anew");
         stats.record(4_800, 1_000_000);
         assert_eq!(stats.take().map(|r| r.lowest_frames), Some(4_800));
+    }
+
+    #[test]
+    fn the_feeder_asks_for_real_time_priority_before_it_fills() {
+        let (tx, _rx) = ring(2, RING_FRAMES);
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(FeederStats::default());
+        assert_eq!(seen.priority(), None, "not asked yet");
+        let thread = {
+            let stop = Arc::clone(&stop);
+            let seen = Arc::clone(&seen);
+            std::thread::spawn(move || feed(tx, &stop, &seen))
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.take().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        stop.store(true, Ordering::Relaxed);
+        thread.join().unwrap();
+        let priority = seen.priority();
+        assert!(priority.is_some(), "the feeder filled without asking");
+        // Windows grants it to every process (MMCSS); Linux only with rtkit
+        // or an rtprio limit, which a CI runner need not have.
+        #[cfg(windows)]
+        assert_eq!(priority.as_deref(), Some("real time"));
     }
 }

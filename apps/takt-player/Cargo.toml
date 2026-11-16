@@ -31,6 +31,11 @@ egui-wgpu = "0.33"
 winit = { version = "0.30", default-features = false, features = ["wayland-dlopen", "wayland-csd-adwaita"] }
 # The guard of the audio callback: without `disable_release`, so it aborts in release builds too.
 assert_no_alloc = { version = "1.1", default-features = false }
+# Real-time priority for the feeder of the audio ring, as cpal asks it for the callback: under load a feeder of
+# normal priority starved and the ring ran dry (docs/reviews/phase-0.md, "Xruns unter Nebenlast"; decided
+# 2026-11-16). Already in the tree through cpal (MPL-2.0, zone 2 only); its D-Bus feature comes from cpal's
+# `realtime-dbus`.
+audio_thread_priority = { version = "0.35", default-features = false }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]

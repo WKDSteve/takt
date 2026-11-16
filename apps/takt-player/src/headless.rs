@@ -280,10 +280,12 @@ fn run_null(options: &Options) {
     println!("  Framedauer      {:.3} ms", frame_ns as f64 / 1e6);
     let mut xruns = None;
     let mut ring = None;
+    let mut feeder_rt = None;
     if let Some(DeviceSummary {
         stats: a,
         priority,
         ring: fed,
+        feeder_priority,
     }) = device
     {
         xruns = Some(a.xruns());
@@ -297,6 +299,10 @@ fn run_null(options: &Options) {
             );
         }
         println!("  Prioritaet      {priority}");
+        if let Some(p) = &feeder_priority {
+            println!("  Fuell-Thread    {p}");
+        }
+        feeder_rt = feeder_priority.map(|p| u64::from(p == "real time"));
         println!(
             "  Audio           {} Callbacks, {} Xruns, {} Frames Stille",
             a.callbacks(),
@@ -347,7 +353,7 @@ fn run_null(options: &Options) {
     println!(
         "takt-ab backend={} fps={fps} hz={} seconds={} elapsed_ms={} passes={pass} shown={} \
          repeated={} dropped={} mean_us={} p99_us={} late_us={} early_us={} audio={} xruns={} \
-         ring_low_frames={} fill_gap_us={}",
+         ring_low_frames={} fill_gap_us={} feeder_rt={}",
         backend.name(),
         options.hz,
         options.seconds,
@@ -363,6 +369,7 @@ fn run_null(options: &Options) {
         number(xruns),
         number(ring.map(|r| r.lowest_frames as u64)),
         number(ring.map(|r| r.longest_gap_nanos / 1_000)),
+        number(feeder_rt),
     );
 }
 

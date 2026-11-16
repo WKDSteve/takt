@@ -3009,6 +3009,7 @@ version = "0.0.1"
 dependencies = [
  "appkit-uninstall",
  "assert_no_alloc",
+ "audio_thread_priority",
  "cpal",
  "eframe",
  "egui",

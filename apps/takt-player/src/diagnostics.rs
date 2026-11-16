@@ -39,6 +39,8 @@ pub struct AudioCounters {
     pub runtime_max_nanos: u64,
     /// The ring as its feeder saw it since the last reading.
     pub ring: Option<RingReading>,
+    /// What became of the feeder's real-time priority.
+    pub feeder: Option<String>,
 }
 
 impl AudioCounters {
@@ -59,6 +61,7 @@ impl AudioCounters {
             ],
             runtime_max_nanos: r.max_nanos(),
             ring: None,
+            feeder: None,
         }
     }
 
@@ -67,6 +70,7 @@ impl AudioCounters {
     #[must_use]
     pub fn with_ring(mut self, feeder: Option<&FeederStats>) -> Self {
         self.ring = feeder.and_then(FeederStats::take);
+        self.feeder = feeder.and_then(FeederStats::priority);
         self
     }
 }
@@ -260,7 +264,10 @@ impl Snapshot {
                             ms(r.lowest_frames as f64 * 1e9 / f64::from(self.sample_rate.max(1))),
                             ms(r.longest_gap_nanos as f64)
                         )
-                    }),
+                    })
+                    + &a.feeder
+                        .as_ref()
+                        .map_or(String::new(), |p| format!(", feeder {p}")),
             ));
         }
         lines.push((
@@ -492,6 +499,7 @@ mod tests {
                     lowest_frames: 2_400,
                     longest_gap_nanos: 47_000_000,
                 }),
+                feeder: Some("real time".to_owned()),
             }),
             sample_rate: 48_000,
             seek: Some((5_000, 5_005)),
@@ -517,7 +525,7 @@ mod tests {
             "1 in 100 callbacks, 380 frames silence, last at 1.500 s",
             "1531 frames (31.896 ms), subtracted",
             "p50 <4 us  p99 <5 us  p99.99 -",
-            "lowest 2400 frames (50.000 ms), longest gap between fills 47.000 ms",
+            "lowest 2400 frames (50.000 ms), longest gap between fills 47.000 ms, feeder real time",
             "CPU 12.5 % of a core, RAM 64.0 MiB",
             "p50 <128 us, max 200.0 us",
             "to 5000 ms, first frame at 5005 ms (+5 ms)",
