@@ -214,6 +214,83 @@ fn run_mpv(_source: &str, _options: &Options) -> Result<(), String> {
     Err("--mpv: this build has no libmpv (TAKT_LIBMPV_DIR, docs/BUILD.md)".to_owned())
 }
 
+/// What the presentation loop did.
+struct Presented {
+    /// Passes made, one per refresh it did not miss.
+    passes: u64,
+    /// Where the time of the passes went.
+    times: PassTimes,
+    /// From the first pass to the end of the source.
+    elapsed: Duration,
+    /// What became of its request for real-time priority.
+    priority: Result<(), String>,
+}
+
+/// The presentation loop: one pass per refresh of the simulated display, as
+/// a renderer would be called, until the end of the source.
+///
+/// The loop asks for real-time priority first, as the feeder of the audio
+/// ring does: under load at normal priority it woke up to 323 ms after its
+/// refresh (`docs/reviews/phase-0.md`, „Präsentation unter Nebenlast“).
+/// It sleeps after every pass, so the priority never holds the processor.
+fn present(
+    backend: &mut NullBackend,
+    scheduler: &mut Scheduler,
+    clock: &takt_clock::AudioMasterClock,
+    period_ns: u64,
+) -> Presented {
+    // The frames of one refresh at the rate of the audio clock: what the
+    // request is sized by (rtkit under Linux; Windows ignores it).
+    let frames = u64::from(audio::SAMPLE_RATE) * period_ns / 1_000_000_000;
+    let raised = audio_thread_priority::promote_current_thread_to_real_time(
+        u32::try_from(frames.max(1)).unwrap_or(u32::MAX),
+        audio::SAMPLE_RATE,
+    );
+    let priority = raised.as_ref().map(|_| ()).map_err(ToString::to_string);
+
+    // The passes follow a fixed grid from the start: sleeping one period
+    // after each pass would add the work of the pass to every period and
+    // let the display run slow.
+    backend.set_display_period(i64::try_from(period_ns).ok());
+    let started = Instant::now();
+    let mut passes = 0_u64;
+    let mut times = PassTimes::default();
+    let mut target = Duration::ZERO;
+    loop {
+        let pass_started = started.elapsed();
+        let frame = match backend.next_frame(clock) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Dekodierfehler: {e}");
+                break;
+            }
+        };
+        match scheduler.accept(clock, frame.as_ref(), backend.is_eof()) {
+            Presentation::Eof => break,
+            Presentation::Shown { .. } | Presentation::Repeated => {}
+        }
+        drop(frame); // Frame zurueck in den Pool
+        passes += 1;
+        let pass_ended = started.elapsed();
+        times.record(target, pass_started, pass_ended, period_ns);
+        let wait = until_next_refresh(pass_ended, period_ns);
+        target = pass_ended + wait;
+        std::thread::sleep(wait);
+    }
+    let elapsed = started.elapsed();
+    if let Ok(handle) = raised {
+        // The report that follows needs no priority; a failed demotion
+        // changes nothing for it.
+        let _ = audio_thread_priority::demote_current_thread_from_real_time(handle);
+    }
+    Presented {
+        passes,
+        times,
+        elapsed,
+        priority,
+    }
+}
+
 /// The scheduler of takt on [`NullBackend`].
 fn run_null(options: &Options) {
     let fps = options.fps;
@@ -265,37 +342,12 @@ fn run_null(options: &Options) {
     let mut scheduler = Scheduler::new();
     let frame_ns = info.frame_duration_nanos().unwrap_or(16_666_667);
 
-    // One pass per refresh of the simulated display, as a renderer would be
-    // called. The passes follow a fixed grid from the start: sleeping one
-    // period after each pass would add the work of the pass to every period
-    // and let the display run slow.
-    backend.set_display_period(i64::try_from(period_ns).ok());
-    let started = Instant::now();
-    let mut pass = 0_u64;
-    let mut times = PassTimes::default();
-    let mut target = Duration::ZERO;
-    loop {
-        let pass_started = started.elapsed();
-        let frame = match backend.next_frame(&clock) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Dekodierfehler: {e}");
-                break;
-            }
-        };
-        match scheduler.accept(&clock, frame.as_ref(), backend.is_eof()) {
-            Presentation::Eof => break,
-            Presentation::Shown { .. } | Presentation::Repeated => {}
-        }
-        drop(frame); // Frame zurueck in den Pool
-        pass += 1;
-        let pass_ended = started.elapsed();
-        times.record(target, pass_started, pass_ended, period_ns);
-        let wait = until_next_refresh(pass_ended, period_ns);
-        target = pass_ended + wait;
-        std::thread::sleep(wait);
-    }
-    let elapsed = started.elapsed();
+    let Presented {
+        passes: pass,
+        times,
+        elapsed,
+        priority: loop_priority,
+    } = present(&mut backend, &mut scheduler, &clock, period_ns);
 
     let simulated = audio.device_stats().is_none();
     let device = audio.stop();
@@ -334,6 +386,10 @@ fn run_null(options: &Options) {
         times.latest_wake.as_micros() as f64 / 1e3,
         times.missed
     );
+    match &loop_priority {
+        Ok(()) => println!("  Hauptschleife   real time"),
+        Err(why) => println!("  Hauptschleife   normal, real time refused: {why}"),
+    }
     println!("  Endposition     {}", clock.now());
     println!("  Framedauer      {:.3} ms", frame_ns as f64 / 1e6);
     let mut xruns = None;
@@ -412,7 +468,7 @@ fn run_null(options: &Options) {
         "takt-ab backend={} fps={fps} hz={} seconds={} elapsed_ms={} passes={pass} shown={} \
          repeated={} dropped={} mean_us={} p99_us={} late_us={} early_us={} audio={} xruns={} \
          ring_low_frames={} fill_gap_us={} feeder_rt={} pass_gap_us={} work_max_us={} \
-         wake_late_us={} missed={}",
+         wake_late_us={} missed={} loop_rt={}",
         backend.name(),
         options.hz,
         options.seconds,
@@ -433,6 +489,7 @@ fn run_null(options: &Options) {
         times.longest_work.as_micros(),
         times.latest_wake.as_micros(),
         times.missed,
+        u8::from(loop_priority.is_ok()),
     );
 }
 
@@ -515,6 +572,36 @@ mod tests {
         assert_eq!(times.longest_work, ms(40));
         assert_eq!(times.latest_wake, ms(50));
         assert_eq!(times.missed, 4);
+    }
+
+    #[test]
+    fn the_presentation_loop_asks_for_real_time_priority_and_plays_to_the_end() {
+        let meta = FrameMeta {
+            width: 64,
+            height: 36,
+            format: PixelFormat::Nv12,
+            primaries: ColorPrimaries::Bt709,
+            transfer: TransferFunction::Bt709,
+            range: ColorRange::Limited,
+            pts: Timestamp::from_millis(0),
+        };
+        let fps = Rational::lit(25, 1);
+        let duration = Timestamp::from_millis(200);
+        let source = Arc::new(SystemMonotonic::new());
+        let (clock, audio) = audio::simulated(&source, "test");
+        let mut backend = NullBackend::new(meta, fps, duration, Pattern::Motion, 6);
+        backend.open("null://motion").unwrap();
+        let mut scheduler = Scheduler::new();
+        let presented = present(&mut backend, &mut scheduler, &clock, 16_666_666);
+        audio.stop();
+        assert!(presented.passes > 0, "the loop made no pass");
+        assert!(presented.elapsed >= Duration::from_millis(150));
+        // Windows grants it to every process (MMCSS); Linux only with rtkit
+        // or an rtprio limit, which a CI runner need not have.
+        #[cfg(windows)]
+        assert_eq!(presented.priority, Ok(()));
+        #[cfg(not(windows))]
+        let _ = presented.priority;
     }
 
     #[test]
