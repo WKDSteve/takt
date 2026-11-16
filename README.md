@@ -19,6 +19,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Konzept (Zielbild, Nicht-Ziele, Architektur, Entscheidungen) | Vault [`tasks-vault/takt/KONZEPT.md`](https://github.com/WKDSteve/tasks-vault/blob/main/takt/KONZEPT.md) (privat) |
 | Threads, Uhren und Invarianten | [docs/THREADS-UND-UHREN.md](docs/THREADS-UND-UHREN.md) |
 | Phase 0 und ihr Review | [docs/PHASE-0.md](docs/PHASE-0.md), [docs/reviews/](docs/reviews/) |
+| Welche Programme takt startet (keins) | [docs/PROCESSES.md](docs/PROCESSES.md) |
 | Bauen mit libmpv und FFmpeg | [docs/BUILD.md](docs/BUILD.md) |
 | Tasten und Maus des Players (`?` im Fenster, `takt-player --keys`) | [docs/KEYS.md](docs/KEYS.md) |
 | Den neuesten grünen Stand installieren (Windows, Pre-release `latest`, nicht signiert): `gh release download latest -R WKDSteve/takt -D takt-dl; Unblock-File takt-dl\takt-windows-x86_64.zip; Expand-Archive takt-dl\takt-windows-x86_64.zip takt-latest; .\takt-latest\install.ps1 [-DesktopShortcut]` (Prüfsumme in `takt-dl\SHA256SUMS`; das Zip in einen neuen, leeren Ordner entpacken; Startmenü „Takt“, Eintrag unter *Einstellungen > Apps*). **Dieses Zip spielt keine Dateien:** es ist ohne libmpv gebaut und zeigt nur das Testbild | [Releases](https://github.com/WKDSteve/takt/releases/tag/latest) |
