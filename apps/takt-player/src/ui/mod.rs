@@ -574,6 +574,7 @@ impl PlayerApp {
             anchor_age_nanos: clock.anchor_age_nanos(),
             max_extrapolation_nanos: clock.max_extrapolation_nanos(),
             display_period_nanos: self.refresh.period_nanos(),
+            pass_gaps: self.refresh.gaps(),
             audio_line: self.session.audio_line(),
             audio: self
                 .session
@@ -669,17 +670,22 @@ impl PlayerApp {
         #[expect(clippy::cast_precision_loss, reason = "a display value, not time")]
         let mean = s.mean_abs_error_nanos() as f64 / 1e6;
         #[expect(clippy::cast_precision_loss, reason = "a display value, not time")]
+        let late = s.worst_late_nanos as f64 / 1e6;
+        #[expect(clippy::cast_precision_loss, reason = "a display value, not time")]
         let refresh = self
             .refresh
             .period_nanos()
             .map_or("-".to_owned(), |p| format!("{:.1} Hz", 1e9 / p as f64));
+        let (gap, missed) = self.refresh.gaps();
         format!(
-            "{}: shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms, display {refresh}",
+            "{}: shown {}, repeated {} ({:.1} %), dropped {}, mean error {mean:.3} ms, \
+             late max {late:.3} ms, display {refresh}, pass_gap_us={} missed={missed}",
             self.session.backend_name(),
             s.shown,
             s.repeated,
             s.repeat_ratio(),
-            self.session.stats().dropped
+            self.session.stats().dropped,
+            gap / 1_000,
         )
     }
 }

@@ -104,6 +104,9 @@ pub struct Snapshot {
     pub max_extrapolation_nanos: u64,
     /// The measured display period.
     pub display_period_nanos: Option<i64>,
+    /// The longest time between two passes of the render loop, in
+    /// nanoseconds, and the refreshes no pass came for.
+    pub pass_gaps: (u64, u64),
     /// The audio path in one line (device, format, buffer, or simulated).
     pub audio_line: String,
     /// The counters of the device, `None` when simulated.
@@ -208,6 +211,14 @@ impl Snapshot {
                     .map_or("not measured yet".to_owned(), |p| {
                         format!("{:.1} Hz ({})", 1e9 / p as f64, ms(p as f64))
                     }),
+            ),
+            (
+                "passes",
+                format!(
+                    "longest gap {}, {} refreshes missed",
+                    ms(self.pass_gaps.0 as f64),
+                    self.pass_gaps.1
+                ),
             ),
             ("audio", self.audio_line.clone()),
             (
@@ -486,6 +497,7 @@ mod tests {
             anchor_age_nanos: Some(30_000_000),
             max_extrapolation_nanos: 20_000_000,
             display_period_nanos: Some(8_333_333),
+            pass_gaps: (41_000_000, 3),
             audio_line: "default device, F32, buffer Fixed(480)".to_owned(),
             audio: Some(AudioCounters {
                 callbacks: 100,
@@ -521,6 +533,7 @@ mod tests {
             "30.000 ms (limit 20.000 ms)  STALE",
             "1 of 6 frames out",
             "120.0 Hz",
+            "longest gap 41.000 ms, 3 refreshes missed",
             "F32",
             "1 in 100 callbacks, 380 frames silence, last at 1.500 s",
             "1531 frames (31.896 ms), subtracted",
