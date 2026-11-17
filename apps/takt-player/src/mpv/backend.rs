@@ -298,6 +298,9 @@ struct Shared {
     /// pause or its end. The render thread forgets what it learned about
     /// the times of the frames when it changes.
     breaks: AtomicU64,
+    /// The lead mpv has now, in microseconds (`video-timing-offset`): how
+    /// long before its time a frame is handed out.
+    lead: AtomicU64,
     /// Frames of the pool that are out, as of the last render.
     in_flight: AtomicUsize,
     /// Every frame of the pool was out when a picture waited: it was not
@@ -440,6 +443,7 @@ fn render_one(
     // the stamper holds the position against when mpv wanted this frame
     // shown (`super::stamp`).
     let position = renderer.double(c"time-pos").and_then(micros);
+    let read_at = renderer.now();
     let position = match (position, waiting) {
         (Some(position), Some((kind, target))) => {
             let stamp = stamper.stamp(Reading {
@@ -447,6 +451,8 @@ fn render_one(
                 target,
                 now,
                 position,
+                read_at,
+                lead: i64::try_from(shared.lead.load(Ordering::Relaxed)).unwrap_or(i64::MAX),
             });
             shared.reckoned.store(stamper.reckoned(), Ordering::Relaxed);
             Timestamp::new(stamp, Rational::MICROS)
@@ -803,6 +809,7 @@ impl MpvBackend {
             .ok_or_else(|| Error::Backend("the clock has no writer".to_owned()))?;
         let clock = Arc::new(clock);
         let shared = Arc::new(Shared::default());
+        shared.lead.store(u64::from(fixed), Ordering::Relaxed);
         let waker = renderer.waker();
         let thread = {
             let (shared, clock) = (Arc::clone(&shared), Arc::clone(&clock));
@@ -1506,6 +1513,7 @@ impl VideoBackend for MpvBackend {
             .is_ok()
         {
             self.early_micros = wanted;
+            self.shared.lead.store(u64::from(wanted), Ordering::Relaxed);
         }
     }
 
@@ -2884,22 +2892,27 @@ mod tests {
         let mut backend = backend(Sources::Files);
         backend.open(&long_gop()).unwrap();
         let (mut seen, mut wrong) = (0_usize, Vec::new());
+        // Where the picture that is shown now was shown first.
+        let (mut shown, mut since) = (-1, 0_usize);
         passes(&mut backend, Duration::from_secs(20), |_, frame| {
             let picture = frame.get();
             let rows = picture.plane(0).unwrap();
             let at = 32 * picture.stride(0).unwrap() + 32 * 4;
             let held = (i64::from(rows[at]) - 16 + 4) / 8;
             let stamped = stamped_frame(picture.meta().pts);
+            if held != shown {
+                (shown, since) = (held, seen);
+            }
             if seen >= 2 && held != stamped {
                 wrong.push((seen, held, stamped));
             }
             seen += 1;
             true
         });
-        // Not the last picture: once the file has ended, mpv names the
-        // position of the frame before it, or zero (measured in 11 of 20
-        // runs, with and without load).
-        wrong.retain(|&(nth, _, _)| nth + 1 < seen);
+        // Not the last picture, however often it was drawn: once the file
+        // has ended, mpv names the position of the frame before it, or zero
+        // (measured in 11 of 20 runs, with and without load).
+        wrong.retain(|&(nth, _, _)| nth < since);
         println!(
             "frames {seen}, reckoned {}, wrong {}",
             backend.shared.reckoned.load(Ordering::Relaxed),

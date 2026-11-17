@@ -17,7 +17,10 @@
 //! time move together: their difference is one number, and a position that
 //! is that of a later frame stands out above it. A [`Stamper`] keeps the
 //! lowest difference of the last frames and gives a frame that is above it
-//! the time its target time says.
+//! the time its target time says. A frame that was read before the next one
+//! can have been handed out is never reckoned: when the run has shifted
+//! (another sound track, mpv catching up with its sound), such a frame is
+//! what it is learned anew from.
 //!
 //! Limits: a reckoned time is the time of the frame within what the target
 //! times of mpv are uneven by (measured: under 0.1 ms), not the number the
@@ -37,6 +40,11 @@ const WINDOW: usize = 32;
 /// the distance of two frames at 120 frames a second.
 const SLACK: i64 = 3_000;
 
+/// A frame read this long after mpv handed it out, in microseconds, was
+/// read in time whatever the file: the next frame is handed out one frame
+/// later, and at 120 frames a second that is 8.3 ms.
+const IN_TIME: i64 = 5_000;
+
 /// A late read is that of one of the next frames, not of one far away:
 /// further off than this, in microseconds, is no late read but a jump
 /// nobody told ([`Stamper::forget`]), and the position stands.
@@ -55,6 +63,11 @@ pub struct Reading {
     pub now: i64,
     /// The position of the core, read after the render, in microseconds.
     pub position: i64,
+    /// The clock of mpv when the position had been read, in microseconds.
+    pub read_at: i64,
+    /// How long before its target time mpv hands a frame out, in
+    /// microseconds (`video-timing-offset`).
+    pub lead: i64,
 }
 
 /// Gives every rendered frame its time. One per render thread.
@@ -98,7 +111,14 @@ impl Stamper {
             return reading.position;
         };
         let above = difference.saturating_sub(lowest);
-        if above > SLACK && above <= REACH {
+        // Read before the next frame can have been handed out: the position
+        // is that of this frame, whatever the frames before say. That is how
+        // a run that has shifted (another sound track, mpv catching up with
+        // its sound) is learned anew instead of being reckoned against for
+        // good.
+        let handed_out = target.saturating_sub(reading.lead);
+        let in_time = reading.read_at.saturating_sub(handed_out) < IN_TIME;
+        if above > SLACK && above <= REACH && !in_time {
             // The position of a later frame: this one is where its target
             // time says.
             self.reckoned += 1;
@@ -146,9 +166,11 @@ mod tests {
         Reading {
             again: false,
             target: 1_000_000_000 + number * 40_000_000 + (number % 3) * 30_000,
-            // Rendered 20 ms ahead of its time.
+            // Handed out and rendered 20 ms ahead of its time.
             now: 980_000 + number * 40_000,
             position: number * 40_000,
+            read_at: 980_500 + number * 40_000,
+            lead: 20_000,
         }
     }
 
@@ -156,6 +178,8 @@ mod tests {
     fn late(number: i64, read_as: i64) -> Reading {
         Reading {
             position: read_as * 40_000,
+            // Not before the frame it was read as was handed out.
+            read_at: 980_500 + read_as * 40_000,
             ..frame(number)
         }
     }
@@ -202,6 +226,7 @@ mod tests {
         }
         let read_late = Reading {
             position: 9 * 40_000,
+            read_at: 980_500 + 9 * 40_000,
             ..micros(8)
         };
         assert_eq!(number(stamper.stamp(read_late)), 8);
@@ -224,6 +249,33 @@ mod tests {
         assert_eq!(stamper.stamp(frame(13)), 520_000);
         assert_eq!(number(stamper.stamp(late(15, 16))), 15);
         assert_eq!(stamper.reckoned(), 1);
+    }
+
+    #[test]
+    fn a_run_that_has_shifted_is_learned_anew_from_a_frame_in_time() {
+        let mut stamper = Stamper::default();
+        for number in 0..8 {
+            stamper.stamp(frame(number));
+        }
+        // From frame 8 on mpv shows everything 10 ms earlier against the
+        // file (it follows another sound track): the position is 10 ms
+        // further on for the same target time, read in time.
+        let shifted = |number: i64| Reading {
+            position: number * 40_000 + 10_000,
+            ..frame(number)
+        };
+        for number in 8..12 {
+            assert_eq!(stamper.stamp(shifted(number)), number * 40_000 + 10_000);
+        }
+        assert_eq!(stamper.reckoned(), 0);
+        // A late read is told against the run as it is now.
+        let read_late = Reading {
+            position: 13 * 40_000 + 10_000,
+            read_at: 980_500 + 13 * 40_000,
+            ..frame(12)
+        };
+        let twelfth = stamper.stamp(read_late);
+        assert!((twelfth - 490_000).abs() <= 60, "{twelfth}");
     }
 
     #[test]
