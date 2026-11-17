@@ -156,6 +156,14 @@ Pool über den ganzen Lauf, kein Bild verloren, kein Fehler**. Als Test:
 der richtigen Reihenfolge durch dieselben zwei Speicherbereiche) und `a_backend_whose_frames_are_held_stalls_and_counts_it`. Im Player steht der
 Zähler in der Quellzeile des Overlays (`pool empty Nx`).
 
+**Im Fenster** (Rauchtest, kein Messlauf: Debug-Build, 6 s je Datei, `TAKT_PIPELINE=own takt-player --seconds 6
+<Datei>`, 60 Hz, derselbe Rechner): 1080p60 H.264 läuft über die eigene Pipeline als NV12 durch die Lage von
+`takt-gpu` (345 Bilder gezeigt, 4 wiederholt, 5 verworfen, mittlerer Präsentationsfehler 0,66 ms, Pool nie leer).
+4K60 HEVC 10 bit kommt als P010 an und wird gezeigt, hält im Debug-Build aber die 60 Bilder/s nicht (332 gezeigt,
+19 verworfen, 15 wiederholt; die Kopien kosten dort 13,6 ms je Bild, im Release-Build 8,5 ms). Ein Messlauf mit
+Release-Build, fünf Minuten und dem Vergleich gegen `mpv` steht aus (`takt/eigene-pipeline-timing-und-cpu-last-messen`),
+ebenso die Abnahme von Hand (`takt/eigene-pipeline-im-fenster-von-hand-abnehmen`).
+
 Nicht gemessen: die CPU-Last des ganzen Prozessbaums beim Abspielen gegen `mpv` (die Zeile des Gates), das alte
 Testgerät, Linux, das Frame-Timing des Fensters mit der eigenen Pipeline (`scripts/ab-measure.py` kennt sie noch
 nicht), die Latenz eines Bildes bei leerem Ring (abgefragt wird mit Pausen bis 1 ms).
@@ -418,6 +426,10 @@ Folgen von Records mit vollem und leerem Pool und mit Formatwechsel, dazu was de
 Elternprozess liest. Geprüft wird auch, was zugesagt ist: der Pool hält nie mehr Frames als seine Größe, ein Stau
 wird einmal gezählt, ein Bild landet in einem Frame seiner Größe.
 
+| Datum | Stand | Lauf | Ergebnis |
+|---|---|---|---|
+| 2026-11-17 | `3cd6845` (Parser und `Intake` seither unverändert) | 1 h (3601 s), WSL2 (Arch) auf STEVESPC, libFuzzer über cargo-fuzz mit Nightly, Eingaben bis 4096 Bytes, Startkorpus aus den echten Encodern (13 Eingaben; 2026-11-17, 18:52:31 bis 19:52:54 UTC) | **kein Fund**: 70 009 518 Läufe, im Mittel 19 441 je Sekunde, 4329 neue Eingaben (Korpus am Ende 563), kein Absturz, kein Artefakt, Spitze 514 MiB Speicher |
+
 Der Fund zeigt auf `takt-core`: `Timestamp::cmp` und `Timestamp::rescale` multiplizieren ungeprüft in `i128`
 und halten nur für Zeitbasen, deren Teile klein sind. Für alles, was aus dem Demuxer kommt, stellt die
 Protokollgrenze das jetzt sicher; die Funktionen selbst sind unverändert (`takt/takt-core-timestamp-ueberlauf`).
@@ -467,16 +479,17 @@ Die Naht zwischen Decoder und GPU ([GPU.md](../GPU.md)) nimmt Daten an, die aus 
    Filmen (Interlacing, wechselnde Auflösung, kaputte Streams aus der Praxis).
 9. **Die eigene Pipeline spielt nur das Bild.** Kein Ton (die Uhr läuft auf der stummen Tonausgabe des Players),
    keine Untertitel, keine Spurwahl; das Fenster sagt es. Ton ist `takt-audio` plus ein Audio-Decoder im
-   Hilfsprozess, nicht Teil des Software-Pfads für Bilder.
+   Hilfsprozess, nicht Teil des Software-Pfads für Bilder (`takt/eigene-pipeline-ton`).
 10. **Drei Kopien je Bild** (eine im Hilfsprozess, zwei im Hauptprozess), bei 4K60 10 bit rund ein halber Kern im
     Hauptprozess; eine davon ist einzusparen (siehe Performance, `takt/takt-decode-eine-kopie-je-bild-sparen`).
 11. **Der Pumpen-Thread läuft mit normaler Priorität.** Die Vorgabe aus Phase 0 (der Decoder-Thread übernimmt die
     Echtzeitpriorität des Füll-Threads) ist nicht umgesetzt: `takt-decode` bindet `audio_thread_priority` nicht
-    ein, und unter Nebenlast ist der Pfad nicht gemessen.
+    ein, und unter Nebenlast ist der Pfad nicht gemessen (`takt/eigene-pipeline-timing-und-cpu-last-messen`).
 12. **Formate**: 4:2:0 in 8 und 10 bit und 4:4:4 in 8 bit. 4:2:2, 12 bit und Alpha meldet der Hilfsprozess als
     Fehler; VP9 steht nicht auf der Liste der Decoder (eine Zeile und eine Entscheidung, wie bei den Containern).
 13. **Eine Installation bringt die Hilfsprogramme nicht mit** (`scripts/build-install.ps1`, das Rolling-Zip): die
-    eigene Pipeline spielt aus dem Checkout. Das Zip ist ohnehin ohne FFmpeg gebaut.
+    eigene Pipeline spielt aus dem Checkout. Das Zip ist ohnehin ohne FFmpeg gebaut
+    (`takt/installation-bringt-hilfsprogramme-mit`).
 14. **Der Vergleich mit libmpv läuft nur unter Windows** (Job mit gepinntem libmpv und gepinnter FFmpeg), siehe
     Bildgleichheit.
 15. **Ein Zaun, der nie signalisiert wird, hält die Queue an.** `takt-gpu` lässt die Queue von wgpu auf der GPU
