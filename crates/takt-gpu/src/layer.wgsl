@@ -79,9 +79,11 @@ fn vs_main(@builtin(vertex_index) index: u32) -> Varyings {
 }
 
 // Where `at` is in a plane whose visible part is `visible` texels of `size`. Clamped to the centres of the outer
-// visible texels: a filter never reads what lies beside the picture in a texture larger than it.
+// texels that hold a part of the picture: a filter never reads what lies beside the picture in a texture larger than
+// it. `visible` is not whole for the chroma of a picture of odd size (2.5 texels for five pixels); the third texel
+// holds the chroma of the last pixel then, so the bound is the centre of the texel `visible` ends in.
 fn coords(at: vec2<f32>, visible: vec2<f32>, size: vec2<u32>) -> vec2<f32> {
-    let last = max(visible - vec2<f32>(0.5), vec2<f32>(0.5));
+    let last = max(ceil(visible) - vec2<f32>(0.5), vec2<f32>(0.5));
     return clamp(at * visible, vec2<f32>(0.5), last) / vec2<f32>(size);
 }
 

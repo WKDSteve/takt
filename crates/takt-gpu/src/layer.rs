@@ -487,6 +487,11 @@ impl LayerSlot {
             let luma = view(wgpu::TextureAspect::Plane0, luma);
             let chroma = view(wgpu::TextureAspect::Plane1, chroma);
             let bind_group = self.bind_group(device, [&luma, &chroma, &chroma]);
+            // A source that changed its size or format made new textures: the old ones are not shown again, and
+            // an entry here would keep them alive.
+            let (size, format) = (frame.texture().size(), frame.texture().format());
+            self.imported
+                .retain(|i| i.texture.size() == size && i.texture.format() == format);
             if self.imported.len() >= IMPORTED_MAX {
                 self.imported.remove(0);
             }
@@ -607,6 +612,12 @@ impl LayerSlot {
     #[must_use]
     pub fn has_picture(&self) -> bool {
         self.bound.is_some()
+    }
+
+    /// How many imported textures the layer keeps bound (and alive).
+    #[must_use]
+    pub fn imported_textures(&self) -> usize {
+        self.imported.len()
     }
 }
 

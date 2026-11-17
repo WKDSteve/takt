@@ -4,7 +4,8 @@
 //!
 //! A frame is a handle to a texture in video memory
 //! ([`GpuFrame::Texture`]), written by a hardware decoder and imported
-//! without a copy through system memory ([`crate::interop`]). The planes in
+//! without a copy through system memory (the module `interop`, Windows). The
+//! planes in
 //! system memory ([`GpuFrame::Cpu`]) are the fallback: a software decoder,
 //! the finished picture of libmpv, a machine without a hardware path. Both
 //! end in the same shader and the same bind group layout.

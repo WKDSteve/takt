@@ -23,12 +23,13 @@
 //!
 //! Whatever crosses this seam may come from a helper process: sizes, layers
 //! and formats are checked against the texture and the limits of the device
-//! before they are used ([`TextureFrame::new`], [`interop`], [`PlanesView`]).
+//! before they are used ([`TextureFrame::new`], the module `interop`, [`PlanesView`]).
 //!
 //! # Platforms
 //!
 //! Drawing works wherever wgpu does. The import of a foreign texture
-//! ([`interop`]) is Windows on DX12 so far; elsewhere a decoder hands out
+//! (the module `interop`, which exists under Windows only) is Windows on DX12
+//! so far; elsewhere a decoder hands out
 //! frames in system memory.
 
 pub mod colour;

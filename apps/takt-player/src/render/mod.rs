@@ -75,6 +75,8 @@ struct VideoResources {
     uploads_rgb: DurationHistogram,
     /// Whether the last upload was an R'G'B' picture.
     last_rgb: bool,
+    /// Why the last picture was not shown; said once, not every pass.
+    fault: Option<String>,
 }
 
 /// Puts the layer into the resources of egui-wgpu; once, at start.
@@ -90,6 +92,7 @@ pub fn install(state: &egui_wgpu::RenderState) {
             uploads_ycc: DurationHistogram::default(),
             uploads_rgb: DurationHistogram::default(),
             last_rgb: false,
+            fault: None,
         });
 }
 
@@ -144,13 +147,21 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
                 // The layout was checked in `Picture::from_frame`; what can
                 // still fail is a format the device has no texture for, and
                 // the layer keeps the picture before then.
-                if r.slot.show(device, queue, &picture.frame).is_ok() {
-                    let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                    r.last_rgb = picture.is_rgb();
-                    if r.last_rgb {
-                        r.uploads_rgb.record(nanos);
-                    } else {
-                        r.uploads_ycc.record(nanos);
+                match r.slot.show(device, queue, &picture.frame) {
+                    Ok(()) => {
+                        let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        r.last_rgb = picture.is_rgb();
+                        if r.last_rgb {
+                            r.uploads_rgb.record(nanos);
+                        } else {
+                            r.uploads_ycc.record(nanos);
+                        }
+                        r.fault = None;
+                    }
+                    Err(e) => {
+                        if let Some(news) = fault_news(&mut r.fault, &e.to_string()) {
+                            eprintln!("takt-player: picture not shown: {news}");
+                        }
                     }
                 }
                 r.generation = Some(self.0.generation);
@@ -171,6 +182,16 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
             r.slot.draw(pass);
         }
     }
+}
+
+/// Remembers `fault` and hands it back when it is another one than the last:
+/// a source that cannot be shown fails with every picture, and is named once.
+fn fault_news<'a>(last: &mut Option<String>, fault: &'a str) -> Option<&'a str> {
+    if last.as_deref() == Some(fault) {
+        return None;
+    }
+    *last = Some(fault.to_owned());
+    Some(fault)
 }
 
 /// Width to height of the surface until a source says otherwise.
@@ -307,6 +328,17 @@ mod tests {
         let mut other = self::pool(PixelFormat::Rgba16F, 1);
         assert!(Picture::from_frame(other.acquire(stamp(0)).unwrap()).is_err());
         assert_eq!(other.in_flight(), 0);
+    }
+
+    #[test]
+    fn a_picture_that_cannot_be_shown_is_named_once() {
+        let mut last = None;
+        assert_eq!(fault_news(&mut last, "no 16 bit"), Some("no 16 bit"));
+        assert_eq!(fault_news(&mut last, "no 16 bit"), None);
+        assert_eq!(fault_news(&mut last, "no NV12"), Some("no NV12"));
+        // A picture that was shown in between makes the same fault news again.
+        last = None;
+        assert_eq!(fault_news(&mut last, "no NV12"), Some("no NV12"));
     }
 
     #[test]

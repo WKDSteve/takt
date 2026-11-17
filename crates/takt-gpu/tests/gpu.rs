@@ -588,6 +588,46 @@ fn gpu_padded_rows_and_three_planes_draw_the_same_picture() {
     assert_close("three planes", &got, &want, 1);
 }
 
+/// A picture of odd size: five by three pixels of NV12, every chroma pair
+/// another colour, so a pixel that reads the pair of its neighbour shows.
+fn odd_nv12() -> Picture {
+    let (w, h) = (5_u32, 3_u32);
+    let y: Vec<u8> = (0..w * h)
+        .map(|i| 60 + u8::try_from(i).unwrap() * 10)
+        .collect();
+    // Three pairs in each of two rows.
+    let uv = vec![
+        90, 240, 240, 110, 16, 128, //
+        128, 16, 200, 200, 54, 34,
+    ];
+    Picture {
+        format: PixelFormat::Nv12,
+        size: (w, h),
+        planes: vec![(y, w), (uv, 6)],
+        color: color(ColorPrimaries::Bt709, TransferFunction::Bt709),
+    }
+}
+
+#[test]
+#[ignore = "SKIP: renders on a GPU adapter; TAKT_GPU_TESTS=1 cargo test -p takt-gpu gpu -- --ignored (CI: Windows with WARP)"]
+fn gpu_a_picture_of_odd_size_uses_its_last_chroma_sample() {
+    if !gpu_wanted() {
+        return;
+    }
+    let gpu = gpu();
+    let picture = odd_nv12();
+    let want = reference(&picture.view(), picture.color);
+    // The last column and the last row have a chroma pair of their own, of which only half lies in the picture.
+    assert_ne!(want[4], want[3], "the test picture tells the pairs apart");
+    let got = render(
+        &gpu,
+        &picture.view(),
+        picture.color,
+        wgpu::FilterMode::Nearest,
+    );
+    assert_close("odd size", &got, &want, 2);
+}
+
 /// Eight colours in two rows, in rows of `stride` bytes; the padding byte of
 /// every pixel and the bytes after every row hold `filler`.
 fn colours(stride: u32, filler: u8) -> (Picture, Vec<[u8; 3]>) {
@@ -1014,6 +1054,29 @@ mod import {
         let imported = render_frame(&gpu, frame, wgpu::FilterMode::Nearest);
         let uploaded = render(&gpu, &third.view(), third.color, wgpu::FilterMode::Nearest);
         assert_eq!(readback::checksum(&imported), readback::checksum(&uploaded));
+
+        // The layer keeps the two textures bound, and lets go of them when the source comes with textures of
+        // another size.
+        assert_eq!(slot.imported_textures(), 2);
+        let other_size = (32_u32, 18_u32);
+        let small11 = foreign
+            .source
+            .texture(PlanarFormat::Nv12, other_size.0, other_size.1)
+            .unwrap();
+        let small =
+            dx12::open_shared_texture(&gpu.device, small11.handle(), PlanarFormat::Nv12).unwrap();
+        let picture = noise(PlanarFormat::Nv12, other_size, 0, 3);
+        let frame = foreign.frame(&small11, &small, &picture, other_size);
+        let mut other = renderer.slot(&gpu.device);
+        other
+            .show(&gpu.device, &gpu.queue, &Arc::new(GpuFrame::from(frame)))
+            .unwrap();
+        assert_eq!(other.imported_textures(), 1);
+        let again = foreign.frame(&shared[0], &first_texture, &third, size);
+        other
+            .show(&gpu.device, &gpu.queue, &Arc::new(GpuFrame::from(again)))
+            .unwrap();
+        assert_eq!(other.imported_textures(), 1, "the small texture left");
 
         // A frame from system memory replaces a texture frame as well.
         slot.show_planes(&gpu.device, &gpu.queue, &third.view(), third.color)
