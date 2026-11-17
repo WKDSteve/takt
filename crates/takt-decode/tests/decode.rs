@@ -83,8 +83,8 @@ fn the_client_links_no_ffmpeg() {
 fn a_stream_the_software_path_does_not_decode_starts_no_helper() {
     // Refused before any process is started: the path of the helper leads nowhere.
     let nowhere = Options::new("no-such-helper");
-    let err = Decoder::open(&stream("vp9"), &nowhere).unwrap_err();
-    assert_eq!(err, DecodeError::Unsupported("codec vp9".to_owned()));
+    let err = Decoder::open(&stream("mpeg2video"), &nowhere).unwrap_err();
+    assert_eq!(err, DecodeError::Unsupported("codec mpeg2video".to_owned()));
     let mut sound = stream("h264");
     sound.kind = StreamKind::Audio;
     assert!(matches!(
@@ -144,13 +144,14 @@ mod with_ffmpeg {
 
     const WAIT: Duration = Duration::from_secs(30);
 
-    /// The five clips: name, decoder, width, height, bytes per sample.
-    const CLIPS: [(&str, &str, u32, u32, usize); 5] = [
+    /// The six clips: name, decoder, width, height, bytes per sample.
+    const CLIPS: [(&str, &str, u32, u32, usize); 6] = [
         ("decode-h264.mp4", "h264", 160, 90, 1),
         ("decode-hevc.mp4", "hevc", 160, 90, 1),
         ("decode-av1.mkv", "libdav1d", 160, 90, 1),
         ("decode-hevc-10bit.mp4", "hevc", 130, 74, 2),
         ("decode-av1-10bit.mkv", "libdav1d", 130, 74, 2),
+        ("decode-vp9.webm", "vp9", 160, 90, 1),
     ];
     /// Pictures in every clip: two seconds at 25 a second.
     const FRAMES: usize = 50;
@@ -844,11 +845,16 @@ mod with_ffmpeg {
     #[test]
     fn a_file_the_software_path_cannot_play_is_an_error_with_a_reason() {
         let mut backend = backend();
-        let err = backend
-            .open(clip("format-vp9.webm").to_str().unwrap())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("vp9"), "{err}");
+        // A text with the ending of a film: the demuxer refuses it, the backend says why.
+        let junk =
+            std::env::temp_dir().join(format!("takt-decode-{}-junk.mkv", std::process::id()));
+        std::fs::write(&junk, "this is no film\n").unwrap();
+        let err = backend.open(junk.to_str().unwrap()).unwrap_err();
+        let _ = std::fs::remove_file(&junk);
+        assert!(
+            matches!(err, takt_core::Error::SourceUnavailable(_)),
+            "{err}"
+        );
         assert!(backend.is_eof());
         let err = backend.open("no such file.mkv").unwrap_err();
         assert!(
@@ -860,6 +866,7 @@ mod with_ffmpeg {
             "format-h264.mp4",
             "format-hevc.mp4",
             "format-av1.mkv",
+            "format-vp9.webm",
             "pattern-3s.mkv",
         ] {
             let info = backend.open(clip(name).to_str().unwrap()).unwrap();

@@ -91,10 +91,16 @@ pub mod fault {
 }
 
 /// The codecs the helper decodes, by FFmpeg's name of the codec, and the decoder of libavcodec
-/// that does it. AV1 is decoded by dav1d (libavcodec's wrapper around it), never by libavcodec's
+/// that does it (VP9 joined the list on 2026-11-17, decided by the author: WebM is on the list of
+/// the demuxer, and its usual codec is VP9). AV1 is decoded by dav1d (libavcodec's wrapper around it), never by libavcodec's
 /// own AV1 decoder, which needs hardware. Every further codec is a parser more that reads foreign
 /// bytes; it joins this list on purpose.
-pub const CODECS: [(&str, &str); 3] = [("h264", "h264"), ("hevc", "hevc"), ("av1", "libdav1d")];
+pub const CODECS: [(&str, &str); 4] = [
+    ("h264", "h264"),
+    ("hevc", "hevc"),
+    ("av1", "libdav1d"),
+    ("vp9", "vp9"),
+];
 
 /// The decoder of libavcodec for the codec `codec`, when the helper decodes it.
 #[must_use]
@@ -974,7 +980,8 @@ mod tests {
         assert_eq!(decoder_for("av1"), Some("libdav1d"));
         assert_eq!(decoder_for("h264"), Some("h264"));
         assert_eq!(decoder_for("hevc"), Some("hevc"));
-        assert_eq!(decoder_for("vp9"), None);
+        assert_eq!(decoder_for("vp9"), Some("vp9"));
+        assert_eq!(decoder_for("mpeg2video"), None);
         assert_eq!(decoder_for(""), None);
     }
 

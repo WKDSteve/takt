@@ -487,7 +487,7 @@ fn pick_stream(streams: &[StreamInfo]) -> Result<&StreamInfo, takt_core::Error> 
             || "the file has no picture".to_owned(),
             |stream| {
                 format!(
-                    "the software path does not decode {} (it decodes h264, hevc and av1)",
+                    "the software path does not decode {} (it decodes h264, hevc, av1 and vp9)",
                     stream.codec
                 )
             },
@@ -752,12 +752,12 @@ mod tests {
         let streams = [
             stream(0, StreamKind::Audio, "opus", 0),
             stream(1, StreamKind::Video, "mjpeg", DISPOSITION_ATTACHED_PIC),
-            stream(2, StreamKind::Video, "vp9", 0),
+            stream(2, StreamKind::Video, "mpeg2video", 0),
             stream(3, StreamKind::Video, "hevc", 0),
         ];
         assert_eq!(pick_stream(&streams).unwrap().index, 3);
         let err = pick_stream(&streams[..3]).unwrap_err().to_string();
-        assert!(err.contains("vp9"), "{err}");
+        assert!(err.contains("mpeg2video"), "{err}");
         let err = pick_stream(&streams[..2]).unwrap_err().to_string();
         assert!(err.contains("no picture"), "{err}");
     }

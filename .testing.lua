@@ -36,6 +36,17 @@ return {
                 env = { TAKT_AUDIO = "sim" },
                 window = "Takt",
             },
+            -- The window playing the test clip through the own pipeline (takt-demux and takt-decode in their helper
+            -- processes), with libmpv in the same build to switch to: built by scripts/build-sheet-app.py into
+            -- target/sheets-own with the two helpers, libmpv-2.dll and the FFmpeg libraries beside the program (needs
+            -- TAKT_LIBMPV_DIR and FFMPEG_DIR, docs/BUILD.md). TAKT_PIPELINE=own starts with the own pipeline.
+            ["takt-own-pipeline"] = {
+                build = { "python", "scripts/build-sheet-app.py", "own" },
+                prepare = { "python", "scripts/sheet-prepare.py", "film", "${temp}" },
+                run = { "target/sheets-own/debug/takt-player.exe", "--overlay", "${temp}/film.mkv" },
+                env = { TAKT_AUDIO = "sim", TAKT_PIPELINE = "own" },
+                window = "Takt",
+            },
             -- The same build, started with a text that only has the ending of a film and then the clip: what a drop of the
             -- two did in the hand run.
             ["takt-broken-then-file"] = {

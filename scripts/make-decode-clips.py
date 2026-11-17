@@ -13,13 +13,14 @@ bytes:
     decode-av1.mkv         AV1 in Matroska, 160x90, 8 bit
     decode-hevc-10bit.mp4  HEVC in MP4, 130x74, 10 bit (a chroma plane of odd width and height)
     decode-av1-10bit.mkv   AV1 in Matroska, 130x74, 10 bit
+    decode-vp9.webm        VP9 in WebM, 160x90, 8 bit
 
 Every file has a keyframe every second and names the BT.709 matrix and the limited range (the primaries and the
 transfer function stay unnamed, as in the other test files). The tests compare each decoded picture
 with what the `ffmpeg` program decodes from the same file, byte for byte, and with what libmpv shows of it (PSNR).
 
 The files are kept in the repository (about 40 kB each), so the tests need no encoder: this script is how they were
-made and how they are made again. Needs ffmpeg in PATH (lavfi, libx264, libx265 with 10 bit, libsvtav1). Exit 1 when
+made and how they are made again. Needs ffmpeg in PATH (lavfi, libx264, libx265 with 10 bit, libsvtav1, libvpx-vp9). Exit 1 when
 ffmpeg fails.
 """
 
@@ -47,6 +48,11 @@ CASES = {
         "130x74",
         "yuv420p10le",
         ["-c:v", "libsvtav1", "-preset", "6", "-crf", "28", "-svtav1-params", "lp=1"],
+    ),
+    "decode-vp9.webm": (
+        "160x90",
+        "yuv420p",
+        ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-row-mt", "0", "-threads", "1", "-keyint_min", "25"],
     ),
 }
 

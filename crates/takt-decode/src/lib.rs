@@ -62,7 +62,7 @@
 //! # What the helper may do
 //!
 //! It gets nothing but its pipes and the ring: no file, no path, no handle. It decodes the codecs
-//! of a fixed list ([`proto::CODECS`]: H.264 and HEVC with libavcodec's own decoders, AV1 with
+//! of a fixed list ([`proto::CODECS`]: H.264, HEVC and VP9 with libavcodec's own decoders, AV1 with
 //! dav1d) and lives under the watchdog and the limits of `takt-ipc`. It is not yet confined by the
 //! operating system beyond that (`docs/reviews/phase-1.md`).
 //!

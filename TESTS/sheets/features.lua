@@ -19,6 +19,11 @@ return {
         docs = "docs/PHASE-0.md",
     },
     {
+        id = "takt.window-own-pipeline",
+        title = "A file plays in the window through the own pipeline (takt-demux, takt-decode), and the bar switches to libmpv and back while it plays",
+        docs = "docs/BUILD.md",
+    },
+    {
         id = "takt.window-broken-file",
         title = "A file that cannot play is named in the bar once, and the next entry of the playlist plays",
         docs = "docs/PHASE-0.md",

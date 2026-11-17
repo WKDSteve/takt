@@ -11,7 +11,7 @@
 //! # The threshold
 //!
 //! Measured on 2026-11-17 (Windows 11, FFmpeg 9.0 LGPL build of BtbN, mpv 0.41.0-dev of
-//! shinchiro), the lowest value of all 50 pictures of a file: 55.9 dB for H.264, HEVC and AV1 in
+//! shinchiro), the lowest value of all 50 pictures of a file: 55.9 dB for H.264, HEVC, AV1 and VP9 in
 //! 8 bit, 51.7 dB in 10 bit (mpv dithers ten bits down to eight, the reference here rounds). The
 //! numbers are in `docs/reviews/phase-1.md`. What a mistake looks like, measured by the second
 //! test here: the picture next to the right one has 21.7 dB (the test clips move), the right
@@ -376,6 +376,7 @@ fn the_own_pipeline_shows_the_picture_libmpv_shows_at_the_same_time() {
         ("decode-av1.mkv", MIN_PSNR_DB),
         ("decode-hevc-10bit.mp4", MIN_PSNR_DB_10BIT),
         ("decode-av1-10bit.mkv", MIN_PSNR_DB_10BIT),
+        ("decode-vp9.webm", MIN_PSNR_DB),
         // The clip of the MpvBackend tests: no matrix named, both sides take BT.709.
     ] {
         let compared = compare(name);

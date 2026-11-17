@@ -298,6 +298,13 @@ impl Session {
         }
     }
 
+    /// Whether what plays has sound and subtitle tracks to choose from: a
+    /// file libmpv plays. The own pipeline plays the picture only.
+    #[must_use]
+    pub const fn has_tracks(&self) -> bool {
+        !matches!(self.kind, Kind::Test(_) | Kind::Own(_))
+    }
+
     /// What plays files.
     #[must_use]
     pub const fn pipeline(&self) -> Pipeline {
@@ -1308,6 +1315,7 @@ mod tests {
         assert_eq!(session.take_limit_note(), Some(OWN_LIMIT));
         assert_eq!(session.take_limit_note(), None, "said once");
         assert!(session.tracks(TrackKind::Audio).is_empty());
+        assert!(!session.has_tracks(), "no menus of tracks on the bar");
         assert_eq!(
             session.cycle_track(TrackKind::Subtitle),
             Some(NO_TRACKS.to_owned())
@@ -1354,11 +1362,12 @@ mod tests {
 
         // A file the pipeline cannot play is refused with the reason, and the file that
         // plays is still the one F6 would open again.
-        let vp9 = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/format-vp9.webm");
-        session.open_file(Path::new(vp9)).unwrap();
-        assert_eq!(session.current(), Some(Path::new(vp9)));
+        let junk = junk("own");
+        session.open_file(&junk).unwrap();
+        assert_eq!(session.current(), Some(junk.as_path()));
         let why = opened(&mut session).unwrap_err();
-        assert!(why.contains("vp9"), "{why}");
+        let _ = std::fs::remove_file(&junk);
+        assert!(why.contains("demuxer refused"), "{why}");
         assert!(session.is_file());
         assert_eq!(session.backend_name(), "takt-sw");
         assert_eq!(session.current(), Some(Path::new(clip)));
@@ -1441,6 +1450,7 @@ mod tests {
         session.open_file(Path::new(clip)).unwrap();
         assert_eq!(opened(&mut session), Ok(()));
         assert_eq!(session.backend_name(), "mpv-sw");
+        assert!(session.has_tracks());
         session.seek_to(7_000);
         let arrived = std::time::Instant::now();
         while session.seek_landed(None).is_none() {

@@ -50,7 +50,7 @@ use crate::diagnostics::{self, AudioCounters, ProcessMeter, Snapshot};
 use crate::playlist::{self, Playlist};
 use crate::refresh::RefreshMeter;
 use crate::render::{self, Picture, Shown};
-use crate::session::{Session, TrackKind};
+use crate::session::{Pipeline, Session, TrackKind};
 
 /// What the overlay read last: when, its lines and the error classes.
 type ShownDiagnostics = (Instant, Vec<diagnostics::Line>, [u32; 16]);
@@ -74,6 +74,8 @@ struct PlayerApp {
     notice: Option<String>,
     /// The entry that is being opened, as the bar names it.
     opening: Option<String>,
+    /// The file that is being opened is the one that played, on its way to the other pipeline.
+    switching: bool,
     /// The fault of the source said last: it repeats every pass.
     source_fault: Reported,
     shown: Option<Shown>,
@@ -147,6 +149,7 @@ impl PlayerApp {
             close_at: seconds.map(|s| Instant::now() + Duration::from_secs(s)),
             notice: None,
             opening: None,
+            switching: false,
             source_fault: Reported::default(),
             shown: None,
             refresh: RefreshMeter::default(),
@@ -286,6 +289,11 @@ impl PlayerApp {
             return;
         };
         let label = self.opening.take().unwrap_or_default();
+        // The line of the switch has done its part once the other pipeline has the file open:
+        // the bar is free for what there is to say about the file as that pipeline plays it.
+        if std::mem::take(&mut self.switching) && ended.is_ok() {
+            self.notice = None;
+        }
         match ended {
             Ok(()) => {
                 self.scheduler.reset();
@@ -587,6 +595,7 @@ impl PlayerApp {
                         // that ends is asked every pass, like any other open.
                         if self.session.opening() {
                             self.opening = self.session.current().map(Playlist::label);
+                            self.switching = true;
                         }
                         line
                     }
@@ -866,7 +875,7 @@ impl eframe::App for PlayerApp {
                     self.state.set_volume(volume);
                     self.session.set_volume(self.state.effective_volume());
                 }
-                if self.session.is_file() {
+                if self.session.has_tracks() {
                     ui.separator();
                     self.track_menu(ui, "Audio", "# steps through them", TrackKind::Audio);
                     self.track_menu(
@@ -875,6 +884,25 @@ impl eframe::App for PlayerApp {
                         "j steps through them, z and x move them",
                         TrackKind::Subtitle,
                     );
+                }
+                // What plays files, and the way to the other one: for a file, and whenever the
+                // own pipeline is the one (so the way back is on the bar too).
+                let pipeline = self.session.pipeline();
+                if self.session.is_file() || pipeline == Pipeline::Own {
+                    ui.separator();
+                    let label = match pipeline {
+                        Pipeline::Mpv => "Pipeline: libmpv",
+                        Pipeline::Own => "Pipeline: own",
+                    };
+                    if ui
+                        .button(label)
+                        .on_hover_text(
+                            "F6 switches between libmpv and the own pipeline (picture only, no sound yet)",
+                        )
+                        .clicked()
+                    {
+                        self.run(ctx, Command::SwitchPipeline);
+                    }
                 }
                 if let Some(entry) = &self.opening {
                     ui.separator();
