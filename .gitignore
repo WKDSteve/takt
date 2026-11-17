@@ -19,3 +19,10 @@ test.log
 
 # Pictures and results of the test sheets (testing.nvim)
 TESTS/sheets/out/
+
+# The fuzz workspace (fuzz/README.md): its build, its lock file, what a run collects and finds
+/fuzz/target
+/fuzz/Cargo.lock
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

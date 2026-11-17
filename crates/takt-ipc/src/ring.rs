@@ -50,9 +50,13 @@ const LAYOUT_VERSION: u64 = 1;
 const WORD_MAGIC: usize = 0;
 const WORD_VERSION: usize = 1;
 const WORD_CAPACITY: usize = 2;
-const WORD_HEAD: usize = 16;
-const WORD_TAIL: usize = 32;
-const WORD_BEAT: usize = 48;
+/// The word of the region's head that holds the writer's counter. Public for tools that look at
+/// a ring from outside (a fuzz harness, a debugger); the two ends never need it.
+pub const WORD_HEAD: usize = 16;
+/// The word of the region's head that holds the reader's counter.
+pub const WORD_TAIL: usize = 32;
+/// The word of the region's head that holds the heartbeat.
+pub const WORD_BEAT: usize = 48;
 
 /// Bytes in front of every payload.
 pub const RECORD_HEAD: usize = 8;

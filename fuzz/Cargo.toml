@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The fuzz targets of Takt (cargo-fuzz, libFuzzer). A workspace of its own: it needs a nightly compiler and
+# is no part of any build, test or release of the workspace above. How to run it: README.md here.
+[package]
+name = "takt-fuzz"
+version = "0.0.0"
+license = "GPL-3.0-or-later"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# The runtime of libFuzzer (MIT OR Apache-2.0 OR NCSA). A tool of the test run only: it is linked into the
+# fuzz target and nothing else, so it is no dependency of the workspace and not in its license check.
+libfuzzer-sys = "0.4"
+takt-demux = { path = "../crates/takt-demux" }
+
+[[bin]]
+name = "protocol_reader"
+path = "fuzz_targets/protocol_reader.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

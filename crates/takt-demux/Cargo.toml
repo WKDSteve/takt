@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "takt-demux"
+version = "0.0.1"
+description = "Demuxer of Takt: libavformat in a helper process, packets through shared memory"
+license = "GPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+takt-core.workspace = true
+takt-ipc.workspace = true
+
+# The helper process: the only program that links libavformat. Built in every configuration; without
+# FFMPEG_DIR at build time it answers every file with "built without FFmpeg" (docs/BUILD.md).
+[[bin]]
+name = "takt-demux-helper"
+path = "src/bin/takt-demux-helper.rs"
+test = false
+doc = false
+
+# A helper that lies, and the tests of what the parent does about it. Its own `main`: the same program is
+# the parent that runs the cases and, started by itself, the lying helper (the test harness would write
+# to stdout, which is the control pipe).
+[[test]]
+name = "liar"
+path = "tests/liar.rs"
+harness = false
+
+[lints]
+workspace = true

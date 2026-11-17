@@ -3004,6 +3004,14 @@ name = "takt-core"
 version = "0.0.1"
 
 [[package]]
+name = "takt-demux"
+version = "0.0.1"
+dependencies = [
+ "takt-core",
+ "takt-ipc",
+]
+
+[[package]]
 name = "takt-ipc"
 version = "0.0.1"
 dependencies = [
