@@ -914,13 +914,6 @@ mod tests {
         assert!(session.device_stats().is_none(), "mpv has the device");
         assert!(session.master().is_paused(), "the pause went along");
         assert!(session.source_line().contains("160x90 rgb0"));
-        assert!(
-            session
-                .source_line()
-                .contains("file bt.709/bt.1886, shown as bt.709, lead"),
-            "{}",
-            session.source_line()
-        );
 
         // Frames come on the new clock.
         session.set_paused(false);
@@ -934,6 +927,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
         assert_eq!(frames, 3);
+        // The colour of the file: mpv may name it only once it has decoded
+        // a frame, so it is asked for after the first ones, not at once.
+        assert!(
+            session
+                .source_line()
+                .contains("file bt.709/bt.1886, shown as bt.709, lead"),
+            "{}",
+            session.source_line()
+        );
         assert!(session.cycle_track(TrackKind::Subtitle).is_some());
         let line = |s: &str| Some(s.to_owned());
         assert_eq!(

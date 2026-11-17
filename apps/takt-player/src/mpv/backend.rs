@@ -115,7 +115,7 @@ use takt_core::{
     PooledFrame, Rational, Timestamp, TransferFunction,
 };
 
-use super::ffi::{self, Event, Mpv, Renderer, Target, Waker};
+use super::ffi::{self, Event, Mpv, Renderer, Target, Waiting, Waker};
 use super::micros;
 
 /// The "sample rate" of the clock: its anchor counts microseconds.
@@ -279,6 +279,11 @@ struct Shared {
     stop: AtomicBool,
     /// Frames rendered since the last file was asked for.
     decoded: AtomicU64,
+    /// How many of them were the frame before, drawn once more: mpv asks
+    /// for that when it starts a file, and when the subtitles change while
+    /// it is paused. Such a picture carries the time of the frame it shows
+    /// again, so two frames with one time are no error of the stamp.
+    redrawn: AtomicU64,
     /// Frames of the pool that are out, as of the last render.
     in_flight: AtomicUsize,
     /// Every frame of the pool was out when a picture waited: it was not
@@ -373,6 +378,8 @@ fn render_one(
     clock: &AudioMasterClock,
 ) -> takt_core::Result<()> {
     let before = Instant::now();
+    // Asked before the render: afterwards the frame no longer waits.
+    let waiting = renderer.waiting();
     let mut frame = match pool.as_mut() {
         Some((size, frames)) => draw(renderer, *size, frames, shared, clock)?,
         None => {
@@ -415,6 +422,9 @@ fn render_one(
         .render
         .record(u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX));
     shared.decoded.fetch_add(1, Ordering::Relaxed);
+    if waiting == Some(Waiting::Again) {
+        shared.redrawn.fetch_add(1, Ordering::Relaxed);
+    }
     // Put down before the count: the frame it replaces goes back first.
     *shared.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
     if let Some((_, frames)) = pool.as_ref() {
@@ -1135,6 +1145,7 @@ impl MpvBackend {
         // A picture of the file before is not one of this file.
         drop(self.shared.take());
         self.shared.decoded.store(0, Ordering::Relaxed);
+        self.shared.redrawn.store(0, Ordering::Relaxed);
         self.loaded = false;
         self.eof = true;
         self.jump = Jump::Done;
@@ -1810,12 +1821,20 @@ mod tests {
             errors.push(clock.until_nanos(meta.pts));
             true
         });
-        // 25 frames a second for two seconds; a loaded machine shows fewer.
-        assert!((10..=51).contains(&stamps.len()), "{}", stamps.len());
+        // The time never goes back. Two frames with one time are one frame
+        // of the file drawn twice, which mpv does when it starts a file
+        // (measured: up to three pictures of the first frame): as many as
+        // the render thread was told to draw again, and no more.
         assert!(
-            stamps.windows(2).all(|pair| pair[0] < pair[1]),
+            stamps.windows(2).all(|pair| pair[0] <= pair[1]),
             "{stamps:?}"
         );
+        let again = stamps.windows(2).filter(|pair| pair[0] == pair[1]).count();
+        let redrawn = backend.shared.redrawn.load(Ordering::Relaxed);
+        assert!(again as u64 <= redrawn, "{again} > {redrawn}: {stamps:?}");
+        // 25 frames a second for two seconds; a loaded machine shows fewer.
+        let frames = stamps.len() - again;
+        assert!((10..=51).contains(&frames), "{frames}: {stamps:?}");
         // The clock follows mpv: every frame within a tenth of a second.
         assert!(errors.iter().all(|e| e.abs() < 100_000_000), "{errors:?}");
         // Every frame that came was rendered; the render thread may have
@@ -2575,7 +2594,15 @@ mod tests {
         if frames == 0 {
             frames += usize::from(backend.next_frame(clock.as_ref()).unwrap().is_some());
         }
-        assert_eq!(frames, 1, "its one picture");
+        // One picture, and once more for every time mpv had it drawn again
+        // (it does that when it starts a file).
+        let rendered = backend.stats().decoded;
+        let redrawn = backend.shared.redrawn.load(Ordering::Relaxed);
+        assert!(frames as u64 <= 1 + redrawn, "{frames} of {rendered}");
+        // A picture that was rendered is never lost. On a machine so busy
+        // that the 40 ms of the file are over before the render thread
+        // wakes, mpv lets the frame go unrendered: then there is none.
+        assert!(frames >= 1 || rendered == 0, "{frames} of {rendered}");
     }
 
     #[test]

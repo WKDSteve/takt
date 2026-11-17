@@ -96,6 +96,7 @@ const END_FILE_REASON_ERROR: c_int = 4;
 
 const RENDER_PARAM_INVALID: c_int = 0;
 const RENDER_PARAM_API_TYPE: c_int = 1;
+const RENDER_PARAM_NEXT_FRAME_INFO: c_int = 11;
 const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
 const RENDER_PARAM_SKIP_RENDERING: c_int = 13;
 const RENDER_PARAM_SW_SIZE: c_int = 17;
@@ -105,6 +106,21 @@ const RENDER_PARAM_SW_POINTER: c_int = 20;
 
 /// `MPV_RENDER_UPDATE_FRAME`: a new frame waits to be rendered.
 const RENDER_UPDATE_FRAME: u64 = 1;
+
+/// `MPV_RENDER_FRAME_INFO_PRESENT`: a frame waits.
+const RENDER_FRAME_INFO_PRESENT: u64 = 1;
+/// `MPV_RENDER_FRAME_INFO_REDRAW`: it is the frame before, drawn again.
+const RENDER_FRAME_INFO_REDRAW: u64 = 1 << 1;
+/// `MPV_RENDER_FRAME_INFO_REPEAT`: it is the frame before, shown again.
+const RENDER_FRAME_INFO_REPEAT: u64 = 1 << 2;
+
+/// `mpv_render_frame_info`, what [`RENDER_PARAM_NEXT_FRAME_INFO`] fills.
+#[repr(C)]
+#[derive(Default)]
+struct RawFrameInfo {
+    flags: u64,
+    target_time: i64,
+}
 
 /// `MPV_ERROR_NOMEM`, what a null handle of `mpv_create` is reported as.
 const ERROR_NOMEM: c_int = -1;
@@ -168,6 +184,9 @@ unsafe extern "C" {
         callback_ctx: *mut c_void,
     );
     fn mpv_render_context_update(ctx: *mut RenderContext) -> u64;
+    /// `param.data` points at the value render.h names for `param.kind`;
+    /// mpv fills it and keeps no pointer.
+    fn mpv_render_context_get_info(ctx: *mut RenderContext, param: RenderParam) -> c_int;
     fn mpv_render_context_render(ctx: *mut RenderContext, params: *mut RenderParam) -> c_int;
     fn mpv_render_context_free(ctx: *mut RenderContext);
 }
@@ -338,6 +357,16 @@ impl Waker {
     pub fn wake(&self) {
         self.0.signal();
     }
+}
+
+/// What the frame that waits to be rendered is ([`Renderer::waiting`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Waiting {
+    /// A new frame of the video.
+    New,
+    /// The frame before once more: a redraw (the subtitles changed while
+    /// paused) or a repeat.
+    Again,
 }
 
 /// The render context of an [`Mpv`]: what renders its frames into memory
@@ -647,6 +676,29 @@ impl Renderer {
         // SAFETY: the render context is live until `drop`.
         let flags = unsafe { mpv_render_context_update(self.context.as_ptr()) };
         flags & RENDER_UPDATE_FRAME != 0
+    }
+
+    /// What the frame that waits is: a new one of the video, or the one
+    /// before once more (a redraw, a repeat). `None` when none waits or mpv
+    /// does not say. Asks the render context, not the core: it never waits.
+    pub fn waiting(&mut self) -> Option<Waiting> {
+        let mut info = RawFrameInfo::default();
+        let param = RenderParam {
+            kind: RENDER_PARAM_NEXT_FRAME_INFO,
+            data: (&raw mut info).cast(),
+        };
+        // SAFETY: the render context is live. The parameter points at a
+        // `mpv_render_frame_info`, the type render.h names for it, that
+        // lives until the call returns; mpv fills it and keeps no pointer.
+        let code = unsafe { mpv_render_context_get_info(self.context.as_ptr(), param) };
+        if code < 0 || info.flags & RENDER_FRAME_INFO_PRESENT == 0 {
+            return None;
+        }
+        if info.flags & (RENDER_FRAME_INFO_REDRAW | RENDER_FRAME_INFO_REPEAT) == 0 {
+            Some(Waiting::New)
+        } else {
+            Some(Waiting::Again)
+        }
     }
 
     /// Renders the current frame into `target` (scaled to its size, `rgb0`)
