@@ -19,10 +19,13 @@ Performance-Grenzen? Welche Angriffsfläche ist neu entstanden? Dazu kommt die G
   - [Performance](#performance)
     - [Software-Decoder durch die Prozessgrenze](#software-decoder-durch-die-prozessgrenze)
     - [Bildgleichheit gegen libmpv](#bildgleichheit-gegen-libmpv)
+    - [Zero-Copy-Spike (2026-11-17)](#zero-copy-spike-2026-11-17)
+    - [Compositing in takt-gpu (2026-11-17)](#compositing-in-takt-gpu-2026-11-17)
   - [Sicherheit und Angriffsflaeche](#sicherheit-und-angriffsflaeche)
     - [Stand Hilfsprozesse und Demuxer](#stand-hilfsprozesse-und-demuxer)
     - [Stand Software-Decoder](#stand-software-decoder)
     - [Fuzzing der Leseseite](#fuzzing-der-leseseite)
+    - [Stand takt-gpu](#stand-takt-gpu)
     - [Offen](#offen)
   - [Was in dieser Phase entschieden wurde](#was-in-dieser-phase-entschieden-wurde)
 
@@ -229,6 +232,62 @@ Nicht gemessen: Linux, Vulkan (auch Vulkan Video), macOS, Intel- und AMD-Grafik,
 Nebenbefund: D3D12VA von FFmpeg 9.0.2 scheitert auf dieser Maschine an `hevc_nvenc`-Material in 3840x2160
 (`hardware accelerator failed to decode picture`), D3D11VA spielt dieselbe Datei.
 
+### Compositing in takt-gpu (2026-11-17)
+
+`takt/takt-gpu-compositing-farbraum-tonemapping`: der Render-Code des Players ist das Crate `takt-gpu`
+([GPU.md](../GPU.md)), mit einem Compositor für mehrere Lagen. Gemessen mit
+`cargo run --release -p takt-gpu --example composite-bench`: 4K-Quellen in ein 4K-Ziel (`Rgba8Unorm`), jede
+Video-Lage mit einem neuen Bild je Durchlauf aus einem Ring von drei, 30 s je Lauf (1800 Bilder). Die vier Lagen:
+NV12 BT.709 flächig, P010 BT.2020 PQ mit Tonemapping flächig bei halber Deckkraft, NV12 als Bild im Bild, eine
+RGBA-Grafik mit Alpha flächig; bei 8 und 16 Lagen wiederholt. „Importiert“ heißt: jedes Bild ist eine Textur, die
+ein D3D11-Gerät geschrieben hat und die über wgpu-hal importiert ist (der Weg eines Hardware-Decoders, ohne
+Decoder). Gemessen wird der Compositor, kein Decoder.
+
+Kopflos ist alle 1/60 s ein Bild fällig; verspätet ist es, wenn die GPU es nicht fertig hat, bevor das nächste
+fällig ist. Mit Fenster (1280x720, vsync, auf dem 60-Hz-Bildschirm) ist ein Bild verspätet, wenn seit dem vorigen
+mehr als anderthalb Bildperioden vergangen sind. „GPU-Zeit“ ist die Zeit von der Einreichung bis die GPU fertig
+ist. Hardware wie beim Spike: i5-12400F, RTX 4070 SUPER (Treiber 610.88), Windows 11, DX12.
+
+**Die Maschine war nicht ruhig**: während aller Läufe lasteten Builds und Tests anderer Sitzungen die CPU zu 60
+bis 100 % aus (Mittel je Lauf in der Spalte), und auf der GPU lag ein `llama-server` mit 9,6 GB VRAM. Der
+Messprozess lief deshalb mit der Prioritätsklasse „High“, so wie der Player seinen Render-Thread auf
+Echtzeit-Priorität hebt; die letzte Zeile zeigt, was ohne das unter dieser Last passiert.
+
+| Lagen | Quelle | Anzeige | Läufe | Verspätet je Lauf (von 1800) | GPU-Zeit Median | GPU-Zeit p99 | GPU-Zeit max | GPU-Last | CPU der Maschine |
+|---|---|---|---|---|---|---|---|---|---|
+| 4 | importiert | kopflos | 5 | 0, 0, 1, 0, 0 | 4,0 bis 5,1 ms | 7,8 bis 10,9 ms | 12,9 bis 15,9 ms | 26 bis 30 % | 80 bis 99 % |
+| 8 | importiert | kopflos | 1 | 0 | 6,4 ms | 9,9 ms | 11,0 ms | 30 % | 75 % |
+| 16 | importiert | kopflos | 1 | 0 | 6,3 ms | 7,4 ms | 9,0 ms | 32 % | 100 % |
+| 4 | importiert | Fenster, vsync | 10 | 0, 0, 6, 0, 7, 9, 1, 0, 0, 4 | 5,7 bis 6,1 ms | 8,4 bis 11,8 ms | 9,5 bis 54,5 ms | 27 bis 34 % | 60 bis 96 % |
+| 4 | Upload aus dem Systemspeicher | kopflos | 1 | 598 | 3,1 ms | 12,3 ms | 15,1 ms | 22 % | 88 % |
+| 4 | importiert, Priorität „Normal“ | kopflos | 3 | 159, 734, 612 | 1,0 bis 5,9 ms | 19,7 bis 50,6 ms | 56,7 bis 156,8 ms | 7 bis 21 % | 99 % |
+
+Was die Zahlen sagen:
+
+- **Das Compositing selbst hält 4K60 mit Abstand.** Vier Lagen kosten im Median 4 bis 6 ms GPU-Zeit je Bild, im
+  p99 unter 12 ms, bei 16,7 ms Budget; acht und sechzehn Lagen liegen im selben Bereich (die GPU taktet unter
+  mehr Last höher, deshalb fällt das p99 mit der Lagenzahl nicht ab). Kopflos war in sieben Läufen mit 4, 8 und
+  16 Lagen ein Bild von 12 600 verspätet.
+- **Im Fenster gab es in fünf von zehn Läufen einzelne Aussetzer** (1 bis 9 Bilder von 1800, höchstens 0,5 %), in
+  zwei Läufen als ein Stillstand von 1,7 und 1,9 s. Die GPU-Zeit je Bild war in diesen Läufen dieselbe wie in den
+  anderen; es sind einzelne Ereignisse der Präsentation, nicht die Kosten der Lagen. Was sie auslöst, ist nicht
+  belegt (Vermutung: Fenster anderer Sitzungen, die während der Läufe aufgingen und den Fokus nahmen, und die
+  Last der Maschine).
+- **Der Upload-Weg trägt drei 4K-Video-Lagen bei 60 Hz nicht**: 10,6 ms CPU je Bild für das Kopieren von rund
+  50 MB in den Staging-Speicher von wgpu, ein Drittel der Bilder verspätet. Das ist der Fallback für eine Lage
+  aus dem Software-Decoder, nicht der Weg für Mehrlagen-4K.
+- **Ohne angehobene Priorität** verliert der Prozess unter dieser Last 9 bis 41 % der Bilder, bei einer GPU, die
+  kaum zu tun hat: der Zeitplan des Betriebssystems, nicht das Compositing.
+
+Für die Akzeptanz der Task („≥ 4 Lagen bei 4K60 ohne Frame-Drops auf der Entwicklungsmaschine“) heißt das: das
+Compositing hat ein Mehrfaches an Reserve, aber „ohne Frame-Drops“ ist auf dieser ausgelasteten Maschine nicht
+sauber belegt (kopflos ein verspätetes Bild in 9000 bei vier Lagen, mit Fenster Aussetzer in der Hälfte der
+Läufe). Eine Wiederholung auf ruhiger Maschine und über fünf Minuten steht aus; in neun Minuten Warten fiel die
+Last nie unter 35 %. Rohdaten: im Vault unter `takt/ROADMAP/reports/2026-11-17_takt-gpu-compositing-messung.md`.
+
+Nicht gemessen: mit echtem Decoder (das Bild entsteht hier vor der Uhr), Vollbild und 4K-Bildschirm (der
+Bildschirm hat 1680x1050), Linux, macOS, andere Grafikkarten, mehr als 30 s je Lauf.
+
 ---
 
 ## Sicherheit und Angriffsflaeche
@@ -364,6 +423,20 @@ und halten nur für Zeitbasen, deren Teile klein sind. Für alles, was aus dem D
 Protokollgrenze das jetzt sicher; die Funktionen selbst sind unverändert (`takt/takt-core-timestamp-ueberlauf`).
 Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxers mit einem Fehler.
 
+### Stand takt-gpu
+
+Die Naht zwischen Decoder und GPU ([GPU.md](../GPU.md)) nimmt Daten an, die aus einem Hilfsprozess stammen können:
+
+- **Ebenen im Systemspeicher**: jede Ebene wird gegen Format, Breite, Höhe und Stride geprüft, bevor ein Byte an
+  `write_texture` geht (`PlanesView`); ein Format ohne Texturpfad wird abgelehnt.
+- **Texturen**: `TextureFrame::new` prüft Format, Dimension, sichtbare Größe und Scheibe gegen die Textur selbst.
+  Beim Import nennt der Aufrufer nur das erwartete Format; Größe und Scheiben liest `open_shared_texture` aus
+  der Ressource (die Antwort des Treibers, nicht des Absenders) und prüft sie gegen die Limits des Geräts.
+- **Handles**: ein Handle, das keine Textur bzw. kein Zaun dieses Adapters ist, lehnt Direct3D ab; der Test
+  `gpu_a_handle_that_is_not_the_texture_it_is_said_to_be_is_refused` hält das fest.
+- **`unsafe`** steht nur in `src/interop/dx12.rs` und `src/interop/d3d11.rs` (benannte FFI-Module, jeder Block
+  mit `// SAFETY:`).
+
 ### Offen
 
 1. **Keine Sandbox des Betriebssystems.** Der Hilfsprozess ist ein eigener Prozess mit Watchdog und Limits,
@@ -406,6 +479,16 @@ Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxe
     eigene Pipeline spielt aus dem Checkout. Das Zip ist ohnehin ohne FFmpeg gebaut.
 14. **Der Vergleich mit libmpv läuft nur unter Windows** (Job mit gepinntem libmpv und gepinnter FFmpeg), siehe
     Bildgleichheit.
+15. **Ein Zaun, der nie signalisiert wird, hält die Queue an.** `takt-gpu` lässt die Queue von wgpu auf der GPU
+    auf den Zaun eines importierten Bildes warten (`Fence::wait_on`). Stirbt der Prozess, der ihn signalisieren
+    soll, mitten im Bild, wartet die Queue für immer, und mit ihr das Fenster. Heute signalisiert nur Code im
+    eigenen Prozess; mit einem Hardware-Decoder im Hilfsprozess braucht das eine Grenze
+    (`takt/takt-gpu-zaun-eines-hilfsprozesses-begrenzen`).
+16. **Der Import ist nur unter Windows auf DX12 umgesetzt und nur auf einer Nvidia-Karte und WARP geprüft.**
+    Intel und AMD, der Texture-Array-Modus eines Decoders (die Scheibe im View ist vorbereitet, aber ungetestet)
+    und Linux/macOS stehen aus (`takt/spike-zero-copy-linux-vulkan-import`).
+17. **Tonemapping ohne Metadaten**: die Spitze der Quelle ist fest 1000 nits, weil `FrameMeta` weder MaxCLL noch
+    die Mastering-Angaben trägt (`takt/takt-gpu-hdr-metadaten-und-chroma-lage`, zusammen mit der Chroma-Lage).
 
 ---
 
@@ -436,3 +519,8 @@ Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxe
 | `takt-gpu` bleibt auf wgpu; fremde Texturen kommen über wgpu-hal-Interop herein, nicht über `ash` direkt (2026-11-17, Empfehlung des Zero-Copy-Spikes) | Auf Windows gemessen: Import ohne CPU-Kopie gelingt mit dem gelockten wgpu 27.0.1, NV12 und P010, ohne Fork. Für Linux nach Quelltext von wgpu-hal 27.0.4 erwartbar (`vulkan::Device::texture_from_raw`), dort mit eigenem `ash`-Code für den DMA-BUF-Import auf dem Gerät von wgpu; nicht gemessen | Ja: zeigt der Linux-Prototyp eine Sackgasse (Layout importierter Bilder, Vulkan-Video-Queues), gilt „Neu bewerten“ aus der Technologie-Tabelle des KONZEPTs |
 | Windows: D3D11VA mit geteilter Textur (`OpenSharedHandle`, eine GPU-Kopie) als erster Hardware-Weg, D3D12VA direkt (keine Kopie) als spätere Optimierung (2026-11-17, Empfehlung des Spikes) | Gleiche CPU-Last wie der direkte Weg, aber Decoder und Renderer teilen keinen Zustand an Referenzbildern, und FFmpegs D3D11VA spielt Material, an dem sein D3D12VA hier scheitert | Ja, hinter der Schnittstelle von `takt-decode` |
 | `GpuFrame` trägt eine `wgpu::Texture` (NV12/P010, zwei Ebenen-Views) plus sichtbare Größe, Bereitschaftssignal und Rückgabe-Guard; der CPU-Puffer bleibt die zweite Variante (2026-11-17, Vorschlag des Spikes für `takt-gpu`) | Beide Wege enden im selben Shader und Bind-Group-Layout; das wgpu-Gerät entsteht vor dem Decoder und braucht `TEXTURE_FORMAT_NV12` und `TEXTURE_FORMAT_P010` | Ja, bis `takt-gpu` die Schnittstelle festschreibt |
+| 2026-11-17: ein Shader (`layer.wgsl`) für alle Formate statt je einem für NV12 und `rgb0`; die Umrechnung reist als affine Matrix im Uniform | Zwei und drei Ebenen, 8 und 10 bit, limited und full, drei Matrizen und vier Transferpfade wären sonst ein Dutzend Shader; die CPU-Referenz (`colour.rs`) rechnet dieselbe Matrix, also gibt es eine Quelle der Zahlen | ja |
+| 2026-11-17: HDR nach SDR mit der EETF aus BT.2390 auf der größten Komponente, Zielweiß 203 nits (BT.2408), Spitze der Quelle 1000 nits ohne Metadaten | Eine genormte Kurve mit nachrechenbaren Punkten statt einer eigenen; die größte Komponente hält den Farbton und lässt nichts über das Zielweiß laufen | ja, `ToneMap` je Lage |
+| 2026-11-17: gemischt wird auf den Werten des Ziels (gamma-kodiert bei `Unorm`), nicht in einem linearen Zwischenraum | Der Player hat eine Lage und braucht keinen; ein `Rgba16F`-Zwischenraum kommt mit der HDR-Ausgabe und dem Studio | ja |
+| 2026-11-17: der Player bleibt beim Backend, das eframe wählt; DX12 nur mit `--imported` | Der Import braucht DX12, der Player hat aber noch keinen Hardware-Decoder; ein Wechsel des Backends ändert das gemessene Frame-Timing aus Phase 0 und gehört zur Entscheidung mit dem Decoder | ja, mit `takt/hardware-decode-vulkan-video-d3d` |
+| 2026-11-17: Referenzbilder als PPM im Textformat (16 mal 8 Pixel), aus der CPU-Referenz erzeugt, im Repository | Eine Änderung der Farbrechnung zeigt sich als Diff von Bildern; kein Bildformat-Crate nötig; Punkte daraus sind zusätzlich gegen die Normen geprüft | ja |
