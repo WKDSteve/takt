@@ -158,7 +158,12 @@ pub struct Demuxer {
     seek_timeout: Duration,
     scratch: Vec<u8>,
     spare: Vec<Vec<u8>>,
+    /// Set when the helper was caught lying: nothing it wrote is handed out any more.
+    failed: Option<DemuxError>,
 }
+
+/// Smallest record limit a demuxer can work with: the tail of a packet and a little data.
+const MIN_RECORD: usize = 64;
 
 impl Demuxer {
     /// Opens the file at `path` in this process and hands it to a new helper.
@@ -180,12 +185,21 @@ impl Demuxer {
     /// [`DemuxError::Refused`] when the helper cannot read the file as a container,
     /// [`DemuxError::Helper`] when the helper could not be started or did not survive the file.
     pub fn open(file: File, options: &Options) -> Result<Self, DemuxError> {
+        if options.limits.max_record < MIN_RECORD {
+            return Err(DemuxError::Helper(IpcError::Spawn(format!(
+                "a record limit of {} bytes is below the {MIN_RECORD} a demuxer needs",
+                options.limits.max_record
+            ))));
+        }
         let (mut helper, ring) = HelperCommand::new(&options.helper, proto::APP)
             .limits(options.limits.clone())
             .ring_capacity(options.ring_capacity)
             .file(file)
-            .spawn_reading()?;
-        let first = helper.recv(options.open_timeout)?;
+            .spawn_reading()
+            .map_err(missing_libraries)?;
+        let first = helper
+            .recv(options.open_timeout)
+            .map_err(missing_libraries)?;
         let info = match first.kind {
             proto::kind::OPENED => {
                 MediaInfo::parse(&first.payload).map_err(|e| condemn(&helper, e))?
@@ -213,6 +227,7 @@ impl Demuxer {
             seek_timeout: options.seek_timeout,
             scratch: Vec::new(),
             spare: Vec::new(),
+            failed: None,
         })
     }
 
@@ -232,16 +247,24 @@ impl Demuxer {
     /// first.
     pub fn try_next(&mut self) -> Result<Option<Event>, DemuxError> {
         loop {
+            // A helper that lied once is not listened to again: what else is in the ring comes
+            // from the same process.
+            if let Some(err) = &self.failed {
+                return Err(err.clone());
+            }
             match self.ring.try_read(&mut self.scratch) {
                 Ok(true) => {}
                 Ok(false) => {
                     self.helper.check()?;
                     return Ok(None);
                 }
-                Err(err) => return Err(condemn(&self.helper, err)),
+                Err(err) => return Err(self.fail(err)),
             }
-            let (serial, record) = proto::parse_record(&mut self.scratch, &self.info.streams)
-                .map_err(|e| condemn(&self.helper, e))?;
+            let parsed = proto::parse_record(&mut self.scratch, &self.info.streams);
+            let (serial, record) = match parsed {
+                Ok(parsed) => parsed,
+                Err(err) => return Err(self.fail(err)),
+            };
             let current = serial == self.serial;
             let event = match record {
                 Record::Packet(packet) => {
@@ -293,6 +316,9 @@ impl Demuxer {
     /// [`DemuxError::Refused`] when the container cannot seek there; the demuxer then reads on
     /// where it was. [`DemuxError::Helper`] when the helper is gone.
     pub fn seek(&mut self, to: Timestamp) -> Result<(), DemuxError> {
+        if let Some(err) = &self.failed {
+            return Err(err.clone());
+        }
         let target_micros = to
             .rescale(Rational::MICROS)
             .ok_or(DemuxError::Time)?
@@ -312,25 +338,26 @@ impl Demuxer {
         self.seq = seq;
         let reply = self.helper.recv(self.seek_timeout)?;
         if reply.seq != seq {
-            return Err(condemn(
-                &self.helper,
-                ProtocolError::Invalid("answer to another request"),
-            ));
+            return Err(self.fail(ProtocolError::Invalid("answer to another request")));
         }
         match reply.kind {
             proto::kind::SEEK_DONE if reply.payload.is_empty() => Ok(()),
-            core_kind::FAULT => {
-                let fault = Fault::parse(&reply.payload).map_err(|e| condemn(&self.helper, e))?;
-                Err(DemuxError::Refused {
+            core_kind::FAULT => match Fault::parse(&reply.payload) {
+                Ok(fault) => Err(DemuxError::Refused {
                     code: fault.code,
                     text: fault.text,
-                })
-            }
-            _ => Err(condemn(
-                &self.helper,
-                ProtocolError::Invalid("answer to a seek"),
-            )),
+                }),
+                Err(err) => Err(self.fail(err)),
+            },
+            _ => Err(self.fail(ProtocolError::Invalid("answer to a seek"))),
         }
+    }
+
+    /// Ends the helper for a lie and remembers it: every later call returns this error.
+    fn fail(&mut self, err: ProtocolError) -> DemuxError {
+        let err = condemn(&self.helper, err);
+        self.failed = Some(err.clone());
+        err
     }
 
     /// Hands the buffer of a packet back, so the next packet needs no allocation.
@@ -346,8 +373,14 @@ impl Demuxer {
     ///
     /// # Errors
     /// [`DemuxError::Helper`] when the helper's counter is impossible; the helper is ended.
-    pub fn buffered(&self) -> Result<usize, DemuxError> {
-        self.ring.pending().map_err(|e| condemn(&self.helper, e))
+    pub fn buffered(&mut self) -> Result<usize, DemuxError> {
+        if let Some(err) = &self.failed {
+            return Err(err.clone());
+        }
+        match self.ring.pending() {
+            Ok(bytes) => Ok(bytes),
+            Err(err) => Err(self.fail(err)),
+        }
     }
 
     /// The process id of the helper.
@@ -360,6 +393,26 @@ impl Demuxer {
     #[must_use]
     pub fn close(self) -> Option<i32> {
         self.helper.shutdown()
+    }
+}
+
+/// A helper that died while Windows was loading it for want of a DLL is not a helper that
+/// crashed: it is a build with FFmpeg whose libraries are not where the system looks for them.
+fn missing_libraries(err: IpcError) -> DemuxError {
+    /// `STATUS_DLL_NOT_FOUND` as the exit code of a process.
+    const DLL_NOT_FOUND: i32 = 0xC000_0135_u32.cast_signed();
+    match err {
+        IpcError::Exited {
+            code: Some(DLL_NOT_FOUND),
+            ..
+        } => DemuxError::Refused {
+            code: proto::fault::NO_FFMPEG,
+            text:
+                "the helper did not start: the FFmpeg libraries were not found (PATH, or next to \
+                   the helper; docs/BUILD.md)"
+                    .to_owned(),
+        },
+        other => DemuxError::Helper(other),
     }
 }
 

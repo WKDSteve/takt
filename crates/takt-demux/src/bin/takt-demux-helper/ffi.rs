@@ -3,8 +3,10 @@
 //! a file handle the helper inherited.
 //!
 //! The one module of the crate with `unsafe` (KONZEPT, unsafe policy), and it only exists in a
-//! build with FFmpeg (`FFMPEG_DIR`, cfg `takt_ffmpeg`). It runs in the helper process, never in the
-//! main program.
+//! build with FFmpeg (`FFMPEG_DIR`, cfg `takt_ffmpeg`). It is a module of the helper program, not
+//! of the library: a program that links `takt-demux` to use the demuxer links no FFmpeg and loads
+//! none, which is the point of the process boundary (the test `the_client_links_no_ffmpeg` holds
+//! that).
 //!
 //! # Why hand-written, and what that costs
 //!
@@ -39,9 +41,9 @@ use std::ptr::{self, NonNull};
 use takt_core::{Rational, Timestamp};
 use takt_ipc::ring::Heartbeat;
 
-use crate::proto::{
-    AudioParams, MAX_DIMENSION, MAX_EXTRADATA, MAX_NAME, MAX_STREAMS, MediaInfo, PacketHead,
-    StreamInfo, StreamKind, VideoParams,
+use takt_demux::proto::{
+    AudioParams, MAX_DIMENSION, MAX_EXTRADATA, MAX_LANGUAGE, MAX_NAME, MAX_STREAMS, MAX_TITLE,
+    MediaInfo, PacketHead, StreamInfo, StreamKind, VideoParams,
 };
 
 /// The major versions this module is written for (FFmpeg 9.0).
@@ -940,8 +942,8 @@ fn stream_info(
         level: par.level,
         bit_rate: u64::try_from(par.bit_rate).ok().filter(|n| *n > 0),
         extradata,
-        language: metadata(stream, c"language", crate::proto::MAX_LANGUAGE),
-        title: metadata(stream, c"title", crate::proto::MAX_TITLE),
+        language: metadata(stream, c"language", MAX_LANGUAGE),
+        title: metadata(stream, c"title", MAX_TITLE),
         video,
         audio,
     })

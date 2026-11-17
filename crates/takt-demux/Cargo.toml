@@ -15,11 +15,12 @@ build = "build.rs"
 takt-core.workspace = true
 takt-ipc.workspace = true
 
-# The helper process: the only program that links libavformat. Built in every configuration; without
-# FFMPEG_DIR at build time it answers every file with "built without FFmpeg" (docs/BUILD.md).
+# The helper process: the only program that links libavformat (its module ffi; the library has no FFmpeg
+# in it, so the program that uses the demuxer loads none). Built in every configuration; without FFMPEG_DIR
+# at build time it answers every file with "built without FFmpeg" (docs/BUILD.md).
 [[bin]]
 name = "takt-demux-helper"
-path = "src/bin/takt-demux-helper.rs"
+path = "src/bin/takt-demux-helper/main.rs"
 test = false
 doc = false
 

@@ -179,6 +179,9 @@ fn lie() -> ExitCode {
             let _ = ctx.send(proto::kind::OPENED, 0, &opened);
             packet(&mut ring, &ctx, b"fine", &good);
             packet(&mut ring, &ctx, b"lie", &PacketHead { stream: 7, ..good });
+            // What follows a lie is well-formed, and must not be handed out any more.
+            packet(&mut ring, &ctx, b"after the lie", &good);
+            packet(&mut ring, &ctx, b"and more", &good);
         }
         "no-value-time" => {
             let _ = ctx.send(proto::kind::OPENED, 0, &opened);
@@ -314,9 +317,14 @@ fn fails_with(mode: &str, good_packets: usize, want: &ProtocolError) {
     };
     assert_eq!(protocol(&err), want, "{mode}");
     gone(pid);
-    // Finished for good: the same error from now on, never a packet.
-    assert_eq!(demuxer.try_next().unwrap_err(), err);
+    // Finished for good: the same error from now on, never a packet, whatever else the helper
+    // had written before it was ended.
+    for _ in 0..3 {
+        assert_eq!(demuxer.try_next().unwrap_err(), err);
+    }
+    assert_eq!(demuxer.next(Duration::from_millis(50)).unwrap_err(), err);
     assert_eq!(demuxer.seek(Timestamp::from_millis(0)).unwrap_err(), err);
+    assert_eq!(demuxer.buffered().unwrap_err(), err);
 }
 
 fn a_packet_of_a_stream_that_does_not_exist_ends_the_helper() {

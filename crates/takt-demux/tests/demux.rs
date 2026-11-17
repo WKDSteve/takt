@@ -22,6 +22,36 @@ fn clip(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The program that uses the demuxer must not load FFmpeg: that is what the helper process is
+/// for. This test program links the library of `takt-demux` like any user of it, so its own file
+/// must not ask the system for libavformat (the import of a DLL under Windows, a needed library
+/// elsewhere). In a build without FFmpeg this holds trivially; with `FFMPEG_DIR` it is the check.
+#[test]
+fn the_client_links_no_ffmpeg() {
+    // Spelled backwards, so that this file does not contain what it looks for.
+    let needles: Vec<Vec<u8>> = ["lld.36-tamrofva", "os.tamrofvabil", "bilyd.tamrofvabil"]
+        .iter()
+        .map(|name| name.bytes().rev().collect())
+        .collect();
+    let me = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    for needle in &needles {
+        assert!(
+            !me.windows(needle.len())
+                .any(|window| window == needle.as_slice()),
+            "this program links {}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+    // The helper is the program that does (in a build with FFmpeg).
+    let helper = std::fs::read(env!("CARGO_BIN_EXE_takt-demux-helper")).unwrap();
+    let links = needles.iter().any(|needle| {
+        helper
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
+    });
+    assert_eq!(links, cfg!(takt_ffmpeg));
+}
+
 #[cfg(not(takt_ffmpeg))]
 mod without_ffmpeg {
     use super::*;

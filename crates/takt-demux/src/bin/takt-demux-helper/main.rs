@@ -1,26 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The helper process: what `takt-demux-helper` runs.
+//! The demux helper of Takt: the process that parses one container file for the main program.
+//! Started by `takt_demux::Demuxer`, never by hand; `--about` prints the FFmpeg it runs with.
 //!
 //! It opens the one file it inherited, sends the stream table and then writes packet after packet
 //! into the ring, as far ahead as the ring has room. Between any two steps it looks for a request
 //! of its parent, and every step is a heartbeat: a helper that neither delivers nor waits is
 //! taken for hung and ended ([`takt_ipc::process`]).
+//!
+//! This program is the only code of Takt that links FFmpeg ([`ffi`], in a build with `FFMPEG_DIR`).
 
 use std::process::ExitCode;
 
+use takt_demux::proto;
 use takt_ipc::child::connect;
 
-use crate::proto;
+#[cfg(takt_ffmpeg)]
+mod ffi;
 
 /// Exit code when the process was not started by a parent that speaks the protocol.
 const EXIT_NO_PARENT: u8 = 2;
 
-/// The body of `takt-demux-helper`.
-///
-/// With `--about` as its only argument it prints which FFmpeg it runs with and exits; otherwise
-/// it serves the parent that started it.
-pub fn run() -> ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--about") {
+/// With `--about` as its only argument the helper prints which FFmpeg it runs with and exits;
+/// otherwise it serves the parent that started it.
+fn main() -> ExitCode {
+    // `args_os`: an argument that is not Unicode must not end the helper in a panic.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--about")
+    {
         println!("{}", about());
         return ExitCode::SUCCESS;
     }
@@ -39,8 +46,7 @@ pub fn run() -> ExitCode {
 }
 
 /// One line per library: what this build of the helper demuxes with.
-#[must_use]
-pub fn about() -> String {
+fn about() -> String {
     #[cfg(takt_ffmpeg)]
     {
         let libs = crate::ffi::libraries();
@@ -94,7 +100,7 @@ mod session {
     use takt_ipc::ring::{RingWriter, backoff};
 
     use crate::ffi::{AvError, Input};
-    use crate::proto::{self, PACKET_TAIL, PacketHead, Seek, dropped_record, end_tail};
+    use takt_demux::proto::{self, PACKET_TAIL, PacketHead, Seek, dropped_record, end_tail};
 
     /// How long the helper sleeps on a request while it has nothing to read (after the end of the
     /// file): short against the heartbeat limit of the parent.
@@ -136,15 +142,14 @@ mod session {
             let _ = ctx.fault(0, proto::fault::OPEN, "no file was passed on");
             return ExitCode::SUCCESS;
         };
+        if let Err(why) = crate::ffi::libraries_match() {
+            let _ = ctx.fault(0, proto::fault::FFMPEG_VERSION, &why);
+            return ExitCode::SUCCESS;
+        }
         let mut input = match Input::open(file, ctx.heartbeat()) {
             Ok(input) => input,
             Err((code, text)) => {
-                let fault = if code == 0 && text.starts_with("libav") {
-                    proto::fault::FFMPEG_VERSION
-                } else {
-                    proto::fault::OPEN
-                };
-                let _ = ctx.fault(0, fault, &describe(code, &text));
+                let _ = ctx.fault(0, proto::fault::OPEN, &describe(code, &text));
                 return ExitCode::SUCCESS;
             }
         };
@@ -184,13 +189,15 @@ mod session {
         }
     }
 
-    /// The record for the end of reading: `None` is the end of the file.
-    fn end_record(serial: u32, error: Option<&AvError>) -> Vec<u8> {
+    /// The record for the end of reading: `None` is the end of the file. The text of an error is
+    /// cut so that the record fits `max_record` bytes.
+    fn end_record(serial: u32, error: Option<&AvError>, max_record: usize) -> Vec<u8> {
         let mut record = Vec::new();
+        let room = max_record.saturating_sub(end_tail(0, 0).len());
         let code = match error {
             None => 0,
             Some((code, text)) => {
-                let mut end = text.len().min(proto::MAX_ERROR_TEXT);
+                let mut end = text.len().min(proto::MAX_ERROR_TEXT).min(room);
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -252,11 +259,11 @@ mod session {
                     }
                     Ok(None) => {
                         reading = Reading::Ended;
-                        Pending::Other(end_record(serial, None))
+                        Pending::Other(end_record(serial, None, ring.max_record()))
                     }
                     Err(err) => {
                         reading = Reading::Ended;
-                        Pending::Other(end_record(serial, Some(&err)))
+                        Pending::Other(end_record(serial, Some(&err), ring.max_record()))
                     }
                 };
             }

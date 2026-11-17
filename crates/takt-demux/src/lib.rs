@@ -51,15 +51,14 @@
 //!
 //! # Zone
 //!
-//! License zone 2 (`GPL-3.0-or-later`). `unsafe` only in the module `ffi`, the bindings to
-//! libavformat, which only exists in a build with FFmpeg.
+//! License zone 2 (`GPL-3.0-or-later`). This library is free of `unsafe` and of FFmpeg: the
+//! bindings to libavformat are a module of the helper program
+//! (`src/bin/takt-demux-helper/ffi.rs`), so a program that links this crate links and loads no
+//! FFmpeg.
 
 mod client;
-#[cfg(takt_ffmpeg)]
-mod ffi;
 #[doc(hidden)]
 pub mod fuzzing;
-pub mod helper;
 pub mod proto;
 
 pub use client::{DemuxError, Demuxer, Event, HELPER_NAME, Options};

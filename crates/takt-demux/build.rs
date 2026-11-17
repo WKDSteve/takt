@@ -7,14 +7,14 @@
 //! and the helper answers every file with "built without FFmpeg". With it the cfg `takt_ffmpeg`
 //! turns the bindings on and the helper links libavformat, libavcodec and libavutil dynamically.
 //!
-//! The bindings in `src/ffi.rs` read a few fields of FFmpeg's structures directly, so they are
+//! The bindings in `src/bin/takt-demux-helper/ffi.rs` read a few fields of FFmpeg's structures directly, so they are
 //! written for one major version of each library. The build checks the headers for it and fails
 //! with a message instead of producing a helper that reads the wrong bytes.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// The library versions `src/ffi.rs` was written against (FFmpeg 9.0): header, macro, major.
+/// The library versions the bindings were written against (FFmpeg 9.0): header, macro, major.
 const EXPECTED: [(&str, &str, u32); 3] = [
     (
         "libavformat/version_major.h",

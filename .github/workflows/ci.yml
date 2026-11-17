@@ -234,7 +234,7 @@ jobs:
         run: python scripts/ci-skip-summary.py test.log --title "libmpv (Windows)"
 
   # takt-demux with a real FFmpeg: the only job that compiles, lints and runs the bindings to libavformat
-  # (crates/takt-demux/src/ffi.rs exists only with FFMPEG_DIR) and demuxes files; every other job builds the crate
+  # (crates/takt-demux/src/bin/takt-demux-helper/ffi.rs exists only with FFMPEG_DIR) and demuxes files; every other job builds the crate
   # without FFmpeg, where the helper answers "built without FFmpeg". The archives are the LGPL shared builds of
   # FFmpeg 9.0 from BtbN/FFmpeg-Builds (docs/BUILD.md), a monthly release their publisher keeps, taken only with
   # the SHA-256 below. Should an archive be gone, the job says SKIP in a warning and in the summary and counts as
