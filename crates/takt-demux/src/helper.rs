@@ -19,7 +19,6 @@ const EXIT_NO_PARENT: u8 = 2;
 ///
 /// With `--about` as its only argument it prints which FFmpeg it runs with and exits; otherwise
 /// it serves the parent that started it.
-#[must_use]
 pub fn run() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--about") {
         println!("{}", about());
