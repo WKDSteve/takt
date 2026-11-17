@@ -243,14 +243,15 @@ jobs:
         shell: bash
         run: python scripts/ci-skip-summary.py test.log --title "libmpv (Windows)"
 
-  # takt-demux with a real FFmpeg: the only job that compiles, lints and runs the bindings to libavformat
-  # (crates/takt-demux/src/bin/takt-demux-helper/ffi.rs exists only with FFMPEG_DIR) and demuxes files; every other job builds the crate
-  # without FFmpeg, where the helper answers "built without FFmpeg". The archives are the LGPL shared builds of
+  # takt-demux and takt-decode with a real FFmpeg: the only job that compiles, lints and runs the bindings to
+  # libavformat and libavcodec (the modules ffi of the two helper programs exist only with FFMPEG_DIR), demuxes
+  # files and decodes them; every other job builds the crates without FFmpeg, where the helpers answer "built
+  # without FFmpeg". The archives are the LGPL shared builds of
   # FFmpeg 9.0 from BtbN/FFmpeg-Builds (docs/BUILD.md), a monthly release their publisher keeps, taken only with
   # the SHA-256 below. Should an archive be gone, the job says SKIP in a warning and in the summary and counts as
   # no evidence (TST-16); then pin a newer one here and in docs/BUILD.md. A file with another hash fails the job.
   ffmpeg:
-    name: takt-demux mit FFmpeg 9.0 (${{ matrix.os }}, Archiv gepinnt)
+    name: takt-demux und takt-decode mit FFmpeg 9.0 (${{ matrix.os }}, Archiv gepinnt)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -291,10 +292,10 @@ jobs:
             status=$(curl -sSL --retry 3 --retry-delay 5 -o "$file" -w '%{http_code}' "$url")
             if [ "$status" = 404 ]; then
               rm -f "$file"
-              why="$ARCHIVE is gone from its publisher (HTTP 404): nothing of takt-demux was built or tested with FFmpeg on ${{ matrix.os }}. Pin a newer archive in ci.yml and docs/BUILD.md."
-              echo "::warning title=SKIP takt-demux mit FFmpeg (${{ matrix.os }})::$why"
+              why="$ARCHIVE is gone from its publisher (HTTP 404): nothing of takt-demux and takt-decode was built or tested with FFmpeg on ${{ matrix.os }}. Pin a newer archive in ci.yml and docs/BUILD.md."
+              echo "::warning title=SKIP takt-demux und takt-decode mit FFmpeg (${{ matrix.os }})::$why"
               {
-                echo "### takt-demux mit FFmpeg (${{ matrix.os }}): SKIP"
+                echo "### takt-demux und takt-decode mit FFmpeg (${{ matrix.os }}): SKIP"
                 echo
                 echo "$why"
               } >> "$GITHUB_STEP_SUMMARY"
@@ -342,13 +343,14 @@ jobs:
             echo "$root/bin" >> "$GITHUB_PATH"
             echo "LD_LIBRARY_PATH=$root/lib" >> "$GITHUB_ENV"
           fi
-      - name: Clippy und Tests von takt-demux mit FFmpeg
+      - name: Clippy und Tests von takt-demux und takt-decode mit FFmpeg
         if: steps.archive.outputs.available == 'true'
         shell: bash
         run: |
-          # The module ffi exists only with the cfg: no other job compiles, lints or tests it.
-          cargo clippy -p takt-demux --all-targets --all-features
-          cargo test -p takt-demux -- --nocapture 2>&1 | tee test.log
+          # The modules ffi exist only with the cfg: no other job compiles, lints or tests them.
+          cargo clippy -p takt-demux -p takt-decode --all-targets --all-features
+          # Both packages in one run: the tests of takt-decode start the demux helper too.
+          cargo test -p takt-demux -p takt-decode -- --nocapture 2>&1 | tee test.log
           # The cfg must have come on: files were demuxed, not the stand-in that says SKIP.
           grep -q "test with_ffmpeg::mkv_with_picture_sound_and_subtitles_matches_ffprobe ... ok" test.log
           grep -q "test with_ffmpeg::mp4_with_h264_matches_ffprobe ... ok" test.log
@@ -356,10 +358,17 @@ jobs:
           grep -q "test with_ffmpeg::a_seek_lands_on_the_keyframe_before_the_target_and_the_file_reads_on ... ok" test.log
           grep -q "test with_ffmpeg::damaged_files_end_in_an_answer ... ok" test.log
           grep -q "test with_ffmpeg::the_ffmpeg_of_the_helper_is_an_lgpl_build ... ok" test.log
+          # The same for the decoder: pictures were decoded and compared with what ffmpeg decodes.
+          grep -q "test with_ffmpeg::h264_hevc_and_av1_decode_to_the_bytes_ffmpeg_decodes ... ok" test.log
+          grep -q "test with_ffmpeg::the_same_pictures_arrive_as_nv12_and_p010 ... ok" test.log
+          grep -q "test with_ffmpeg::an_empty_pool_stalls_the_decoder_and_nothing_is_lost_or_allocated ... ok" test.log
+          grep -q "test with_ffmpeg::a_flush_drops_what_was_on_its_way_and_the_new_position_plays ... ok" test.log
+          grep -q "test with_ffmpeg::the_backend_plays_every_picture_of_a_file_on_a_clock_that_does_not_drop ... ok" test.log
+          grep -q "test with_ffmpeg::the_ffmpeg_of_the_helper_is_an_lgpl_build_with_dav1d ... ok" test.log
       - name: SKIPs in die Zusammenfassung
         if: always() && steps.archive.outputs.available == 'true'
         shell: bash
-        run: python scripts/ci-skip-summary.py test.log --title "takt-demux mit FFmpeg (${{ matrix.os }})"
+        run: python scripts/ci-skip-summary.py test.log --title "takt-demux und takt-decode mit FFmpeg (${{ matrix.os }})"
 
   licenses:
     name: Lizenzen und Sicherheitshinweise

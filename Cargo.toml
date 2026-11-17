@@ -8,6 +8,7 @@ members = [
     "crates/takt-backend",
     "crates/takt-ipc",
     "crates/takt-demux",
+    "crates/takt-decode",
     "crates/takt-gpu",
     "apps/takt-player",
 ]

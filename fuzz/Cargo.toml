@@ -16,10 +16,18 @@ cargo-fuzz = true
 # fuzz target and nothing else, so it is no dependency of the workspace and not in its license check.
 libfuzzer-sys = "0.4"
 takt-demux = { path = "../crates/takt-demux" }
+takt-decode = { path = "../crates/takt-decode" }
 
 [[bin]]
 name = "protocol_reader"
 path = "fuzz_targets/protocol_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_reader"
+path = "fuzz_targets/decode_reader.rs"
 test = false
 doc = false
 bench = false

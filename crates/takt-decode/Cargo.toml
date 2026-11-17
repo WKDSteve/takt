@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "takt-decode"
+version = "0.0.1"
+description = "Software decoder of Takt: libavcodec and dav1d in a helper process, frames into the frame pool"
+license = "GPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+takt-core.workspace = true
+takt-clock.workspace = true
+takt-ipc.workspace = true
+takt-backend = { path = "../takt-backend", version = "0.0.1" }
+takt-demux = { path = "../takt-demux", version = "0.0.1" }
+
+# The helper process: the only program that links libavcodec (its module ffi; the library has no FFmpeg in
+# it, so the program that uses the decoder loads none). Built in every configuration; without FFMPEG_DIR at
+# build time it answers every stream with "built without FFmpeg" (docs/BUILD.md).
+[[bin]]
+name = "takt-decode-helper"
+path = "src/bin/takt-decode-helper/main.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true

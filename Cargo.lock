@@ -3004,6 +3004,17 @@ name = "takt-core"
 version = "0.0.1"
 
 [[package]]
+name = "takt-decode"
+version = "0.0.1"
+dependencies = [
+ "takt-backend",
+ "takt-clock",
+ "takt-core",
+ "takt-demux",
+ "takt-ipc",
+]
+
+[[package]]
 name = "takt-demux"
 version = "0.0.1"
 dependencies = [
