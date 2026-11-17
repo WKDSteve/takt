@@ -17,6 +17,7 @@
 //! | `alloc` | tries to reserve 1 GiB and reports whether it got it |
 //! | `spawn` | tries to start a process and reports whether it could |
 //! | `file` | answers with the first bytes of the file it inherited |
+//! | `slow` | takes a second and a half to say hello, then behaves like `echo` |
 //! | `nest` | starts another probe in mode `deaf` as its own helper and reports that probe's process id |
 //!
 //! Not part of any product; `takt-ipc` builds it so that its tests and other implementations of the
@@ -42,7 +43,13 @@ const REQUEST: u16 = kind::APP;
 const REPLY: u16 = kind::APP + 1;
 
 fn main() -> ExitCode {
-    let mode = std::env::args().nth(1).unwrap_or_default();
+    let mode = std::env::args_os()
+        .nth(1)
+        .and_then(|arg| arg.into_string().ok())
+        .unwrap_or_default();
+    if mode == "slow" {
+        std::thread::sleep(Duration::from_millis(1500));
+    }
     if mode == "stranger" {
         println!("hello, I am not a helper");
         std::thread::sleep(Duration::from_secs(30));

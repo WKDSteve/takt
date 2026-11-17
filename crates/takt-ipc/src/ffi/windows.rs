@@ -8,6 +8,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
@@ -17,6 +20,23 @@ use windows_sys::Win32::System::JobObjects::{
 
 /// `CREATE_NO_WINDOW`: a helper of a window program opens no console window.
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Turns the message windows of the system for a failing start off for this process and every
+/// process it starts from now on (a missing DLL, a crash): they would wait for a click nobody
+/// makes. Returns the mode that was set before, for [`restore_error_mode`].
+pub(crate) fn quiet_error_mode() -> u32 {
+    // SAFETY: the call changes a setting of this process and has no other effect.
+    let before = unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+    // SAFETY: as above; the bits that were set before stay set.
+    unsafe { SetErrorMode(before | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+    before
+}
+
+/// Puts the error mode of this process back to `mode`.
+pub(crate) fn restore_error_mode(mode: u32) {
+    // SAFETY: the call changes a setting of this process and has no other effect.
+    unsafe { SetErrorMode(mode) };
+}
 
 /// Lets child processes started from now on inherit `handle`, or stops that.
 pub(crate) fn set_inheritable(handle: &impl AsRawHandle, inherit: bool) -> io::Result<()> {

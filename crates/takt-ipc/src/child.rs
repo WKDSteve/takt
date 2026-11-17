@@ -96,7 +96,12 @@ fn parse_setup(value: &str) -> Option<Setup> {
 pub fn connect(app: AppId) -> Result<(HelperContext, RingEnd), IpcError> {
     let mut setup = None;
     let mut file_handles = Vec::new();
-    for arg in std::env::args() {
+    // `args_os`: an argument that is not Unicode (a file name passed on by the caller) must not
+    // end the helper before it has said hello.
+    for arg in std::env::args_os() {
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
         if let Some(value) = arg.strip_prefix(ARG_RING) {
             setup = parse_setup(value);
         } else if let Some(value) = arg.strip_prefix(ARG_FILE) {

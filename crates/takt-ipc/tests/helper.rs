@@ -137,6 +137,18 @@ fn a_helper_that_hangs_is_ended_by_the_watchdog() {
 }
 
 #[test]
+fn a_helper_that_is_slow_to_start_is_not_taken_for_hung() {
+    // A second and a half until its hello, against a heartbeat limit of half a second: the time a
+    // program needs to start counts against the handshake, not against the watchdog.
+    let (mut helper, _reader) = probe("slow").spawn_reading().unwrap();
+    helper.send(REQUEST, 1, b"there?").unwrap();
+    let reply = helper.recv(Duration::from_secs(20)).unwrap();
+    assert_eq!(reply.payload, b"there?");
+    assert_eq!(helper.check(), Ok(()));
+    assert_eq!(helper.shutdown(), Some(0));
+}
+
+#[test]
 fn a_helper_that_never_answers_is_ended_at_the_deadline_of_the_call() {
     let (mut helper, _reader) = probe("deaf").spawn_reading().unwrap();
     let pid = helper.pid();

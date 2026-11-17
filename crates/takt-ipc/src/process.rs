@@ -8,7 +8,8 @@
 //!   waits ([`crate::ring::Heartbeat`]). A thread of the parent ends a helper whose counter stands
 //!   still for [`Limits::heartbeat`]: a parser in an endless loop does not outlive that time.
 //!   Waiting for an answer has its own deadline ([`Helper::recv`]), and missing it ends the helper
-//!   too.
+//!   too. Until its hello the helper is under [`Limits::handshake`] instead: how long a program
+//!   takes to start is the system's doing (a virus scanner, a cold disk), not a sign of a hang.
 //! * **Byte limits.** A frame above [`Limits::max_frame`], a record above [`Limits::max_record`],
 //!   more than [`Limits::max_stderr`] bytes on stderr or more than [`Limits::max_queued_frames`]
 //!   frames nobody fetched end the helper. Under Windows and Linux [`Limits::memory`] bounds its
@@ -201,9 +202,16 @@ impl HelperCommand {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let inherited = Inherited::prepare(&mut command, &region, files, &limits)?;
-        let spawned = command.spawn();
-        let job = inherited.after_spawn(&region, spawned.as_ref().ok(), &limits);
+        let (spawned, job) = {
+            // One helper is started at a time: between `prepare` and `after_spawn` the handles of
+            // this helper are inheritable (Windows), and a second helper started in that window
+            // would get them too.
+            let _one_at_a_time = lock(&SPAWNING);
+            let inherited = Inherited::prepare(&mut command, &region, files, &limits)?;
+            let spawned = command.spawn();
+            let job = inherited.after_spawn(&region, spawned.as_ref().ok(), &limits);
+            (spawned, job)
+        };
         let mut child =
             spawned.map_err(|e| IpcError::Spawn(format!("{}: {e}", program.display())))?;
         let job = match job {
@@ -232,7 +240,7 @@ impl HelperCommand {
             return Err(IpcError::Spawn("the pipes of the helper".to_owned()));
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(limits.max_queued_frames.max(1));
-        let threads = (|| -> std::io::Result<JoinHandle<()>> {
+        let threads = (|| -> std::io::Result<()> {
             let g = Arc::clone(&guard);
             let max_frame = limits.max_frame;
             std::thread::Builder::new()
@@ -243,25 +251,17 @@ impl HelperCommand {
             std::thread::Builder::new()
                 .name("takt-ipc-stderr".to_owned())
                 .spawn(move || pump_stderr(stderr, max_stderr, &g))?;
-            let g = Arc::clone(&guard);
-            let beat = Heartbeat::new(Arc::clone(&region));
-            let timeout = limits.heartbeat;
-            std::thread::Builder::new()
-                .name("takt-ipc-watchdog".to_owned())
-                .spawn(move || watchdog(&g, &beat, timeout))
+            Ok(())
         })();
-        let watchdog = match threads {
-            Ok(handle) => handle,
-            Err(err) => {
-                guard.kill();
-                return Err(IpcError::spawn("threads of the helper", &err));
-            }
-        };
+        if let Err(err) = threads {
+            guard.kill();
+            return Err(IpcError::spawn("threads of the helper", &err));
+        }
         let mut helper = Helper {
             guard,
             stdin: Some(stdin),
             rx,
-            watchdog: Some(watchdog),
+            watchdog: None,
             limits,
             pid,
             scratch: Vec::new(),
@@ -280,6 +280,15 @@ impl HelperCommand {
             helper.guard.end(IpcError::Protocol(err.clone()));
             return Err(IpcError::Protocol(err));
         }
+        // The helper is up: from here on it owes a heartbeat.
+        let guard = Arc::clone(&helper.guard);
+        let beat = Heartbeat::new(Arc::clone(&region));
+        let timeout = helper.limits.heartbeat;
+        let watchdog = std::thread::Builder::new()
+            .name("takt-ipc-watchdog".to_owned())
+            .spawn(move || watchdog(&guard, &beat, timeout))
+            .map_err(|e| IpcError::spawn("watchdog of the helper", &e))?;
+        helper.watchdog = Some(watchdog);
         Ok((helper, region))
     }
 }
@@ -289,6 +298,9 @@ struct Inherited {
     /// Copies of the files, inheritable (Windows) or just kept open until the child exists (Unix).
     #[allow(dead_code)]
     files: Vec<File>,
+    /// The error mode of this process before the start, to be put back.
+    #[cfg(windows)]
+    error_mode: u32,
 }
 
 #[cfg(windows)]
@@ -329,7 +341,14 @@ impl Inherited {
             set_inheritable(memory.handle(), true)
                 .map_err(|e| IpcError::spawn("handle of the shared memory", &e))?;
         }
-        Ok(Self { files: copies })
+        // A helper that cannot load a library it links must fail, not sit behind a message window
+        // of the system that nobody sees. A child inherits the error mode of its parent, so the
+        // mode is set for the moment of the start (under the lock of `spawn`) and put back after.
+        let error_mode = crate::ffi::windows::quiet_error_mode();
+        Ok(Self {
+            files: copies,
+            error_mode,
+        })
     }
 
     /// Takes the inheritance back and puts the child under its job.
@@ -342,6 +361,7 @@ impl Inherited {
     ) -> std::io::Result<Job> {
         use crate::ffi::windows::{assign, job, set_inheritable};
 
+        crate::ffi::windows::restore_error_mode(self.error_mode);
         if let Some(memory) = region.memory() {
             // A failure leaves the handle inheritable: the next child of this program would get a
             // handle to a ring it does not know the number of.
@@ -388,6 +408,9 @@ impl Inherited {
         Ok(Job)
     }
 }
+
+/// Held while a helper is being started (see [`HelperCommand`], `spawn`).
+static SPAWNING: Mutex<()> = Mutex::new(());
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
