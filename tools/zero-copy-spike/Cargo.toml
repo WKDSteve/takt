@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Spike takt/spike-zero-copy-decoder-gpu-import: can the wgpu of the workspace import a texture the hardware
+# decoder wrote, without a detour through system memory? Its own workspace, no member of Takt's.
+[package]
+name = "zero-copy-spike"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The versions Cargo.lock of the workspace pins (eframe/egui-wgpu 0.33): the question is about exactly these.
+wgpu = "=27.0.1"
+# Pinned as well: Cargo.lock of a tool is not committed, and the answer is about these patch versions.
+wgpu-core = { version = "=27.0.3", default-features = false }
+wgpu-hal = { version = "=27.0.4", default-features = false }
+# The `windows` wgpu-hal 27 is built against; `texture_from_raw` takes its `ID3D12Resource`.
+windows = { version = "0.58", features = ["Win32_Graphics_Direct3D12", "Win32_Foundation", "Win32_System_Threading"] }
+pollster = "0.4"
+# --window: the comparison with mpv needs a swapchain. log: the messages of wgpu and of the D3D12 debug layer.
+winit = "0.30"
+log = "0.4"
+
+[build-dependencies]
+cc = "1"
