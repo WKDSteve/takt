@@ -182,6 +182,10 @@ nimmt importierte Texturen, `--source upload` lädt jedes Bild aus dem Systemspe
 Compositor, kein Decoder: die Bilder entstehen, bevor die Uhr läuft. Zahlen in
 [reviews/phase-1.md](reviews/phase-1.md).
 
+`scripts/measure-composite.ps1` startet einen Lauf mit einer Prioritätsklasse, schreibt die CPU-Last der Maschine und
+die GPU-Last mit und gibt beides vor der Zahlenzeile des Programms aus; mit `-RequireQuiet` misst es nur, wenn die
+Maschine ruhig ist (CPU-Last zehn Sekunden lang höchstens 10 %).
+
 ## Was fehlt
 
 - Import unter Linux (Vulkan, DMA-BUF) und macOS (IOSurface, Metal): `takt/spike-zero-copy-linux-vulkan-import`.
