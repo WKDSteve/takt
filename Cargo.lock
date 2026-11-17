@@ -3004,6 +3004,14 @@ name = "takt-core"
 version = "0.0.1"
 
 [[package]]
+name = "takt-ipc"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "takt-player"
 version = "0.0.1"
 dependencies = [

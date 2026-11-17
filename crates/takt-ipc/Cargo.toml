@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "takt-ipc"
+version = "0.0.1"
+description = "Helper processes of Takt: anonymous shared memory with a wait-free ring, a versioned control protocol over a pipe, a watchdog"
+license = "Apache-2.0 OR MIT"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+# The calls of the operating system the pattern needs and std does not offer: an anonymous mapping, a handle a
+# child inherits, a job that ends the child with its parent. Both crates are the bindings their platforms use
+# everywhere, already in the tree (cpal, eframe), `MIT OR Apache-2.0`, declarations only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# A peer that speaks the protocol and misbehaves on demand (hangs, floods, lies): the tests of this crate start
+# it, and a helper written in another language can be checked against it.
+[[bin]]
+name = "takt-ipc-probe"
+path = "src/bin/takt-ipc-probe.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true

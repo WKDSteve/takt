@@ -6,6 +6,7 @@ members = [
     "crates/takt-clock",
     "crates/takt-audio",
     "crates/takt-backend",
+    "crates/takt-ipc",
     "apps/takt-player",
 ]
 
@@ -19,6 +20,7 @@ repository = "https://github.com/WKDSteve/takt"
 takt-core = { path = "crates/takt-core", version = "0.0.1" }
 takt-clock = { path = "crates/takt-clock", version = "0.0.1" }
 takt-audio = { path = "crates/takt-audio", version = "0.0.1" }
+takt-ipc = { path = "crates/takt-ipc", version = "0.0.1" }
 
 [workspace.lints.rust]
 # Decided 2026-10-30: deny, not forbid (a FFI project needs it in named places). Only a module that
