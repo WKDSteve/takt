@@ -172,7 +172,9 @@ mod imp {
             let name = format!("/takt-{:x}-{count:x}-{nanos:x}", std::process::id());
             let name = CString::new(name)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name with NUL"))?;
-            let flags = libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC;
+            // Only these three: macOS answers any other flag (O_CLOEXEC too) with EINVAL. POSIX
+            // sets close-on-exec on the descriptor by itself; it is set again below all the same.
+            let flags = libc::O_CREAT | libc::O_EXCL | libc::O_RDWR;
             // SAFETY: `name` is NUL-terminated and lives across the call; O_EXCL makes the call
             // fail instead of opening an object somebody else made.
             #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -192,6 +194,10 @@ mod imp {
             // SAFETY: `name` is NUL-terminated; removing the name leaves the object to the
             // descriptor.
             unsafe { libc::shm_unlink(name.as_ptr()) };
+            // SAFETY: a call on a live descriptor that sets one flag.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
             return Ok(fd);
         }
         Err(io::Error::new(
