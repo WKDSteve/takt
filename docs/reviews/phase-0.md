@@ -275,6 +275,22 @@ Bildes ist seine Frame-Nummer, sodass ein Test am Bild abliest, welches Frame es
   `seeking` allein nennt einen Sprung fertig, bevor er begonnen hat.
 - **Im Lauf trägt jedes Frame seine eigene Zeit:** in der Messung stimmten 50 von 50 Frames mit ihrer Bildnummer
   überein; der Test `a_frame_carries_its_own_time_except_on_the_way_to_a_jump` prüft 20 und fünf nach einem Sprung.
+- **Unter Last trug ein Bild die Zeit eines späteren Frames** (2026-11-17, `takt/zwei-zeit-tests-kippen-unter-last`).
+  Die Zeit eines Frames ist mpvs Position, gelesen nach dem Rendern. Kommt der Render-Thread zu spät, hat der Kern
+  das nächste Frame schon an seine Ausgabe gegeben und nennt dessen Position: nachgestellt in `ubuntu:24.04` mit
+  libmpv 0.37 unter Volllast in etwa jedem zehnten Lauf des Tests, zwischen Rendern und Lesen lagen dann 27 bis
+  224 ms, der Stempel ein bis zwei Frames vor dem Bild. In der CI fiel der Ubuntu-Job daran zweimal hintereinander.
+  Behoben in `apps/takt-player/src/mpv/stamp.rs`: mpv nennt zu jedem Frame, wann es gezeigt werden soll
+  (`target_time`), und im Lauf ist der Abstand zwischen Position und dieser Zeit eine Zahl; eine Position, die
+  mehr als 3 ms darüber liegt, gehört einem späteren Frame, und das Bild bekommt die Zeit, die seine Zielzeit sagt.
+  Gegen die Frame-Nummer im Bild geprüft (`every_frame_of_a_file_carries_its_own_time`, 300 Frames): in einem Lauf
+  257 zurückgerechnete Zeiten, keine falsch; danach 20 von 20 Läufen und die Suite 30 von 30 unter Last grün.
+  libmpv 0.37 liefert `target_time` in Nanosekunden, nicht wie `render.h` sagt in Mikrosekunden; die Einheit wird
+  an mpvs Uhr erkannt.
+  **Grenzen:** eine zurückgerechnete Zeit liegt bis 0,1 ms neben der der Datei. Das erste Frame nach Start, Sprung
+  oder Pause hat nichts, woran es geprüft werden könnte, und trägt unter Last weiter die Zeit eines der nächsten.
+  Für das letzte Bild einer Datei nennt mpv nach ihrem Ende die Position des Frames davor oder null (in 11 von 20
+  Läufen, auch ohne Last).
 - **Spuren wählt man aus einer Liste in der Leiste** („Audio“, „Subtitles“); `j` und `#` schalten weiter durch.
 - **Vier weitere Paare aus Container und Codec** spielen mit dem richtigen Frame zur richtigen Zeit und nehmen einen
   Sprung: AV1 in Matroska, H.264 und HEVC in MP4, VP9 in WebM (je 2 s, 64x64, `scripts/make-format-clips.py`). Das

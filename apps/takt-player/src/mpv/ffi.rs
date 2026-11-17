@@ -166,6 +166,8 @@ unsafe extern "C" {
         format: c_int,
         data: *mut c_void,
     ) -> c_int;
+    /// The clock of mpv in microseconds; never waits for the core.
+    fn mpv_get_time_us(ctx: *mut Handle) -> i64;
     /// Never null; the event is valid until the next call on this handle.
     fn mpv_wait_event(ctx: *mut Handle, timeout: c_double) -> *mut RawEvent;
     /// A static string for any error code.
@@ -681,7 +683,12 @@ impl Renderer {
     /// What the frame that waits is: a new one of the video, or the one
     /// before once more (a redraw, a repeat). `None` when none waits or mpv
     /// does not say. Asks the render context, not the core: it never waits.
-    pub fn waiting(&mut self) -> Option<Waiting> {
+    ///
+    /// With it comes when mpv wants that frame shown
+    /// (`mpv_render_frame_info.target_time`). The unit is that of mpv:
+    /// microseconds by render.h, nanoseconds in libmpv 0.37 (measured), so
+    /// only the ratio of two differences says anything.
+    pub fn waiting(&mut self) -> Option<(Waiting, i64)> {
         let mut info = RawFrameInfo::default();
         let param = RenderParam {
             kind: RENDER_PARAM_NEXT_FRAME_INFO,
@@ -695,10 +702,18 @@ impl Renderer {
             return None;
         }
         if info.flags & (RENDER_FRAME_INFO_REDRAW | RENDER_FRAME_INFO_REPEAT) == 0 {
-            Some(Waiting::New)
+            Some((Waiting::New, info.target_time))
         } else {
-            Some(Waiting::Again)
+            Some((Waiting::Again, info.target_time))
         }
+    }
+
+    /// The clock of mpv in microseconds, the one the target time of a frame
+    /// is on. Reads a clock: no question to the core.
+    pub fn now(&mut self) -> i64 {
+        // SAFETY: the handle is live (owned by the shared core) and bound to
+        // no thread; mpv_get_time_us only reads the clock.
+        unsafe { mpv_get_time_us(self.core.0.as_ptr()) }
     }
 
     /// Renders the current frame into `target` (scaled to its size, `rgb0`)

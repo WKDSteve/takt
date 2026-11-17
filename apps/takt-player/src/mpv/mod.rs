@@ -19,6 +19,7 @@
 
 pub mod backend;
 mod ffi;
+mod stamp;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

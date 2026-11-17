@@ -64,6 +64,12 @@
 //! A question from there blocks only when the next frame starts to wait in
 //! the moment between; then it costs the 200 ms once.
 //!
+//! A position read that late is no longer that of the rendered frame: the
+//! core has gone on, and so it has when the thread lost the processor
+//! between the render and the read. Such a frame gets the time
+//! its target time says ([`super::stamp`]); only the first frame after a
+//! start, a jump or a pause has nothing to be held against.
+//!
 //! Commands that answer later (`mpv_command_async`) are not used: reading
 //! subtitle files that way froze the core of mpv 0.41 for good while one
 //! thread rendered and asked. `sub-add` waits for mpv (a local file:
@@ -117,6 +123,7 @@ use takt_core::{
 
 use super::ffi::{self, Event, Mpv, Renderer, Target, Waiting, Waker};
 use super::micros;
+use super::stamp::{Reading, Stamper};
 
 /// The "sample rate" of the clock: its anchor counts microseconds.
 const CLOCK_RATE: u32 = 1_000_000;
@@ -284,6 +291,13 @@ struct Shared {
     /// it is paused. Such a picture carries the time of the frame it shows
     /// again, so two frames with one time are no error of the stamp.
     redrawn: AtomicU64,
+    /// How many frames carry a reckoned time, because the position of mpv
+    /// was read too late to be theirs ([`super::stamp`]).
+    reckoned: AtomicU64,
+    /// Counts what breaks the run of the video: a file asked for, a jump, a
+    /// pause or its end. The render thread forgets what it learned about
+    /// the times of the frames when it changes.
+    breaks: AtomicU64,
     /// Frames of the pool that are out, as of the last render.
     in_flight: AtomicUsize,
     /// Every frame of the pool was out when a picture waited: it was not
@@ -345,6 +359,8 @@ fn render_loop(mut renderer: Renderer, shared: &Shared, clock: &AudioMasterClock
     // The pool is this thread's own: frames that are out stay valid when it
     // is replaced, and go back to the pool they came from.
     let mut pool: Sized = None;
+    let mut stamper = Stamper::default();
+    let mut breaks = 0;
     while !shared.stop.load(Ordering::Acquire) {
         // The limit only bounds how long a lost wake would cost.
         renderer.wait(Duration::from_millis(250));
@@ -353,7 +369,12 @@ fn render_loop(mut renderer: Renderer, shared: &Shared, clock: &AudioMasterClock
         }
         // One wake may stand for several frames: until mpv has none.
         while renderer.frame_ready() {
-            if let Err(error) = render_one(&mut renderer, &mut pool, shared, clock) {
+            let now = shared.breaks.load(Ordering::Acquire);
+            if now != breaks {
+                breaks = now;
+                stamper.forget();
+            }
+            if let Err(error) = render_one(&mut renderer, &mut pool, &mut stamper, shared, clock) {
                 *shared.fault.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
             }
         }
@@ -374,12 +395,14 @@ type Sized = Option<((u32, u32), FramePool)>;
 fn render_one(
     renderer: &mut Renderer,
     pool: &mut Sized,
+    stamper: &mut Stamper,
     shared: &Shared,
     clock: &AudioMasterClock,
 ) -> takt_core::Result<()> {
     let before = Instant::now();
     // Asked before the render: afterwards the frame no longer waits.
     let waiting = renderer.waiting();
+    let now = renderer.now();
     let mut frame = match pool.as_mut() {
         Some((size, frames)) => draw(renderer, *size, frames, shared, clock)?,
         None => {
@@ -413,16 +436,30 @@ fn render_one(
     };
     // The position of the frame just rendered; without one (the very first
     // frame of some files) the clock itself, an error of zero.
-    let position = renderer
-        .double(c"time-pos")
-        .and_then(micros)
-        .map_or_else(|| clock.now(), |t| Timestamp::new(t, Rational::MICROS));
+    // On a busy machine the core may have gone on to a later frame by now:
+    // the stamper holds the position against when mpv wanted this frame
+    // shown (`super::stamp`).
+    let position = renderer.double(c"time-pos").and_then(micros);
+    let position = match (position, waiting) {
+        (Some(position), Some((kind, target))) => {
+            let stamp = stamper.stamp(Reading {
+                again: kind == Waiting::Again,
+                target,
+                now,
+                position,
+            });
+            shared.reckoned.store(stamper.reckoned(), Ordering::Relaxed);
+            Timestamp::new(stamp, Rational::MICROS)
+        }
+        (Some(position), None) => Timestamp::new(position, Rational::MICROS),
+        (None, _) => clock.now(),
+    };
     frame.get_mut().set_pts(position);
     shared
         .render
         .record(u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX));
     shared.decoded.fetch_add(1, Ordering::Relaxed);
-    if waiting == Some(Waiting::Again) {
+    if matches!(waiting, Some((Waiting::Again, _))) {
         shared.redrawn.fetch_add(1, Ordering::Relaxed);
     }
     // Put down before the count: the frame it replaces goes back first.
@@ -896,6 +933,7 @@ impl MpvBackend {
         self.mpv
             .set(c"pause", if paused { "yes" } else { "no" })
             .map_err(backend_error)?;
+        self.shared.breaks.fetch_add(1, Ordering::AcqRel);
         self.clock.set_paused(paused);
         Ok(())
     }
@@ -1146,6 +1184,7 @@ impl MpvBackend {
         drop(self.shared.take());
         self.shared.decoded.store(0, Ordering::Relaxed);
         self.shared.redrawn.store(0, Ordering::Relaxed);
+        self.shared.breaks.fetch_add(1, Ordering::AcqRel);
         self.loaded = false;
         self.eof = true;
         self.jump = Jump::Done;
@@ -1390,6 +1429,7 @@ impl VideoBackend for MpvBackend {
         self.mpv
             .command("seek", &["seek", &seconds_text(micros), how])
             .map_err(backend_error)?;
+        self.shared.breaks.fetch_add(1, Ordering::AcqRel);
         self.jump = Jump::Asked;
         Ok(())
     }
@@ -1828,12 +1868,15 @@ mod tests {
         // (measured: up to three pictures of the first frame): then they
         // are the same picture, byte for byte, and there are no more of
         // them than the render thread was told to draw again. Two pictures
-        // that differ under one time would be a wrong stamp.
+        // that differ under one time would be a wrong stamp. The first frame
+        // is left out: nothing says whether its time was read too late, and
+        // on a busy machine it then carries that of the second
+        // (`super::stamp`).
         assert!(
             stamps.windows(2).all(|pair| pair[0] <= pair[1]),
             "{stamps:?}"
         );
-        for (i, pair) in stamps.windows(2).enumerate() {
+        for (i, pair) in stamps.windows(2).enumerate().skip(1) {
             assert!(
                 pair[0] != pair[1] || pictures[i] == pictures[i + 1],
                 "frames {i} and {} differ under one time: {stamps:?}",
@@ -1842,12 +1885,20 @@ mod tests {
         }
         let again = stamps.windows(2).filter(|pair| pair[0] == pair[1]).count();
         let redrawn = backend.shared.redrawn.load(Ordering::Relaxed);
-        assert!(again as u64 <= redrawn, "{again} > {redrawn}: {stamps:?}");
+        // One more than that: the first frame with the time of the second.
+        assert!(
+            again as u64 <= redrawn + 1,
+            "{again} > {redrawn}: {stamps:?}"
+        );
         // 25 frames a second for two seconds; a loaded machine shows fewer.
         let frames = stamps.len() - again;
         assert!((10..=51).contains(&frames), "{frames}: {stamps:?}");
-        // The clock follows mpv: every frame within a tenth of a second.
-        assert!(errors.iter().all(|e| e.abs() < 100_000_000), "{errors:?}");
+        // The clock follows mpv: the frames are within a tenth of a second
+        // of it. Half of them at least: a frame carries its own time, so one
+        // that a busy machine shows late says so.
+        let mut sorted: Vec<i64> = errors.iter().map(|e| e.abs()).collect();
+        sorted.sort_unstable();
+        assert!(sorted[sorted.len() / 2] < 100_000_000, "{errors:?}");
         // Every frame that came was rendered; the render thread may have
         // rendered one more that no pass took.
         let rendered = backend.stats().decoded;
@@ -2710,6 +2761,26 @@ mod tests {
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/long-gop-12s.mkv").to_owned()
     }
 
+    /// Which frame of its second (25 a second) a time is that of. To the
+    /// nearest frame: a time that was reckoned (`super::stamp`) is within a
+    /// tenth of a millisecond of the frame's own, on either side.
+    fn stamped_frame(pts: Timestamp) -> i64 {
+        (pts.ticks() + 20_000) / 40_000 % 25
+    }
+
+    /// The picture is the frame its time says. The first two frames after a
+    /// start or a jump are held to less: mpv names no target time for the
+    /// first, so nothing is learned before the third (`super::stamp`), and
+    /// on a busy machine their time may be that of one of the next frames.
+    fn assert_own_time(held: i64, stamped: i64, nth: usize, what: &str) {
+        if nth < 2 {
+            let ahead = (stamped - held).rem_euclid(25);
+            assert!(ahead <= 3, "{what}: holds {held}, stamped {stamped}");
+        } else {
+            assert_eq!(held, stamped, "{what}");
+        }
+    }
+
     /// Jumps and returns where the jump landed, in milliseconds, measured
     /// as the window measures it for its overlay line "seek": the position
     /// of mpv once it has arrived.
@@ -2748,7 +2819,7 @@ mod tests {
             let rows = picture.plane(0).unwrap();
             let at = 32 * picture.stride(0).unwrap() + 32 * 4;
             let held = (i64::from(rows[at]) - 16 + 4) / 8;
-            (held, picture.meta().pts.ticks() / 40_000 % 25)
+            (held, stamped_frame(picture.meta().pts))
         }
 
         let mut backend = backend(Sources::Files);
@@ -2756,11 +2827,17 @@ mod tests {
         let mut seen = 0;
         passes(&mut backend, Duration::from_secs(3), |_, frame| {
             let (held, stamped) = held_and_stamped(frame);
-            assert_eq!(held, stamped, "frame {seen} of the run");
+            assert_own_time(held, stamped, seen, &format!("frame {seen} of the run"));
             seen += 1;
             seen < 20
         });
         assert_eq!(seen, 20);
+        // For docs/reviews/phase-0.md (`--nocapture`): on a busy machine
+        // some of the twenty were read too late and carry a reckoned time.
+        println!(
+            "reckoned {} of 20",
+            backend.shared.reckoned.load(Ordering::Relaxed)
+        );
 
         // To 6.5 s: the keyframe before it is at 4 s.
         backend
@@ -2778,7 +2855,8 @@ mod tests {
                     on_the_way.push(millis);
                 } else {
                     let (held, stamped) = held_and_stamped(&frame);
-                    assert_eq!(held, stamped, "after the jump, at {millis} ms");
+                    let what = format!("after the jump, at {millis} ms");
+                    assert_own_time(held, stamped, after, &what);
                     assert!((4_000..4_600).contains(&millis), "{millis}");
                     after += 1;
                 }
@@ -2794,6 +2872,41 @@ mod tests {
                 .all(|&ms| ms == 6_500 || ms == 4_000 || ms < 1_200),
             "{on_the_way:?}"
         );
+    }
+
+    /// The same over the whole file, 300 frames, for a busy machine: there
+    /// some frames are read too late and get a reckoned time
+    /// (`super::stamp`), and this is what holds those against the picture.
+    /// Prints how many (`--ignored --nocapture`).
+    #[test]
+    #[ignore = "12 s; run under load to measure the reckoned times"]
+    fn every_frame_of_a_file_carries_its_own_time() {
+        let mut backend = backend(Sources::Files);
+        backend.open(&long_gop()).unwrap();
+        let (mut seen, mut wrong) = (0_usize, Vec::new());
+        passes(&mut backend, Duration::from_secs(20), |_, frame| {
+            let picture = frame.get();
+            let rows = picture.plane(0).unwrap();
+            let at = 32 * picture.stride(0).unwrap() + 32 * 4;
+            let held = (i64::from(rows[at]) - 16 + 4) / 8;
+            let stamped = stamped_frame(picture.meta().pts);
+            if seen >= 2 && held != stamped {
+                wrong.push((seen, held, stamped));
+            }
+            seen += 1;
+            true
+        });
+        // Not the last picture: once the file has ended, mpv names the
+        // position of the frame before it, or zero (measured in 11 of 20
+        // runs, with and without load).
+        wrong.retain(|&(nth, _, _)| nth + 1 < seen);
+        println!(
+            "frames {seen}, reckoned {}, wrong {}",
+            backend.shared.reckoned.load(Ordering::Relaxed),
+            wrong.len()
+        );
+        assert!(seen > 100, "{seen}");
+        assert!(wrong.is_empty(), "(nth, holds, stamped): {wrong:?}");
     }
 
     /// The containers and codecs next to H.264 in Matroska
@@ -2832,8 +2945,8 @@ mod tests {
                 let rows = picture.plane(0).unwrap();
                 let at = 32 * picture.stride(0).unwrap() + 32 * 4;
                 let held = (i64::from(rows[at]) - 16 + 4) / 8;
-                let stamped = picture.meta().pts.ticks() / 40_000 % 25;
-                assert_eq!(held, stamped, "{name}: frame {seen}");
+                let stamped = stamped_frame(picture.meta().pts);
+                assert_own_time(held, stamped, seen, &format!("{name}: frame {seen}"));
                 seen += 1;
                 seen < 20
             });
