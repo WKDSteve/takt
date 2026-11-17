@@ -225,18 +225,23 @@ Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxe
    oder Landlock unter Linux, keine Sandbox unter macOS. Die Vorarbeit ist da (er braucht keinen Pfad, kein
    Netz und keine weiteren Dateien), der Schritt selbst fehlt (`takt/takt-ipc-os-sandbox`).
 2. **macOS**: kein Speicherlimit, kein Verbot eigener Prozesse, kein Lauf mit FFmpeg in der CI; `takt-ipc` und
-   der Demuxer ohne FFmpeg sind dort getestet.
+   der Demuxer ohne FFmpeg sind dort getestet. Der FFmpeg-Lauf bleibt offen, bis macOS ein Zielgerät wird
+   (`takt/ci-takt-demux-mit-ffmpeg-auf-macos`); Limits gehören zu `takt/takt-ipc-os-sandbox`.
 3. **Unter Unix erbt ein Hilfsprozess**, was im Hauptprozess ohne close-on-exec offen ist. std öffnet alles
-   mit dem Flag; eine C-Bibliothek im Hauptprozess (libmpv) muss das nicht tun.
+   mit dem Flag; eine C-Bibliothek im Hauptprozess (libmpv) muss das nicht tun (`takt/takt-ipc-os-sandbox`).
 4. **Zwischen Start und Job-Zuweisung** läuft ein Hilfsprozess unter Windows einen Augenblick ohne Job; er hat
    bis dahin nichts Fremdes gelesen (die Datei liest er erst nach dem Handshake).
 5. **Polling statt Ereignis**: ein leerer oder voller Ring wird mit Pausen bis 1 ms abgefragt. Für einen
    Demuxer, der dem Decoder vorausliest, genügt das (Durchsatz siehe Performance); die Latenz eines Pakets
-   bei leerem Ring ist nicht gemessen.
+   bei leerem Ring ist nicht gemessen (`takt/takt-ipc-latenz-bei-leerem-ring-messen`; mit dem Decoder im
+   Hilfsprozess wird die Zahl gebraucht).
 6. **Seitendaten der Pakete** (neue Codec-Konfiguration mitten im Strom, dynamische HDR-Metadaten, zu
-   verwerfende Samples) überträgt das Protokoll noch nicht; `takt-decode` wird zeigen, was es braucht.
+   verwerfende Samples) überträgt das Protokoll noch nicht; `takt-decode` wird zeigen, was es braucht
+   (`takt/takt-demux-seitendaten-der-pakete`).
 7. **Die Bindings sind an eine FFmpeg-Hauptversion gebunden** (9.0); Build und Hilfsprozess verweigern eine
    andere. Ein Versionssprung ist Handarbeit nach `crates/takt-demux/layout/README.md`.
+8. **Nur eigene Testclips**: der Vergleich mit `ffprobe` läuft über Clips aus `scripts/`, nicht über echte
+   Dateien mit vielen Spuren, Anhängen und alten Muxern (`takt/takt-demux-echte-dateien-gegen-ffprobe`).
 
 ---
 
@@ -250,6 +255,8 @@ Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxe
 | Der Ring aus `takt-audio` wird nicht wiederverwendet, nur sein Muster | Dort teilen zwei Threads, die einander trauen, ein `Arc`; hier schreibt ein Prozess, der fremde Dateien parst. Gleiche Ordnungen, neue Leseregeln, Records variabler Länge | ja |
 | Steuerkanal ist stdin/stdout des Hilfsprozesses | Geht mit std auf allen drei Plattformen ohne eigene Systemaufrufe, und das Schließen von stdin ist zugleich das Signal „Elternprozess ist fort“ | ja |
 | FFmpeg-Bindings von Hand (rund zwanzig Funktionen, der Anfang von vier Strukturen) statt `ffmpeg-sys-next` oder `rsmpeg` | `ffmpeg-sys-next` steht unter WTFPL (nicht in `deny.toml`); beide Wege erzeugen ihre Bindings mit bindgen (libclang auf jeder Baumaschine, ein Build-Baum größer als das Crate). Preis: Bindung an eine Hauptversion, abgesichert durch Build-Prüfung, Laufzeit-Prüfung, geprüfte Offsets und den Vergleich mit `ffprobe` | ja: wird die Liste der Funktionen lang oder kommt `takt-decode` mit libavcodec dazu, neu abwägen (dann mit Frage zur Lizenz) |
+| 2026-11-17: der Software-Decoder (libavcodec, dav1d) wird ebenfalls ein Hilfsprozess (Autor) | Ein Decoder parst fremde Bitströme wie der Demuxer Container; im Hauptprozess wäre die Demux-Grenze nur halber Schutz, und der Player lüde FFmpeg. Preis: eine Kopie je Frame in den `FramePool` | ja, wenn die Messung der Kopie bei 4K60 dagegen spricht |
+| 2026-11-17: die Bindings bleiben auch für libavcodec von Hand (Autor) | Keine neue Lizenz (WTFPL), kein libclang auf der Baumaschine | ja |
 | Die Bindings gehören zum Hilfsprogramm, nicht zur Bibliothek | Wer den Demuxer benutzt, darf FFmpeg weder linken noch laden; sonst ist die Prozessgrenze nur Dekoration | nein |
 | Die Datei kommt als geerbtes Handle, nie als Pfad | Der Hilfsprozess braucht damit kein Recht auf das Dateisystem: Voraussetzung für eine spätere Sandbox, und ein Container kann libavformat nichts anderes öffnen lassen | nein |
 | Feste Liste der Demuxer (Matroska, WebM, MP4-Familie) | Jeder Container ist ein Parser mehr über fremde Bytes; was der Player nicht braucht, läuft nicht | ja, je Container eine Zeile |
