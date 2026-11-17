@@ -270,6 +270,16 @@ Echtzeit-Priorität hebt; die letzte Zeile zeigt, was ohne das unter dieser Last
 | 4 | Upload aus dem Systemspeicher | kopflos | 1 | 598 | 3,1 ms | 12,3 ms | 15,1 ms | 22 % | 88 % |
 | 4 | importiert, Priorität „Normal“ | kopflos | 3 | 159, 734, 612 | 1,0 bis 5,9 ms | 19,7 bis 50,6 ms | 56,7 bis 156,8 ms | 7 bis 21 % | 99 % |
 
+Zweite Serie am selben Abend mit langen Läufen, nachdem die andere takt-Sitzung ihre Builds angehalten hatte.
+Ruhig war die Maschine auch dann nicht: selbst gehostete CI-Runner anderer Repositories, ein `cargo test` und
+ein Mobile-Build liefen weiter.
+
+| Lagen | Quelle | Anzeige | Dauer | Priorität | Verspätet | GPU-Zeit Median | GPU-Zeit p99 | GPU-Zeit max | Längster Abstand | CPU der Maschine |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | importiert | kopflos | 300 s | Normal | 319 von 18 000 (1,8 %) | 4,2 ms | 13,2 ms | 38,2 ms | 53,2 ms | 74 % |
+| 4 | importiert | kopflos | 180 s | High | 8 von 10 800 (0,07 %) | 4,1 ms | 10,7 ms | 20,6 ms | 31,6 ms | 88 % |
+| 4 | importiert | Fenster, vsync | 300 s | High | 16 von 17 996 (0,09 %) | 6,3 ms | 10,0 ms | 41,3 ms | 53,6 ms | 77 % |
+
 Was die Zahlen sagen:
 
 - **Das Compositing selbst hält 4K60 mit Abstand.** Vier Lagen kosten im Median 4 bis 6 ms GPU-Zeit je Bild, im
@@ -290,8 +300,9 @@ Was die Zahlen sagen:
 Für die Akzeptanz der Task („≥ 4 Lagen bei 4K60 ohne Frame-Drops auf der Entwicklungsmaschine“) heißt das: das
 Compositing hat ein Mehrfaches an Reserve, aber „ohne Frame-Drops“ ist auf dieser ausgelasteten Maschine nicht
 sauber belegt (kopflos ein verspätetes Bild in 9000 bei vier Lagen, mit Fenster Aussetzer in der Hälfte der
-Läufe). Eine Wiederholung auf ruhiger Maschine und über fünf Minuten steht aus; in neun Minuten Warten fiel die
-Last nie unter 35 %. Rohdaten: im Vault unter `takt/ROADMAP/reports/2026-11-17_takt-gpu-compositing-messung.md`.
+Läufe; in der zweiten Serie über fünf Minuten mit Fenster 16 von 17 996, ohne Stillstand, der längste Abstand
+zweier Bilder 54 ms). Eine Wiederholung auf wirklich ruhiger Maschine steht aus: die Last kommt auch von
+CI-Runnern und Sitzungen anderer Repositories, die sich aus dieser Arbeit heraus nicht anhalten lassen. Rohdaten: im Vault unter `takt/ROADMAP/reports/2026-11-17_takt-gpu-compositing-messung.md`.
 
 Nicht gemessen: mit echtem Decoder (das Bild entsteht hier vor der Uhr), Vollbild und 4K-Bildschirm (der
 Bildschirm hat 1680x1050), Linux, macOS, andere Grafikkarten, mehr als 30 s je Lauf.
