@@ -82,6 +82,40 @@ Mitgenommen aus den offenen Punkten von Phase 0:
 | Datum | Hardware | Datei | Pfad | CPU-Last (Mittel, p99) | GPU-Last | RAM | Kopien je Frame |
 |---|---|---|---|---|---|---|---|
 
+### Zero-Copy-Spike (2026-11-17)
+
+Vor der ersten Zeile der eigenen Pipeline vermessen (`takt/spike-zero-copy-decoder-gpu-import`, Prototyp
+`tools/zero-copy-spike/`, Bericht im Vault unter `takt/ROADMAP/reports/2026-11-17_spike-zero-copy.md`): wgpu 27.0.1
+nimmt die D3D12-Textur des Hardware-Decoders über wgpu-hal (`dx12::Device::texture_from_raw`,
+`Device::create_texture_from_hal`) als `NV12`- bzw. `P010`-Textur an. Das Bild ist byte-gleich zum CPU-Kopierweg
+desselben Prototyps (Prüfsummen des zurückgelesenen Ziels).
+
+Die Zahlen sind die eines Prototyps, nicht die der Pipeline: 30 s je Lauf statt eines Films, zwei Durchgänge, kein
+p99, kein RAM; ohne Ton, Uhr, Untertitel und Farbmanagement. CPU-Last in Prozent eines Kerns (Prozesszeit über die
+Laufzeit, für mpv genauso gemessen), Fenster 1280x720 mit vsync auf demselben Bildschirm. Hardware: i5-12400F,
+RTX 4070 SUPER (Treiber 610.88), Windows 11, FFmpeg 9.0.2, mpv 0.41.0-dev.
+
+| Datum | Datei | Pfad | CPU-Last (Mittel) | GPU-Last | Kopien je Frame |
+|---|---|---|---|---|---|
+| 2026-11-17 | 4K60 AV1 8 bit | Prototyp, D3D12VA direkt | 8,1 % | 13 % | 0 |
+| 2026-11-17 | 4K60 AV1 8 bit | Prototyp, D3D11VA mit geteilter Textur | 8,6 % | 24 % | 1 (GPU) |
+| 2026-11-17 | 4K60 AV1 8 bit | Prototyp, CPU-Kopierweg (hwdownload) | 29,2 %, hält 60 fps nicht | 42 % | 2 CPU, 2 GPU |
+| 2026-11-17 | 4K60 AV1 8 bit | `mpv --hwdec=auto` (d3d11va) | 13,9 % | nicht erfasst | 0 |
+| 2026-11-17 | 4K60 HEVC 10 bit | Prototyp, D3D12VA direkt | 9,0 % | 22 % | 0 |
+| 2026-11-17 | 4K60 HEVC 10 bit | Prototyp, D3D11VA mit geteilter Textur | 8,8 % | 27 % | 1 (GPU) |
+| 2026-11-17 | 4K60 HEVC 10 bit | Prototyp, CPU-Kopierweg (hwdownload) | 48,2 %, hält 60 fps nicht | 46 % | 2 CPU, 2 GPU |
+| 2026-11-17 | 4K60 HEVC 10 bit | `mpv --hwdec=auto` (d3d11va) | 16,2 % | 40 % | 0 |
+| 2026-11-17 | 4K60 HEVC 10 bit | `mpv --hwdec=auto-copy` | 68,1 % | 40 % | CPU-Kopie |
+
+Was das für das Gate heißt: Der Importweg verbraucht das Budget von „höchstens 1,2-fach von mpv“ nicht (der
+Prototyp liegt beim 0,5- bis 0,7-fachen, mit viel weniger Arbeit als ein Player), und der CPU-Umweg kostet das
+Drei- bis Fünffache und schafft 4K60 nicht mehr in Echtzeit. Die Messlatte des Gates bleibt die ganze Pipeline
+über einen Film.
+
+Nicht gemessen: Linux, Vulkan (auch Vulkan Video), macOS, Intel- und AMD-Grafik, Frame-Timing, 1080p H.264.
+Nebenbefund: D3D12VA von FFmpeg 9.0.2 scheitert auf dieser Maschine an `hevc_nvenc`-Material in 3840x2160
+(`hardware accelerator failed to decode picture`), D3D11VA spielt dieselbe Datei.
+
 ---
 
 ## Sicherheit und Angriffsflaeche
@@ -107,3 +141,6 @@ Neu in dieser Phase, absehbar aus der Planung:
 
 | Entscheidung | Grund | Revidierbar? |
 |---|---|---|
+| `takt-gpu` bleibt auf wgpu; fremde Texturen kommen über wgpu-hal-Interop herein, nicht über `ash` direkt (2026-11-17, Empfehlung des Zero-Copy-Spikes) | Auf Windows gemessen: Import ohne CPU-Kopie gelingt mit dem gelockten wgpu 27.0.1, NV12 und P010, ohne Fork. Für Linux nach Quelltext von wgpu-hal 27.0.4 erwartbar (`vulkan::Device::texture_from_raw`), dort mit eigenem `ash`-Code für den DMA-BUF-Import auf dem Gerät von wgpu; nicht gemessen | Ja: zeigt der Linux-Prototyp eine Sackgasse (Layout importierter Bilder, Vulkan-Video-Queues), gilt „Neu bewerten“ aus der Technologie-Tabelle des KONZEPTs |
+| Windows: D3D11VA mit geteilter Textur (`OpenSharedHandle`, eine GPU-Kopie) als erster Hardware-Weg, D3D12VA direkt (keine Kopie) als spätere Optimierung (2026-11-17, Empfehlung des Spikes) | Gleiche CPU-Last wie der direkte Weg, aber Decoder und Renderer teilen keinen Zustand an Referenzbildern, und FFmpegs D3D11VA spielt Material, an dem sein D3D12VA hier scheitert | Ja, hinter der Schnittstelle von `takt-decode` |
+| `GpuFrame` trägt eine `wgpu::Texture` (NV12/P010, zwei Ebenen-Views) plus sichtbare Größe, Bereitschaftssignal und Rückgabe-Guard; der CPU-Puffer bleibt die zweite Variante (2026-11-17, Vorschlag des Spikes für `takt-gpu`) | Beide Wege enden im selben Shader und Bind-Group-Layout; das wgpu-Gerät entsteht vor dem Decoder und braucht `TEXTURE_FORMAT_NV12` und `TEXTURE_FORMAT_P010` | Ja, bis `takt-gpu` die Schnittstelle festschreibt |
