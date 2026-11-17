@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Makes the test file of the MpvBackend tests: apps/takt-player/tests/data/pattern-3s.mkv.
 
-    python scripts/make-test-clip.py [OUT.mkv]
+    python scripts/make-test-clip.py [OUT.mkv [SECONDS]]
 
 Three seconds of the lavfi pattern `testsrc2` (160x90, 25 fps, H.264 with a keyframe every second and no B-frames,
 so a jump to a whole second lands on it), a 440 Hz sine tone (Vorbis, mono, 48 kHz) and two subtitle tracks, "deu"
@@ -10,6 +10,10 @@ and "eng", with one line per second. Everything in it is generated; nothing is t
 
 The file is kept in the repository (some 40 kB), so the tests need no ffmpeg: this script is how it was made and how
 it is made again. Needs ffmpeg in PATH (lavfi, libx264, libvorbis). Exit 1 when ffmpeg fails.
+
+With SECONDS (1 to 3599) the same clip is made that long: the test sheets play one of a minute
+(scripts/sheet-prepare.py), so that a window that starts slowly does not find the file at its end. Exit 2 for
+another value.
 """
 
 import pathlib
@@ -24,15 +28,16 @@ SECONDS = 3
 FPS = 25
 
 
-def subtitles(word):
+def subtitles(word, seconds=SECONDS):
     """An SRT text with one line per second: `word` and the number of the second."""
     blocks = []
-    for second in range(SECONDS):
-        blocks.append(f"{second + 1}\n00:00:0{second},100 --> 00:00:0{second},900\n{word} {second + 1}\n")
+    for second in range(seconds):
+        at = f"00:{second // 60:02}:{second % 60:02}"
+        blocks.append(f"{second + 1}\n{at},100 --> {at},900\n{word} {second + 1}\n")
     return "\n".join(blocks)
 
 
-def command(out, deu, eng):
+def command(out, deu, eng, seconds=SECONDS):
     """The ffmpeg call as an argument list: no shell reads the filter expressions."""
     return [
         "ffmpeg",
@@ -61,7 +66,7 @@ def command(out, deu, eng):
         "-map",
         "3:s",
         "-t",
-        str(SECONDS),
+        str(seconds),
         "-c:v",
         "libx264",
         "-preset",
@@ -106,6 +111,12 @@ def command(out, deu, eng):
 
 def main():
     out = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT
+    seconds = SECONDS
+    if len(sys.argv) > 2:
+        if len(sys.argv) > 3 or not sys.argv[2].isdecimal() or not 1 <= int(sys.argv[2]) <= 3599:
+            print("make-test-clip: usage: make-test-clip.py [OUT.mkv [SECONDS]], 1 to 3599 seconds", file=sys.stderr)
+            return 2
+        seconds = int(sys.argv[2])
     if shutil.which("ffmpeg") is None:
         print("make-test-clip: ffmpeg not found in PATH", file=sys.stderr)
         return 1
@@ -113,9 +124,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="takt-clip-") as temp:
         deu = pathlib.Path(temp) / "deu.srt"
         eng = pathlib.Path(temp) / "eng.srt"
-        deu.write_text(subtitles("Zeile"), encoding="utf-8", newline="\n")
-        eng.write_text(subtitles("line"), encoding="utf-8", newline="\n")
-        done = subprocess.run(command(out, deu, eng), check=False)
+        deu.write_text(subtitles("Zeile", seconds), encoding="utf-8", newline="\n")
+        eng.write_text(subtitles("line", seconds), encoding="utf-8", newline="\n")
+        done = subprocess.run(command(out, deu, eng, seconds), check=False)
     if done.returncode != 0 or not out.is_file():
         print(f"make-test-clip: ffmpeg failed ({done.returncode})", file=sys.stderr)
         return 1
