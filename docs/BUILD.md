@@ -12,6 +12,7 @@ Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` ü
     - [FFmpeg](#ffmpeg)
     - [Prüfen](#prüfen)
   - [Linux](#linux)
+    - [Das Fenster](#das-fenster)
     - [Priorität des Audio-Threads](#priorität-des-audio-threads)
   - [macOS](#macos)
   - [Warum nicht vcpkg](#warum-nicht-vcpkg)
@@ -139,6 +140,12 @@ Erwartet: genau zwei Tests, `libmpv::client_api_is_version_2` und `libmpv::licen
 `FFMPEG_DIR` bleibt unter Linux zunächst ungesetzt. Arch, Debian/Ubuntu und Fedora (RPM Fusion) bauen FFmpeg mit `--enable-gpl`; mit der Distributions-FFmpeg würde `build_is_lgpl` also immer scheitern, und die Distributions-libmpv lädt ohnehin diese GPL-FFmpeg. Wer das separat gelinkte FFmpeg prüfen will, nimmt das Archiv `linux64-lgpl-shared` von BtbN und exportiert `FFMPEG_DIR` (dessen Wurzel) und `LD_LIBRARY_PATH="$FFMPEG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`. Dann liegen zwei FFmpeg-Versionen im Prozess; haben beide dieselbe SONAME-Hauptversion, lädt sogar die Distributions-libmpv die BtbN-Bibliotheken (ABI-Mischung). Das taugt zum Prüfen, nicht zum Alltag.
 
 Geprüft auf Ubuntu (Runner `ubuntu-latest` der CI, libmpv aus `apt`); noch nicht auf eigener Hardware und nicht unter Arch (siehe Plattform-Tabelle im README).
+
+### Das Fenster
+
+Zur Laufzeit lädt das Fenster (winit) `libxkbcommon`, unter X11 dazu `libxkbcommon-x11`. Jeder Desktop bringt beide mit; auf einem System ohne sie (ein Container, ein WSL ohne Desktop-Pakete) endet `takt-player` beim Start mit einer Panik aus winit (`XKBNotFound` bzw. „Library libxkbcommon-x11.so could not be loaded“), und `--headless` läuft weiter. Nachinstallieren: `sudo apt install libxkbcommon0 libxkbcommon-x11-0` (Arch: `libxkbcommon libxkbcommon-x11`).
+
+Ob Tasten im echten Fenster ankommen, prüft `scripts/check-window-keys.py <takt-player>`: Leertaste hält an und spielt weiter, Escape beendet mit Exit 0. Unter Windows liest es den Zustand über `sheet-driver` (appkit), unter Linux braucht es X11 (`Xvfb :99` genügt, dazu `libxcb-xtest0` und für die Darstellung ohne Grafikkarte `mesa-vulkan-drivers`). Gelaufen am 2026-11-17 unter Windows 11 und in einem Container mit Ubuntu 24.04 unter Xvfb.
 
 ### Priorität des Audio-Threads
 
