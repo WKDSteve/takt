@@ -76,8 +76,13 @@ impl Pipeline {
 }
 
 /// Where the helper programs of the own pipeline lie: `TAKT_HELPER_DIR`,
-/// else next to the player, which is where an install puts them. A program
-/// cargo built for a test lies one directory below the helpers.
+/// else next to the player, which is where an install puts them.
+///
+/// A debug build also looks in the directories above its own, a few levels
+/// up: cargo puts a test program below the directory the helpers are built
+/// into (`target/debug/deps`, or `target/debug/build/<package>/<hash>/out`
+/// with a newer cargo). A release build never does: what it starts lies next
+/// to it or where the person said.
 fn helper_dir() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("TAKT_HELPER_DIR").filter(|dir| !dir.is_empty()) {
         return Ok(PathBuf::from(dir));
@@ -89,19 +94,24 @@ fn helper_dir() -> Result<PathBuf, String> {
         takt_decode::HELPER_NAME,
         std::env::consts::EXE_SUFFIX
     );
-    match dir.parent() {
-        Some(above) if !dir.join(&helper).is_file() && above.join(&helper).is_file() => {
-            Ok(above.to_path_buf())
-        }
-        _ => Ok(dir.to_path_buf()),
-    }
+    let levels = if cfg!(debug_assertions) { 5 } else { 1 };
+    Ok(dir
+        .ancestors()
+        .take(levels)
+        .find(|dir| dir.join(&helper).is_file())
+        .unwrap_or(dir)
+        .to_path_buf())
 }
 
-/// How the own pipeline plays in this window: the helpers of
-/// [`helper_dir`], frames as NV12 and P010 (what the texture paths and a
-/// hardware decoder use).
-fn own_options() -> Result<BackendOptions, String> {
-    let mut options = BackendOptions::in_dir(&helper_dir()?);
+/// How the own pipeline plays in this window: the helpers of `helpers` or,
+/// without one, of [`helper_dir`]; frames as NV12 and P010 (what the texture
+/// paths and a hardware decoder use).
+fn own_options(helpers: Option<&Path>) -> Result<BackendOptions, String> {
+    let dir = match helpers {
+        Some(dir) => dir.to_path_buf(),
+        None => helper_dir()?,
+    };
+    let mut options = BackendOptions::in_dir(&dir);
     options.decode.layout = Layout::SemiPlanar;
     Ok(options)
 }
@@ -241,6 +251,9 @@ pub struct Session {
     /// Where the file that is being opened goes on: the position of the
     /// file the other pipeline played ([`Session::switch_pipeline`]).
     resume_millis: Option<i64>,
+    /// Where the helpers of the own pipeline are looked for instead of
+    /// [`helper_dir`]; set by tests.
+    helpers: Option<PathBuf>,
     /// No output device, neither of the player nor of mpv (tests).
     silent: bool,
     paused: bool,
@@ -278,6 +291,7 @@ impl Session {
             playing: None,
             own_pending: None,
             resume_millis: None,
+            helpers: None,
             silent,
             paused: false,
             volume: 1.0,
@@ -345,7 +359,7 @@ impl Session {
         if !path.is_file() {
             return Err("no such file".to_owned());
         }
-        let options = own_options()?;
+        let options = own_options(self.helpers.as_deref())?;
         let name = path.to_string_lossy().into_owned();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -1246,20 +1260,20 @@ mod tests {
         assert!(!session.opening() && !session.is_file());
     }
 
-    /// In a build without FFmpeg the helpers decode nothing (or are not there at all, when only
-    /// this package was built): the open ends with the reason, and the test picture plays on.
-    #[cfg(not(takt_ffmpeg))]
+    /// Without its helper programs (an install that does not carry them) the open ends with
+    /// the reason, and the test picture plays on.
     #[test]
-    fn the_own_pipeline_without_ffmpeg_says_why_and_the_test_picture_plays_on() {
+    fn the_own_pipeline_without_its_helpers_says_why_and_the_test_picture_plays_on() {
         let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/decode-h264.mp4");
         let mut session = session();
         own(&mut session);
+        // A directory that holds no helper, whatever was built next to this test.
+        session.helpers = Some(std::env::temp_dir().join("takt-no-helpers-here"));
         let clock = std::ptr::from_ref(session.master());
         session.open_file(Path::new(clip)).unwrap();
         assert!(session.opening());
         let why = opened(&mut session).unwrap_err();
-        assert!(!why.is_empty());
-        println!("own pipeline without FFmpeg: {why}");
+        assert!(why.contains("helper not started"), "{why}");
         assert!(!session.opening() && !session.is_file());
         assert_eq!(session.backend_name(), "null");
         assert_eq!(std::ptr::from_ref(session.master()), clock);

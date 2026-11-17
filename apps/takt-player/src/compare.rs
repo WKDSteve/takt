@@ -73,19 +73,27 @@ fn clip(name: &str) -> String {
         .into_owned()
 }
 
-/// The directory the helper programs were built into: one above the test program.
+/// The directory the helper programs were built into: one of those above the test program
+/// (`target/debug`, with the test program in `deps` or, with a newer cargo, in
+/// `build/<package>/<hash>/out`).
 fn helpers() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
-    for name in [DEMUX_HELPER, takt_decode::HELPER_NAME] {
-        let helper = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            helper.is_file(),
-            "{} is missing: build it in the same run (cargo test -p takt-demux -p takt-decode -p takt-player)",
-            helper.display()
-        );
-    }
-    dir
+    let has = |dir: &Path, name: &str| {
+        dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+            .is_file()
+    };
+    exe.ancestors()
+        .skip(1)
+        .take(5)
+        .find(|dir| has(dir, DEMUX_HELPER) && has(dir, takt_decode::HELPER_NAME))
+        .unwrap_or_else(|| {
+            panic!(
+                "no directory above {} holds both helper programs: build them in the same run \
+                 (cargo test -p takt-demux -p takt-decode -p takt-player)",
+                exe.display()
+            )
+        })
+        .to_path_buf()
 }
 
 /// The name of the demux helper, which this crate does not link by itself.
