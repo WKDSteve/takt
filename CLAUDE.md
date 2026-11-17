@@ -21,9 +21,11 @@ Dazu in der CI: jede Zone-1-Crate allein (`cargo build -p takt-core --locked`, e
 (`cargo check --workspace --all-features` mit Rust 1.90.0) und auf Windows die GPU-Tests
 (`TAKT_GPU_TESTS=1 TAKT_GPU_ADAPTER=fallback cargo test -p takt-gpu gpu -- --ignored`: Referenzbilder, Compositing und
 der Import einer fremden Textur auf WARP).
-`takt-demux` mit echtem FFmpeg 9.0 läuft in einem eigenen Job (Ubuntu und Windows, Archiv gepinnt); lokal
-`FFMPEG_DIR` setzen, die Bibliotheken in `PATH` bzw. `LD_LIBRARY_PATH`, dann `cargo test -p takt-demux`
-(`docs/BUILD.md`). Die CI lintet mit dem neuesten stabilen Rust: ist das lokale älter, meldet Clippy dort mehr.
+`takt-demux` und `takt-decode` mit echtem FFmpeg 9.0 laufen in einem eigenen Job (Ubuntu und Windows, Archiv
+gepinnt); lokal `FFMPEG_DIR` setzen, die Bibliotheken in `PATH` bzw. `LD_LIBRARY_PATH`, dann
+`cargo test -p takt-demux -p takt-decode` (beide Pakete in einem Lauf: die Decoder-Tests starten auch den
+Demux-Hilfsprozess; `docs/BUILD.md`). Mit `TAKT_LIBMPV_DIR` dazu vergleicht `cargo test -p takt-demux -p takt-decode
+-p takt-player` die eigene Pipeline mit libmpv (`apps/takt-player/src/compare.rs`; in der CI im Windows-Job mit libmpv). Die CI lintet mit dem neuesten stabilen Rust: ist das lokale älter, meldet Clippy dort mehr.
 Gerätetests nur auf Anfrage: `TAKT_DEVICE_TESTS=1 cargo test -p takt-audio --features cpal --test device -- --ignored`.
 
 - Der globale Hook prüft nach jedem Edit einer `.rs`-Datei `rustfmt --check`.
@@ -41,7 +43,7 @@ Gerätetests nur auf Anfrage: `TAKT_DEVICE_TESTS=1 cargo test -p takt-audio --fe
   `#![allow(unsafe_code)]`; jeder Block mit `// SAFETY:`.
 - Bytes aus einem Hilfsprozess (Pipe und Ring, `takt-ipc`) sind fremde Daten: jede Länge, jeder Zähler, Index
   und Zeitstempel wird gegen ein Limit geprüft, bevor er benutzt wird; ein neuer Parser kommt in den
-  Fuzz-Harness (`takt_demux::fuzzing`, `fuzz/README.md`).
+  Fuzz-Harness (`takt_demux::fuzzing` bzw. `takt_decode::fuzzing`, `fuzz/README.md`).
 - Lizenz-Zonen: Zone 1 (`takt-core`, `takt-clock`, `takt-audio`, …) `Apache-2.0 OR MIT`, hängt
   nie von Zone 2 ab; Zone 2 (`apps/`, Decoder, GPU) GPL-3.0-or-later; Zone 3 hinter
   Prozessgrenzen. Jede Datei beginnt mit ihrer `SPDX-License-Identifier`.

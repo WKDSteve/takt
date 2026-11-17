@@ -50,7 +50,9 @@ Ein Video-Frame, das zwei Millisekunden zu spät kommt, sieht niemand. Ein Audio
 | Audio-Callback | **das Betriebssystem** — WASAPI, CoreAudio, PipeWire | hart-realtime | Puffergröße / Abtastrate |
 | Demux | wir, **in einem eigenen Prozess** (`takt-demux-helper`, einer je Datei, [PROCESSES.md](PROCESSES.md)): dort ein Haupt-Thread, der parst und in den Ring schreibt, und einer, der nur die Steuer-Pipe liest | soft | keine, nur Durchsatz; ein Herzschlag je Lesevorgang und Paket, sonst beendet ihn der Watchdog nach 5 s |
 | Hilfsprozess-Wächter (`takt-ipc-stdout`, `takt-ipc-stderr`, `takt-ipc-watchdog`) | wir, je Hilfsprozess drei im Hauptprozess | soft | keine; sie schlafen in einem Lesevorgang bzw. wachen alle 250 ms auf |
-| Decode-Pool | FFmpeg intern, ab Phase 1 teils wir | soft | Durchsatz |
+| Decode | wir, **in einem eigenen Prozess** (`takt-decode-helper`, einer je Videostream, [PROCESSES.md](PROCESSES.md)): dort ein Haupt-Thread, der Pakete annimmt und Bilder in den Ring schreibt, einer für die Steuer-Pipe, und der Thread-Pool von libavcodec bzw. dav1d (so viele wie Kerne) | soft | Durchsatz; ein Herzschlag je Paket und Bild |
+| Decoder-Pumpe (`takt-decode-pump`, nur mit dem `SoftwareBackend`) | wir, je geöffneter Datei einer im Hauptprozess: reicht Pakete vom Demuxer zum Decoder, kopiert die Bilder aus dem geteilten Speicher in den `FramePool` und reicht sie über einen Kanal weniger Frames an den Render-Thread, dessen `next_frame` nie wartet | soft | Durchsatz; normale Priorität (offen: die Echtzeitpriorität des Füll-Threads) |
+| Öffnen der eigenen Pipeline (`takt-open`) | wir, je Öffnen einer, kurzlebig: startet die zwei Hilfsprozesse und liest die Stream-Tabelle, damit das Fenster nicht wartet | soft | keine |
 | GPU-Submission | wir | soft, framegebunden | Bildwiederholrate |
 | mpv-Render (`takt-mpv-render`, nur mit dem `MpvBackend` der Phase 0) | wir, je Backend einer | soft, framegebunden | die Frist von mpv: 200 ms je Bild |
 | UI | die Fensterbibliothek, meist der Haupt-Thread | soft | Bildwiederholrate |

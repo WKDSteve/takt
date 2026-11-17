@@ -4,7 +4,8 @@
 starten am 2027-01-04); bis dahin hält dieses Dokument fest, woran die Phase gemessen wird und was sie aus
 Phase 0 mitnimmt. Es wird während der Phase fortgeschrieben, nicht erst am Ende geschrieben. Die ersten
 Bausteine der Pipeline sind am 2026-11-17 vorgezogen worden (Entscheidung des Autors): `takt-ipc` und
-`takt-demux` stehen, ihr Stand ist unten unter Sicherheit und Entscheidungen eingetragen.*
+`takt-demux` stehen, ihr Stand ist unten unter Sicherheit und Entscheidungen eingetragen; am selben Tag kam
+`takt-decode` dazu, der Software-Pfad als zweites Backend des Players neben libmpv.*
 
 Wie jedes Review beantwortet es drei Fragen: Was hat die Architektur gelernt? Wo liegen jetzt die
 Performance-Grenzen? Welche Angriffsfläche ist neu entstanden? Dazu kommt die Gate-Frage der Phase.
@@ -16,8 +17,11 @@ Performance-Grenzen? Welche Angriffsfläche ist neu entstanden? Dazu kommt die G
   - [Gate 1](#gate-1)
   - [Ausgangslage aus Phase 0](#ausgangslage-aus-phase-0)
   - [Performance](#performance)
+    - [Software-Decoder durch die Prozessgrenze](#software-decoder-durch-die-prozessgrenze)
+    - [Bildgleichheit gegen libmpv](#bildgleichheit-gegen-libmpv)
   - [Sicherheit und Angriffsflaeche](#sicherheit-und-angriffsflaeche)
     - [Stand Hilfsprozesse und Demuxer](#stand-hilfsprozesse-und-demuxer)
+    - [Stand Software-Decoder](#stand-software-decoder)
     - [Fuzzing der Leseseite](#fuzzing-der-leseseite)
     - [Offen](#offen)
   - [Was in dieser Phase entschieden wurde](#was-in-dieser-phase-entschieden-wurde)
@@ -98,6 +102,98 @@ Pakete):
 Die Datei braucht zum Abspielen 7 MiB/s: Ring und die zwei Kopien je Paket (in den Ring, aus dem Ring) sind
 nicht der Engpass der Pipeline. Nicht gemessen: die Latenz eines einzelnen Pakets bei leerem Ring (abgefragt
 wird mit Pausen bis 1 ms) und die CPU-Last des wartenden Hilfsprozesses.
+
+### Software-Decoder durch die Prozessgrenze
+
+*Stand 2026-11-17, `takt-decode` (`takt/takt-decode-software-pfad`).* Der Software-Pfad dekodiert H.264 und HEVC
+mit den Decodern von libavcodec und AV1 mit dav1d, im Hilfsprozess `takt-decode-helper`; die Bilder kommen über den
+Ring und landen in einem `takt_core::FramePool`. **Die Bilder sind Byte für Byte die, die das Programm `ffmpeg`
+derselben FFmpeg aus derselben Datei dekodiert** (`h264_hevc_and_av1_decode_to_the_bytes_ffmpeg_decodes`: fünf Clips,
+H.264 und HEVC mit B-Frames, AV1, HEVC und AV1 in 10 bit mit ungerader Chroma-Größe, je 50 Bilder; dasselbe als NV12
+und P010 in `the_same_pictures_arrive_as_nv12_and_p010`).
+
+Durchsatz, frei laufend (`cargo run --release -p takt-decode --example decode-speed -- <Datei>`; die Zeit läuft vom
+Start beider Hilfsprozesse bis zum letzten Bild, der Leser verwirft die Bilder sofort; drei Läufe; STEVESPC,
+i5-12400F mit 6 Kernen und 12 Threads, Windows 11, FFmpeg 9.0 von BtbN (LGPL), Clips mit ffmpeg aus `testsrc2`
+erzeugt):
+
+| Datum | Datei | Decoder | Bilder/s | je Bild aus dem Ring | je Bild in den Pool | Anteil beider Kopien an der Laufzeit des lesenden Threads |
+|---|---|---|---|---|---|---|
+| 2026-11-17 | 1080p60 H.264 8 bit, 20 s (x264 veryfast, 3,0 MiB je Bild) | `h264` | 678 bis 733 | 0,72 bis 0,78 ms | 0,45 bis 0,53 ms | 86 bis 89 % |
+| 2026-11-17 | 4K60 HEVC 10 bit, 10 s (x265 ultrafast, 23,7 MiB je Bild) | `hevc` | 104 bis 110 | 4,6 bis 4,9 ms | 3,7 bis 4,0 ms | 93 % |
+| 2026-11-17 | 4K60 AV1 8 bit, 10 s (SVT-AV1, 11,9 MiB je Bild) | `libdav1d` | 116 bis 130 | 2,4 ms | 1,6 bis 1,7 ms | 48 bis 53 % |
+
+Mit verschachteltem Chroma (NV12, P010; das Verschachteln geschieht in der zweiten Kopie) dieselben Größenordnungen:
+679, 109 und 116 Bilder/s.
+
+Was die Zahlen sagen:
+
+* **Der Software-Pfad schafft 4K60 auf dieser Maschine**, mit dem 1,7- bis 2-Fachen der Echtzeit, 1080p60 mit dem
+  Elffachen. Das ist der Durchsatz der ganzen Strecke (Demuxer, zwei Prozessgrenzen, Decoder), nicht die Last beim
+  Abspielen.
+* **Die Kopie ist nicht umsonst.** Die Entscheidung für den Hilfsprozess nannte als Preis „eine Kopie je Frame“.
+  Gemessen sind es drei: eine im Hilfsprozess (aus dem Puffer des Decoders in den Ring) und zwei im Hauptprozess
+  (aus dem Ring in einen Puffer, weil auf den geteilten Speicher nie eine Referenz zeigt, und von dort Zeile für
+  Zeile in das Frame des Pools, dessen Zeilen anders ausgerichtet sind). Im Hauptprozess kosten sie bei 4K60 HEVC
+  10 bit zusammen 8,5 ms je Bild, also bei 60 Bildern/s rund einen halben Kern nur fürs Kopieren, und frei laufend
+  ist der kopierende Thread der Engpass, nicht der Decoder. Bei 1080p sind es 1,2 ms je Bild.
+* Die zweite Kopie im Hauptprozess lässt sich sparen, ohne die Leseregeln aufzugeben (den Kopf des Records
+  herauskopieren und prüfen, dann die Ebenen direkt in das Frame lesen): eine Erweiterung von `takt-ipc`, nicht
+  gebaut (`takt/takt-decode-eine-kopie-je-bild-sparen`). Ob der Hilfsprozess für 4K bleibt, entscheidet erst die
+  Messung des Gates (CPU-Last über einen Film gegen `mpv`); der Hardware-Pfad geht diesen Weg ohnehin nicht.
+
+**Pool-Erschöpfung ist ein Messwert.** Der Pool wächst nie: Sind alle Frames ausgegeben, bleibt das nächste Bild im
+Ring, `Decoder::try_next` meldet `PoolExhausted`, und `DecodeStats::pool_exhausted` zählt den Stau (einmal je Stau,
+nicht je Nachfrage). Der Hilfsprozess findet den Ring voll und nimmt keine Pakete mehr an, das Paket-Fenster des
+Hauptprozesses läuft voll, und der Demuxer liest nicht weiter: der Stau reicht von selbst bis zur Quelle zurück.
+Gemessen mit einem Verbraucher, der jedes Bild 20 ms hält (1080p60 H.264, Pool von 4 Frames, `decode-speed --pool 4
+--hold-ms 20`): 1200 Bilder in 7,07 s (170 Bilder/s, was vier Frames in 20 ms hergeben), **783-mal Pool leer, ein
+Pool über den ganzen Lauf, kein Bild verloren, kein Fehler**. Als Test:
+`an_empty_pool_stalls_the_decoder_and_nothing_is_lost_or_allocated` (Pool von zwei Frames: alle 50 Bilder kommen in
+der richtigen Reihenfolge durch dieselben zwei Speicherbereiche) und `a_backend_whose_frames_are_held_stalls_and_counts_it`. Im Player steht der
+Zähler in der Quellzeile des Overlays (`pool empty Nx`).
+
+Nicht gemessen: die CPU-Last des ganzen Prozessbaums beim Abspielen gegen `mpv` (die Zeile des Gates), das alte
+Testgerät, Linux, das Frame-Timing des Fensters mit der eigenen Pipeline (`scripts/ab-measure.py` kennt sie noch
+nicht), die Latenz eines Bildes bei leerem Ring (abgefragt wird mit Pausen bis 1 ms).
+
+### Bildgleichheit gegen libmpv
+
+libmpv ist das Referenz-Orakel (`takt-backend`). `apps/takt-player/src/compare.rs` vergleicht, was beide Backends
+zum selben Zeitstempel zeigen: libmpv wird angehalten und springt exakt auf die Zeit eines Bildes; seine Position
+muss genau diese Zeit sein, und das Bild, das es dann zeigt, wird mit dem Bild verglichen, das die eigene Pipeline
+mit genau dieser Zeit stempelt. (Im laufenden Abspielen stempelt das `MpvBackend` ein Bild mit der Position von mpv
+beim Rendern; auf einer belasteten Maschine ist das gelegentlich die Zeit eines Nachbarn, deshalb der Weg über den
+Sprung.) Die beiden geben nicht dieselben Bytes heraus: die eigene Pipeline das Y'CbCr des Decoders, mpv ein fertiges
+R'G'B'-Bild (`rgb0`, von seinem Software-Renderer umgerechnet). Der Test rechnet das dekodierte Bild als BT.709 im
+begrenzten Wertebereich mit interpoliertem Chroma um und misst den Abstand als PSNR über R', G' und B' aller Pixel.
+
+Gemessen am 2026-11-17 (Windows 11, FFmpeg 9.0 LGPL von BtbN, mpv 0.41.0-dev von shinchiro, Build 20261111), je
+Datei 18 der 50 Bilder (jedes dritte und das letzte), fünf Läufe mit denselben Werten bis auf ±0,1 dB:
+
+| Datei (`scripts/make-decode-clips.py`) | Decoder | niedrigster PSNR | mittlerer PSNR |
+|---|---|---|---|
+| `decode-h264.mp4`, 160x90, 8 bit, B-Frames | `h264` | 55,98 dB | 56,23 dB |
+| `decode-hevc.mp4`, 160x90, 8 bit, B-Frames | `hevc` | 55,94 dB | 56,07 dB |
+| `decode-av1.mkv`, 160x90, 8 bit | `libdav1d` | 56,01 dB | 56,18 dB |
+| `decode-hevc-10bit.mp4`, 130x74, 10 bit | `hevc` | 51,79 dB | 52,00 dB |
+| `decode-av1-10bit.mkv`, 130x74, 10 bit | `libdav1d` | 51,94 dB | 52,12 dB |
+
+Zum Vergleich, mit demselben Maß (`a_picture_one_frame_off_or_of_the_wrong_matrix_fails_the_threshold`): das Bild
+neben dem richtigen hat 21,7 dB (die Clips bewegen sich), das richtige Bild mit der Matrix von BT.601 gelesen
+28,9 dB.
+
+**Die Schwelle** (`MIN_PSNR_DB`, `MIN_PSNR_DB_10BIT`): **45 dB in 8 bit, 42 dB in 10 bit.** Sie liegt 10 dB unter
+dem Gemessenen (Luft für einen anderen Build von mpv oder FFmpeg, für andere Rundung und anderes Chroma-Upsampling)
+und 13 dB über dem nächsten Fehlerbild (falsche Matrix); ein Bild daneben oder ein vertauschter Kanal liegt 20 dB
+darunter. Der Rest zu „gleich“ ist kein Decoder-Unterschied (die dekodierten Bytes sind die von FFmpeg, siehe oben),
+sondern die Umrechnung: mpv interpoliert Chroma anders als die Referenz hier, und bei 10 bit bringt es die Werte mit
+einem Dither-Muster auf 8 bit, das die Referenz nicht nachahmt. In der CI läuft der Vergleich im Job „libmpv gelinkt
+(Windows, Archiv gepinnt)“, der dafür auch das FFmpeg-Archiv lädt.
+
+Nicht verglichen: HDR (das `MpvBackend` schneidet bei Weiß ab, `takt-gpu` bildet ab; ein Vergleich wäre einer der
+Tone-Mapper), 4:4:4, echte Filme, Linux (die libmpv der Distribution lädt eine GPL-FFmpeg; zwei FFmpeg in einem Lauf
+sind dort ABI-Glück, `docs/BUILD.md`).
 
 ### Zero-Copy-Spike (2026-11-17)
 
@@ -199,6 +295,48 @@ womit jedes Programm, das den Demuxer benutzt, FFmpeg mitgeladen hätte (`ae5baf
 Prozessstart statt ab dem Handshake; unter Windows konnte ein zweiter, gleichzeitig gestarteter Hilfsprozess
 die Handles des ersten erben (`4ce8e9f`).
 
+### Stand Software-Decoder
+
+*Stand 2026-11-17, `takt-decode` (`takt/takt-decode-software-pfad`).*
+
+Bitströme werden nie im Hauptprozess dekodiert. `takt_decode::Decoder` startet je Videostream
+`takt-decode-helper`; nur dieses Programm linkt libavcodec (die Bibliothek `takt-decode` enthält kein FFmpeg und
+kein `unsafe`, `#![forbid(unsafe_code)]`, der Test `the_client_links_no_ffmpeg` hält das für libavcodec fest). Der
+Player linkt und lädt weder FFmpeg noch dav1d.
+
+| Was | Stand | Beleg |
+|---|---|---|
+| Was der Hilfsprozess bekommt | nichts außer seinen Pipes und dem Ring: keine Datei, keinen Pfad, kein Handle. Die Pakete kommen vom Hauptprozess über die Steuer-Pipe | `takt-decode-helper/main.rs` (kein `take_file`), `client.rs` (kein `HelperCommand::file`) |
+| Welche Decoder laufen | eine feste Liste: `h264`, `hevc`, und für AV1 `libdav1d`; ein anderer Codec startet gar keinen Hilfsprozess, und der Hilfsprozess prüft die Liste selbst noch einmal | `a_stream_the_software_path_does_not_decode_starts_no_helper`, `proto::CODECS`, `av1_goes_to_dav1d_and_other_codecs_nowhere` |
+| Wie viel auf dem Weg zum Decoder liegen kann | höchstens 8 Pakete (Fenster), jedes höchstens 8 MiB: der Hilfsprozess meldet in jedem Record, wie viele Pakete er genommen hat; eine Zahl, die zurückläuft oder über das Gesendete hinausgeht, ist eine Lüge und beendet ihn | `a_helper_that_counts_packets_nobody_sent_has_lied` |
+| Speicher, eigene Prozesse, Watchdog, Ende mit dem Elternprozess | wie beim Demuxer (`takt-ipc`), Speicher 3 GiB | Tests von `takt-ipc` |
+| Netz, Dateien des Benutzers, Registry | **nicht eingeschränkt**, wie beim Demuxer; der Schritt zur Sandbox ist hier kleiner, weil der Prozess gar nichts öffnet | offen, siehe unten |
+
+**Die Leseseite** (`takt_decode::intake`, dieselbe Regel wie beim Demuxer: Bytes aus einem Hilfsprozess sind fremde
+Daten):
+
+* Ein Frame-Record wird nur angenommen, wenn sein Format bekannt ist, Breite und Höhe in 1 bis 16384 liegen, jede
+  Zeilenlänge mindestens eine Zeile und höchstens 4096 Bytes mehr ist und die Ebenen **genau** so lang sind, wie
+  diese Geometrie es verlangt; reservierte Bytes sind null, ein Zeitstempel ist nie die „kein Wert“-Zahl. Erst dann
+  wird kopiert, und kopiert wird in ein Frame, dessen Geometrie mit dem Record verglichen ist
+  (`a_frame_whose_numbers_do_not_fit_its_bytes_is_refused`, `a_frame_of_another_geometry_is_not_written_to`).
+* Samples sind Daten, keine Indizes: 10-bit-Werte gehen für P010 durch eine Maske, planar bleiben sie, wie sie
+  kamen. Wer sie später als Index benutzt, muss sie begrenzen.
+* Die Farbe eines Bildes sagt der Bitstrom; wo er nichts sagt, die Stream-Tabelle des Containers.
+* Fehlertexte von libavcodec werden gekürzt und von Steuerzeichen befreit.
+* Ein Bild, das nicht in den Ring passt, ein Pixelformat, das das Protokoll nicht trägt (4:2:2, 12 bit), und ein
+  Paket, das der Decoder ablehnt, sind Fehler-Records: gezählt, der Strom läuft weiter
+  (`a_picture_that_does_not_fit_the_ring_is_an_error_not_a_hang`, `damaged_packets_are_counted_and_the_decoder_goes_on`:
+  jedes dritte Paket Rauschen, eines leer, eines halbiert; der Hilfsprozess überlebt alle drei Codecs und geht
+  ordentlich).
+
+**Was ein Absturz oder ein Hänger dort im Hauptprozess auslöst:** `DecodeError::Helper` mit dem Grund, wie beim
+Demuxer; das `SoftwareBackend` meldet ihn einmal aus `next_frame` und ist danach am Ende. Die Datei wird mit zwei
+neuen Hilfsprozessen neu geöffnet.
+
+Nicht gebaut: ein Hilfsprozess, der mit Absicht lügt (wie `tests/liar.rs` beim Demuxer); die Regeln der Leseseite
+sind über `Intake` ohne Prozess getestet und im Fuzz-Ziel.
+
 ### Fuzzing der Leseseite
 
 Ziel `protocol_reader` (`fuzz/`, cargo-fuzz mit libFuzzer; der Harness ist `takt_demux::fuzzing::read_untrusted`
@@ -212,6 +350,14 @@ erneutes Senden.
 |---|---|---|---|
 | 2026-11-17 | Arbeitsstand vor `989efe6` | 1 min, WSL2 (Arch), Startkorpus aus den echten Encodern | **ein Fund**: eine Stream-Tabelle mit einer Zeitbasis nahe 2^63 wurde angenommen; der Vergleich zweier solcher Zeitstempel lief in `Timestamp::cmp` über 128 Bit hinaus (Panik im Debug-Build, falsche Ordnung im Release-Build). Behoben in `989efe6`: die Leseseite begrenzt beide Teile jedes Bruchs auf das, was FFmpegs `AVRational` halten kann; damit rechnet `Timestamp` exakt. Regressionstest `a_time_base_too_large_for_exact_arithmetic_is_refused` |
 | 2026-11-17 | `989efe6` | 1 h (3601 s), WSL2 (Arch) auf STEVESPC, libFuzzer über cargo-fuzz mit Nightly, Eingaben bis 4096 Bytes, Startkorpus aus den echten Encodern (2026-11-17, 11:18:38 bis 12:18:44 UTC) | **kein Fund**: 67 318 990 Läufe, im Mittel 18 694 je Sekunde, 5987 neue Eingaben im Korpus, kein Absturz, kein Artefakt, Spitze 587 MiB Speicher |
+
+Ziel `decode_reader` (seit 2026-11-17; der Harness ist `takt_decode::fuzzing::read_untrusted` und läuft mit festen
+Eingaben, allen Schnitten und Bitkippern davon auch in `cargo test`). Es füttert, was der Hauptprozess vom
+Decoder-Hilfsprozess liest, durch genau den Code, den der echte Decoder benutzt (`Intake`): den Kopf eines
+Frame-Records, die Kopie der Ebenen in ein Frame des Pools (planar, NV12, P010), die Zähler des Paket-Fensters,
+Folgen von Records mit vollem und leerem Pool und mit Formatwechsel, dazu was der Hilfsprozess von seinem
+Elternprozess liest. Geprüft wird auch, was zugesagt ist: der Pool hält nie mehr Frames als seine Größe, ein Stau
+wird einmal gezählt, ein Bild landet in einem Frame seiner Größe.
 
 Der Fund zeigt auf `takt-core`: `Timestamp::cmp` und `Timestamp::rescale` multiplizieren ungeprüft in `i128`
 und halten nur für Zeitbasen, deren Teile klein sind. Für alles, was aus dem Demuxer kommt, stellt die
@@ -236,12 +382,30 @@ Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxe
    bei leerem Ring ist nicht gemessen (`takt/takt-ipc-latenz-bei-leerem-ring-messen`; mit dem Decoder im
    Hilfsprozess wird die Zahl gebraucht).
 6. **Seitendaten der Pakete** (neue Codec-Konfiguration mitten im Strom, dynamische HDR-Metadaten, zu
-   verwerfende Samples) überträgt das Protokoll noch nicht; `takt-decode` wird zeigen, was es braucht
-   (`takt/takt-demux-seitendaten-der-pakete`).
+   verwerfende Samples) überträgt das Protokoll noch nicht (`takt/takt-demux-seitendaten-der-pakete`). Der
+   Software-Decoder kam für die Testclips und für H.264, HEVC und AV1 aus MP4 und Matroska ohne sie aus: die
+   Konfiguration steht in der Extradata des Streams bzw. im Bitstrom. Was fehlt, sind Dateien, die mitten im Strom
+   die Konfiguration nur über Seitendaten wechseln, und HDR10+/Dolby-Vision-Metadaten für `takt-gpu`.
 7. **Die Bindings sind an eine FFmpeg-Hauptversion gebunden** (9.0); Build und Hilfsprozess verweigern eine
    andere. Ein Versionssprung ist Handarbeit nach `crates/takt-demux/layout/README.md`.
 8. **Nur eigene Testclips**: der Vergleich mit `ffprobe` läuft über Clips aus `scripts/`, nicht über echte
-   Dateien mit vielen Spuren, Anhängen und alten Muxern (`takt/takt-demux-echte-dateien-gegen-ffprobe`).
+   Dateien mit vielen Spuren, Anhängen und alten Muxern (`takt/takt-demux-echte-dateien-gegen-ffprobe`). Dasselbe
+   gilt für den Decoder: bitgleich zu `ffmpeg` und PSNR gegen libmpv sind an fünf erzeugten Clips belegt, nicht an
+   Filmen (Interlacing, wechselnde Auflösung, kaputte Streams aus der Praxis).
+9. **Die eigene Pipeline spielt nur das Bild.** Kein Ton (die Uhr läuft auf der stummen Tonausgabe des Players),
+   keine Untertitel, keine Spurwahl; das Fenster sagt es. Ton ist `takt-audio` plus ein Audio-Decoder im
+   Hilfsprozess, nicht Teil des Software-Pfads für Bilder.
+10. **Drei Kopien je Bild** (eine im Hilfsprozess, zwei im Hauptprozess), bei 4K60 10 bit rund ein halber Kern im
+    Hauptprozess; eine davon ist einzusparen (siehe Performance, `takt/takt-decode-eine-kopie-je-bild-sparen`).
+11. **Der Pumpen-Thread läuft mit normaler Priorität.** Die Vorgabe aus Phase 0 (der Decoder-Thread übernimmt die
+    Echtzeitpriorität des Füll-Threads) ist nicht umgesetzt: `takt-decode` bindet `audio_thread_priority` nicht
+    ein, und unter Nebenlast ist der Pfad nicht gemessen.
+12. **Formate**: 4:2:0 in 8 und 10 bit und 4:4:4 in 8 bit. 4:2:2, 12 bit und Alpha meldet der Hilfsprozess als
+    Fehler; VP9 steht nicht auf der Liste der Decoder (eine Zeile und eine Entscheidung, wie bei den Containern).
+13. **Eine Installation bringt die Hilfsprogramme nicht mit** (`scripts/build-install.ps1`, das Rolling-Zip): die
+    eigene Pipeline spielt aus dem Checkout. Das Zip ist ohnehin ohne FFmpeg gebaut.
+14. **Der Vergleich mit libmpv läuft nur unter Windows** (Job mit gepinntem libmpv und gepinnter FFmpeg), siehe
+    Bildgleichheit.
 
 ---
 
@@ -263,6 +427,12 @@ Nach `989efe6` haben sich Parser nicht mehr geändert, nur der Umgang des Demuxe
 | Zeitstempel reisen als Ticks, die Zeitbasis einmal je Stream; Brüche sind auf 31 Bit je Teil begrenzt | Exakt wie im Container (nie `f64`), und in diesem Bereich rechnet `Timestamp` ohne Überlauf (Fuzz-Fund) | ja |
 | Ein Sprung trägt eine Seriennummer; Pakete von davor verwirft die Leseseite | Keine Seite muss die andere anhalten, um den Ring zu leeren | ja |
 | Limits des Demuxers: Ring 16 MiB, Paket bis 8 MiB, Speicher 2 GiB, Herzschlag 5 s, Öffnen 30 s | Reicht für 4K-Intra-Frames; ein größeres Paket wird gemeldet und ausgelassen, statt den Strom zu beenden | ja, Felder von `takt_demux::Options` |
+| 2026-11-17: Pakete gehen über die Steuer-Pipe zum Decoder, nur die Bilder über den Ring; ein Fenster von 8 Paketen begrenzt, was unterwegs ist | Der Ring von `takt-ipc` hat eine Richtung; Pakete sind klein gegen Bilder (4K60: unter 10 MiB/s gegen 1,4 GiB/s). Der Hilfsprozess meldet in jedem Record, wie viele Pakete er genommen hat; ist sein Ring voll, nimmt er keine, und der Stau reicht ohne eigenes Signal bis zum Demuxer | ja: ein zweiter Ring in `takt-ipc`, wenn die Pipe misst, dass sie stört |
+| 2026-11-17: dav1d über den Decoder `libdav1d` von libavcodec, nicht über die API von dav1d | Die LGPL-Builds, gegen die der Hilfsprozess ohnehin linkt, bringen dav1d mit; ein zweites handgeschriebenes Binding und eine zweite Bibliothek zum Laden lieferten dieselben Bilder. libavcodecs eigener AV1-Decoder braucht Hardware und steht nicht auf der Liste | ja |
+| 2026-11-17: der Pool hat eine feste Größe je Format; wechselt der Strom Größe, Format oder Farbe, entsteht ein neuer Pool | `FramePool` hat eine Geometrie. „Kein Nachallozieren“ gilt für die Erschöpfung (der Verbraucher kommt nicht nach), nicht für einen Strom, der andere Bilder liefert | ja |
+| 2026-11-17: das `SoftwareBackend` positioniert in beiden Modi frame-genau | Die Uhr des Aufrufers steht am Ziel, nicht am Keyframe; Bilder vor dem Ziel werden gezählt und nicht kopiert. Preis: bei langen GOPs dekodiert ein Sprung bis zu einer GOP | ja, wenn ein Modus „zum Keyframe“ mit eigener Uhr gebraucht wird |
+| 2026-11-17: nach dem Umschalten der Pipeline geht die Datei frame-genau weiter | Ein Sprung zum Keyframe davor würde eine lange GOP um Sekunden zurückwerfen (gemessen am Testclip mit Keyframes alle 4 s) | ja |
+| 2026-11-17: die Bildgleichheit wird an angehaltenem libmpv mit exakten Sprüngen gemessen, nicht im Lauf | Im Lauf stempelt das `MpvBackend` mit der Position beim Rendern; unter Last ist das die Zeit eines Nachbarn, und ein Test, der davon abhängt, ist ein Lasttest | ja |
 | `takt-gpu` bleibt auf wgpu; fremde Texturen kommen über wgpu-hal-Interop herein, nicht über `ash` direkt (2026-11-17, Empfehlung des Zero-Copy-Spikes) | Auf Windows gemessen: Import ohne CPU-Kopie gelingt mit dem gelockten wgpu 27.0.1, NV12 und P010, ohne Fork. Für Linux nach Quelltext von wgpu-hal 27.0.4 erwartbar (`vulkan::Device::texture_from_raw`), dort mit eigenem `ash`-Code für den DMA-BUF-Import auf dem Gerät von wgpu; nicht gemessen | Ja: zeigt der Linux-Prototyp eine Sackgasse (Layout importierter Bilder, Vulkan-Video-Queues), gilt „Neu bewerten“ aus der Technologie-Tabelle des KONZEPTs |
 | Windows: D3D11VA mit geteilter Textur (`OpenSharedHandle`, eine GPU-Kopie) als erster Hardware-Weg, D3D12VA direkt (keine Kopie) als spätere Optimierung (2026-11-17, Empfehlung des Spikes) | Gleiche CPU-Last wie der direkte Weg, aber Decoder und Renderer teilen keinen Zustand an Referenzbildern, und FFmpegs D3D11VA spielt Material, an dem sein D3D12VA hier scheitert | Ja, hinter der Schnittstelle von `takt-decode` |
 | `GpuFrame` trägt eine `wgpu::Texture` (NV12/P010, zwei Ebenen-Views) plus sichtbare Größe, Bereitschaftssignal und Rückgabe-Guard; der CPU-Puffer bleibt die zweite Variante (2026-11-17, Vorschlag des Spikes für `takt-gpu`) | Beide Wege enden im selben Shader und Bind-Group-Layout; das wgpu-Gerät entsteht vor dem Decoder und braucht `TEXTURE_FORMAT_NV12` und `TEXTURE_FORMAT_P010` | Ja, bis `takt-gpu` die Schnittstelle festschreibt |

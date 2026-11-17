@@ -1,9 +1,15 @@
 # Programs takt starts
 
-**`takt-player`: none.** It plays through libmpv inside its own process (`apps/takt-player/src/mpv`),
-draws with the GPU in its own window and starts no program: the code has no
-`std::process::Command`, `CreateProcess` or `ShellExecute`. **A process started by the player is a
-bug**, until the own pipeline is wired in (below). Checked against a measurement with `app-proc-watch`.
+**`takt-player` with libmpv: none.** It plays through libmpv inside its own process
+(`apps/takt-player/src/mpv`), draws with the GPU in its own window and starts no program: the code
+of the player has no `std::process::Command`, `CreateProcess` or `ShellExecute`. Checked against a
+measurement with `app-proc-watch`.
+
+**`takt-player` with the own pipeline: two per file.** When files play through the own pipeline
+(`F6` in the window, or `TAKT_PIPELINE=own` at start; the default is libmpv), the player starts
+`takt-demux-helper` and `takt-decode-helper` for the file that plays, through the one place
+described below, and ends both with the file. It looks for them next to `takt-player`
+(`TAKT_HELPER_DIR` names another directory). **Any other process started by the player is a bug.**
 
 The release build is a window program (GUI subsystem): a double click and the Start menu link
 open no console window. Started from a terminal it attaches to the terminal's console
@@ -29,12 +35,17 @@ No console window opens for a helper (`CREATE_NO_WINDOW`).
 | Program | Started by | What it does | Limits beyond the defaults |
 |---|---|---|---|
 | `takt-demux-helper` | `takt_demux::Demuxer`, one per open file | Parses one container file with libavformat (FFmpeg 9.0, LGPL, dynamically linked) and writes its packets into the ring. It gets the open file as a handle and no path, may use a fixed list of demuxers (Matroska, WebM, the MP4 family) and opens nothing else. | 2 GiB of memory, packets up to 8 MiB, a ring of 16 MiB, 30 s to open a file, 512 MiB of reads without a packet |
+| `takt-decode-helper` | `takt_decode::Decoder`, one per video stream that is decoded in software | Decodes H.264 and HEVC with libavcodec and AV1 with dav1d (libavcodec's decoder `libdav1d`; FFmpeg 9.0, LGPL, dynamically linked) and writes the pictures into the ring. It gets no file and no handle but its pipes and the ring: the compressed packets come from the parent over the control pipe, at most a fixed number at a time. It decodes the codecs of a fixed list and nothing else. | 3 GiB of memory, packets up to 8 MiB, a ring for three pictures of the stream's size (16 MiB to 1 GiB), 10 s to open the decoder |
 | `takt-ipc-probe` | the tests of `takt-ipc` only | A helper that hangs, floods, lies or dies on demand. Not part of any product. | set by each test |
 
-`takt-demux-helper` is not started by `takt-player` yet: the demuxer is a library until the own
-pipeline (`takt-decode`, `takt-gpu`) plays through it. The helper is not confined by the operating
-system beyond the rules above (no restricted token or AppContainer under Windows, no seccomp or
-Landlock under Linux): the open point of `docs/reviews/phase-1.md`.
+Neither helper is confined by the operating system beyond the rules above (no restricted token or
+AppContainer under Windows, no seccomp or Landlock under Linux): the open point of
+`docs/reviews/phase-1.md`. The decode helper needs even less than the demux helper for that step:
+it opens nothing at all.
 
-`takt-demux-helper --about` prints the FFmpeg it runs with. Started by hand without that argument it
-says that it is started by Takt and exits with code 2.
+An install does not carry the helpers yet (`scripts/build-install.ps1`, the rolling zip): the own
+pipeline plays from a checkout, where cargo puts all three programs into one directory.
+
+`takt-demux-helper --about` and `takt-decode-helper --about` print the FFmpeg they run with (the
+decode helper also which decoder it has for each codec). Started by hand without that argument a
+helper says that it is started by Takt and exits with code 2.
