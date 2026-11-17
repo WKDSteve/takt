@@ -180,19 +180,55 @@ def x11(app):
     ]  # fmt: skip
     keys = {"Space": 0x20, "Escape": 0xFF1B}
 
+    xlib.XInternAtom.restype = c_ulong
+    xlib.XInternAtom.argtypes = [c_void_p, c_char_p, c_int]
+    xlib.XGetWindowProperty.argtypes = [
+        c_void_p, c_ulong, c_ulong, c_long, c_long, c_int, c_ulong, POINTER(c_ulong), POINTER(c_int),
+        POINTER(c_ulong), POINTER(c_ulong), POINTER(POINTER(c_ulong)),
+    ]  # fmt: skip
+    handler_type = ctypes.CFUNCTYPE(c_int, c_void_p, c_void_p)
+    xlib.XSetErrorHandler.argtypes = [handler_type]
+    xlib.XSetErrorHandler.restype = c_void_p
+
     display = xlib.XOpenDisplay(None)
     sender = xcb.xcb_connect(None, None)
     if not display or not sender:
         print("check-window-keys: no X display (DISPLAY)", file=sys.stderr)
         return 2
 
+    # The handler of Xlib ends the process on any error of a request (a window that went away, a picture of a
+    # window that is not all on the screen): the player would be left running. This one only notes it, and the
+    # call that failed says so by its result.
+    failed = []
+
+    @handler_type
+    def note(_display, _event):
+        failed.append(True)
+        return 0
+
+    xlib.XSetErrorHandler(note)
+    pid_atom = xlib.XInternAtom(display, b"_NET_WM_PID", 0)
+
+    def owner(window):
+        kind, form, count, rest, data = c_ulong(), c_int(), c_ulong(), c_ulong(), POINTER(c_ulong)()
+        # AnyPropertyType; Success is 0.
+        got = xlib.XGetWindowProperty(
+            display, window, pid_atom, 0, 1, 0, 0, byref(kind), byref(form), byref(count), byref(rest), byref(data),
+        )  # fmt: skip
+        if got != 0 or not data or count.value < 1:
+            return None
+        pid = data[0] & 0xFFFFFFFF
+        xlib.XFree(data)
+        return pid
+
     def find(window):
         name = c_char_p()
         if xlib.XFetchName(display, window, byref(name)) and name.value:
             attributes = Attributes()
             xlib.XGetWindowAttributes(display, window, byref(attributes))
-            # 2: IsViewable.
-            if WINDOW in name.value.decode("utf-8", "replace") and attributes.map_state == 2:
+            # 2: IsViewable. Only the window of the player started here: the keys must reach no other program.
+            titled = WINDOW in name.value.decode("utf-8", "replace")
+            if titled and attributes.map_state == 2 and owner(window) == app.pid:
                 return window
         root, parent, children, count = c_ulong(), c_ulong(), POINTER(c_ulong)(), c_uint()
         if xlib.XQueryTree(display, window, byref(root), byref(parent), byref(children), byref(count)):

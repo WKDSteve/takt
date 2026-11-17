@@ -1802,6 +1802,7 @@ mod tests {
 
         let clock = backend.clock();
         let mut stamps = Vec::new();
+        let mut pictures = Vec::new();
         let mut errors = Vec::new();
         passes(&mut backend, Duration::from_secs(2), |_, frame| {
             let meta = *frame.get().meta();
@@ -1818,17 +1819,27 @@ mod tests {
                 "a picture reached the frame"
             );
             stamps.push(meta.pts);
+            pictures.push(frame.get().plane(0).unwrap().to_vec());
             errors.push(clock.until_nanos(meta.pts));
             true
         });
         // The time never goes back. Two frames with one time are one frame
         // of the file drawn twice, which mpv does when it starts a file
-        // (measured: up to three pictures of the first frame): as many as
-        // the render thread was told to draw again, and no more.
+        // (measured: up to three pictures of the first frame): then they
+        // are the same picture, byte for byte, and there are no more of
+        // them than the render thread was told to draw again. Two pictures
+        // that differ under one time would be a wrong stamp.
         assert!(
             stamps.windows(2).all(|pair| pair[0] <= pair[1]),
             "{stamps:?}"
         );
+        for (i, pair) in stamps.windows(2).enumerate() {
+            assert!(
+                pair[0] != pair[1] || pictures[i] == pictures[i + 1],
+                "frames {i} and {} differ under one time: {stamps:?}",
+                i + 1
+            );
+        }
         let again = stamps.windows(2).filter(|pair| pair[0] == pair[1]).count();
         let redrawn = backend.shared.redrawn.load(Ordering::Relaxed);
         assert!(again as u64 <= redrawn, "{again} > {redrawn}: {stamps:?}");
@@ -2572,37 +2583,58 @@ mod tests {
     /// still there. It shows its frame and ends.
     #[test]
     fn a_file_of_a_single_frame_shows_it_and_ends() {
-        let mut backend = backend(Sources::Files);
         let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/one-frame.mkv");
-        let asked = Instant::now();
-        // Its length (40 ms) may be gone already when the description is
-        // read: the file can end while it opens.
-        backend.open(file).unwrap();
-        let clock = backend.clock();
-        let mut frames = 0;
-        passes(&mut backend, Duration::from_secs(4), |_, _| {
-            frames += 1;
-            true
-        });
-        assert!(backend.is_eof(), "not ended after {:?}", asked.elapsed());
-        assert!(
-            asked.elapsed() < Duration::from_secs(2),
-            "ended only after {:?}",
-            asked.elapsed()
-        );
-        // Its picture was there to be shown, also when the end came first.
-        if frames == 0 {
-            frames += usize::from(backend.next_frame(clock.as_ref()).unwrap().is_some());
+        // On a machine so busy that the 40 ms of the file are over before
+        // the render thread has drawn it, there is no picture: the frame is
+        // gone with the file (the thread learns the size of a picture only
+        // after it, and a file that ended has none). That may happen to a
+        // run, not to three in a row: a backend that never shows the
+        // picture stays red.
+        let mut shown = 0;
+        for _ in 0..3 {
+            let mut backend = backend(Sources::Files);
+            let asked = Instant::now();
+            // Its length may be gone already when the description is read:
+            // the file can end while it opens.
+            backend.open(file).unwrap();
+            let clock = backend.clock();
+            let mut pictures = Vec::new();
+            passes(&mut backend, Duration::from_secs(4), |_, frame| {
+                pictures.push(frame.get().plane(0).unwrap().to_vec());
+                true
+            });
+            assert!(backend.is_eof(), "not ended after {:?}", asked.elapsed());
+            assert!(
+                asked.elapsed() < Duration::from_secs(2),
+                "ended only after {:?}",
+                asked.elapsed()
+            );
+            // Its picture was there to be shown, also when the end came
+            // first.
+            if pictures.is_empty()
+                && let Some(frame) = backend.next_frame(clock.as_ref()).unwrap()
+            {
+                pictures.push(frame.get().plane(0).unwrap().to_vec());
+            }
+            // One picture. mpv may have it drawn again when it starts the
+            // file: then it comes once more, the same bytes, and no more
+            // often than the render thread was told.
+            let redrawn = backend.shared.redrawn.load(Ordering::Relaxed);
+            assert!(
+                pictures.len() as u64 <= 1 + redrawn,
+                "{} pictures, {redrawn} drawn again",
+                pictures.len()
+            );
+            assert!(pictures.windows(2).all(|pair| pair[0] == pair[1]));
+            // A picture that was rendered is never lost.
+            let rendered = backend.stats().decoded;
+            assert!(!pictures.is_empty() || rendered == 0, "{rendered} lost");
+            if !pictures.is_empty() {
+                shown += 1;
+                break;
+            }
         }
-        // One picture, and once more for every time mpv had it drawn again
-        // (it does that when it starts a file).
-        let rendered = backend.stats().decoded;
-        let redrawn = backend.shared.redrawn.load(Ordering::Relaxed);
-        assert!(frames as u64 <= 1 + redrawn, "{frames} of {rendered}");
-        // A picture that was rendered is never lost. On a machine so busy
-        // that the 40 ms of the file are over before the render thread
-        // wakes, mpv lets the frame go unrendered: then there is none.
-        assert!(frames >= 1 || rendered == 0, "{frames} of {rendered}");
+        assert_eq!(shown, 1, "its one picture, in one of three runs");
     }
 
     #[test]
