@@ -54,11 +54,21 @@ jobs:
         if: always()
         shell: bash
         run: python3 scripts/ci-skip-summary.py test.log --title "Tests ${{ matrix.os }}"
-      # The shader against its CPU reference. The runners have no GPU; on Windows the software adapter of DX12 (WARP)
-      # renders it. Linux and macOS keep the test ignored.
-      - name: Shader gegen die CPU-Referenz (Windows, WARP)
+      # takt-gpu on an adapter: the shader against the reference pictures, four layers, and the import of a texture
+      # another device wrote (D3D11, shared) against the upload of its planes. The runners have no GPU; on Windows the
+      # software adapter of DX12 (WARP) renders it. Linux and macOS keep these tests ignored.
+      - name: takt-gpu auf einem Adapter (Windows, WARP)
         if: runner.os == 'Windows'
-        run: cargo test -p takt-player gpu -- --ignored --nocapture
+        shell: bash
+        run: |
+          # Two test threads, named: with one, the harness prints the name of a test before its output and the
+          # lines below would not match.
+          cargo test -p takt-gpu gpu -- --ignored --nocapture --test-threads=2 2>&1 | tee gpu.log
+          # The tests must have rendered, not said SKIP.
+          grep -q "test gpu_the_shader_draws_the_reference_pictures ... ok" gpu.log
+          grep -q "test gpu_four_layers_are_blended_bottom_to_top_in_their_rectangles ... ok" gpu.log
+          grep -q "test import::gpu_an_imported_texture_draws_the_bytes_the_upload_of_its_planes_draws ... ok" gpu.log
+          grep -q "test import::gpu_a_frame_is_given_back_only_after_the_gpu_is_done_with_it ... ok" gpu.log
         env:
           TAKT_GPU_TESTS: "1"
           TAKT_GPU_ADAPTER: fallback

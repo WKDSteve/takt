@@ -106,6 +106,10 @@ struct PlayerApp {
     /// The request of the render thread for real-time priority: the handle
     /// to give it back with, or why there is none.
     priority: Result<audio_thread_priority::RtPriorityHandle, String>,
+    /// `--imported`: the pictures go to the GPU through a shared texture, or
+    /// why they do not.
+    #[cfg(windows)]
+    importer: Option<Result<render::import::Importer, String>>,
 }
 
 impl PlayerApp {
@@ -113,10 +117,22 @@ impl PlayerApp {
         cc: &eframe::CreationContext<'_>,
         seconds: Option<u64>,
         overlay: bool,
+        imported: bool,
         files: &[PathBuf],
     ) -> Self {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             render::install(state);
+        }
+        #[cfg(windows)]
+        let importer = imported.then(|| {
+            cc.wgpu_render_state
+                .as_ref()
+                .ok_or_else(|| "no wgpu device".to_owned())
+                .and_then(render::import::Importer::new)
+        });
+        #[cfg(not(windows))]
+        if imported {
+            eprintln!("takt-player: --imported is Windows only, the pictures are uploaded");
         }
         crate::theme::install(&cc.egui_ctx);
         let session = Session::test(Arc::new(SystemMonotonic::new()));
@@ -148,6 +164,8 @@ impl PlayerApp {
             drop_problems: Vec::new(),
             uploads: None,
             priority: raise_priority(std::env::consts::OS),
+            #[cfg(windows)]
+            importer,
         };
         app.take_paths(files, false);
         app
@@ -210,7 +228,14 @@ impl PlayerApp {
         if let Some(frame) = frame {
             // The frame itself goes to the renderer; it returns to the pool
             // of its source when the next picture has replaced it.
-            match Picture::from_frame(frame) {
+            #[cfg(windows)]
+            let picture = match &mut self.importer {
+                Some(Ok(importer)) => importer.frame(frame).map(Picture::from_gpu),
+                _ => Picture::from_frame(frame),
+            };
+            #[cfg(not(windows))]
+            let picture = Picture::from_frame(frame);
+            match picture {
                 Ok(image) => {
                     let generation = self.shown.as_ref().map_or(0, |s| s.generation + 1);
                     self.shown = Some(Shown {
@@ -625,11 +650,18 @@ impl PlayerApp {
             .is_none_or(|(at, _, _)| at.elapsed() >= OVERLAY_INTERVAL);
         if stale {
             let snapshot = self.snapshot();
-            self.shown_diagnostics = Some((
-                Instant::now(),
-                snapshot.lines(),
-                snapshot.scheduler.histogram,
-            ));
+            #[cfg_attr(
+                not(windows),
+                expect(unused_mut, reason = "only --imported adds a line")
+            )]
+            let mut lines = snapshot.lines();
+            #[cfg(windows)]
+            match &self.importer {
+                Some(Ok(importer)) => lines.push(("picture path", importer.status())),
+                Some(Err(why)) => lines.push(("picture path", format!("upload ({why})"))),
+                None => {}
+            }
+            self.shown_diagnostics = Some((Instant::now(), lines, snapshot.scheduler.histogram));
         }
         let Some((_, latest, classes)) = &self.shown_diagnostics else {
             return;
@@ -662,6 +694,12 @@ impl PlayerApp {
                     histogram(ui, classes);
                     if let Some(saved) = &self.saved {
                         ui.weak(saved);
+                    }
+                    #[cfg(windows)]
+                    if let Some(Ok(importer)) = &self.importer
+                        && let Some(verdict) = importer.verdict()
+                    {
+                        ui.label(verdict);
                     }
                 });
             });
@@ -953,8 +991,13 @@ fn priority_label<T>(priority: &Result<T, String>) -> String {
 /// # Errors
 ///
 /// When no window or no wgpu device could be created.
-pub fn run(seconds: Option<u64>, overlay: bool, files: Vec<PathBuf>) -> eframe::Result {
-    let options = eframe::NativeOptions {
+pub fn run(
+    seconds: Option<u64>,
+    overlay: bool,
+    imported: bool,
+    files: Vec<PathBuf>,
+) -> eframe::Result {
+    let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_title("Takt")
@@ -962,10 +1005,28 @@ pub fn run(seconds: Option<u64>, overlay: bool, files: Vec<PathBuf>) -> eframe::
             .with_min_inner_size([320.0, 200.0]),
         ..Default::default()
     };
+    // The device of the window with the features takt-gpu uses where the adapter has them (planar decoder
+    // textures, 16-bit planes for 10-bit frames); everything else as eframe sets it up.
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        let base = Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor = Arc::new(move |adapter| {
+            let mut descriptor = base(adapter);
+            descriptor.required_features |= takt_gpu::wanted_features(adapter.features());
+            descriptor
+        });
+        // The import of a foreign texture is per backend, and the textures of Direct3D are shared with DX12.
+        if imported && cfg!(windows) {
+            setup.instance_descriptor.backends = takt_gpu::preferred_backends();
+        }
+    }
     eframe::run_native(
         "Takt",
         options,
-        Box::new(move |cc| Ok(Box::new(PlayerApp::new(cc, seconds, overlay, &files)))),
+        Box::new(move |cc| {
+            Ok(Box::new(PlayerApp::new(
+                cc, seconds, overlay, imported, &files,
+            )))
+        }),
     )
 }
 

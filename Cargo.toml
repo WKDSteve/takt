@@ -8,6 +8,7 @@ members = [
     "crates/takt-backend",
     "crates/takt-ipc",
     "crates/takt-demux",
+    "crates/takt-gpu",
     "apps/takt-player",
 ]
 # A workspace of its own (nightly, cargo-fuzz): fuzz/README.md.

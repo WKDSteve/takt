@@ -114,7 +114,10 @@ fn main() -> ExitCode {
         .and_then(|n| n.parse().ok());
     // `--overlay`: start with the diagnostic overlay shown (F3 toggles it).
     let overlay = args.iter().any(|arg| arg == "--overlay");
-    match ui::run(seconds, overlay, files(&args[1..])) {
+    // `--imported`: the pictures reach the GPU as those of a hardware decoder will, through a texture
+    // another device wrote (Windows; a check of that path, the overlay says how it went).
+    let imported = args.iter().any(|arg| arg == "--imported");
+    match ui::run(seconds, overlay, imported, files(&args[1..])) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let message = format!("no window: {e} (--headless runs without one)");

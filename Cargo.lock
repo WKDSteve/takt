@@ -3012,6 +3012,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "takt-gpu"
+version = "0.0.1"
+dependencies = [
+ "pollster",
+ "takt-core",
+ "wgpu",
+ "windows 0.58.0",
+ "winit",
+]
+
+[[package]]
 name = "takt-ipc"
 version = "0.0.1"
 dependencies = [
@@ -3030,12 +3041,12 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
- "pollster",
  "sysinfo",
  "takt-audio",
  "takt-backend",
  "takt-clock",
  "takt-core",
+ "takt-gpu",
  "winit",
 ]
 

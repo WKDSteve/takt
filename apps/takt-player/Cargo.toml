@@ -15,6 +15,8 @@ takt-core.workspace = true
 takt-clock.workspace = true
 takt-backend = { path = "../../crates/takt-backend", version = "0.0.1" }
 takt-audio = { workspace = true, features = ["cpal"] }
+# The picture on the GPU: the layer the video surface is drawn with (src/render).
+takt-gpu = { path = "../../crates/takt-gpu", version = "0.0.1" }
 # Only for its feature: cpal asks for real-time priority on its audio thread. Pulls audio_thread_priority
 # (MPL-2.0), allowed here in zone 2 and never in takt-audio (zone 1). `realtime-dbus` lets it ask rtkit over D-Bus on
 # Linux, so no rtprio limit is needed (decided 2026-11-15); that pulls dbus and libdbus-sys (MIT OR Apache-2.0) and
@@ -44,10 +46,6 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # pins the commit. Zone 2 only: the zone 1 crates never see it.
 # The version is the one the kit's crates carry (the tag is the version); named so cargo deny sees no wildcard.
 appkit-uninstall = { git = "https://github.com/WKDSteve/appkit", tag = "v0.55.1", version = "0.0.0" }
-
-[dev-dependencies]
-# Blocks on the adapter and device of the GPU test.
-pollster = "0.4"
 
 [lints]
 workspace = true

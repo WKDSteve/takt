@@ -3,37 +3,23 @@
 //! of `egui-wgpu` into the largest rectangle of its aspect that fits, on
 //! black.
 //!
-//! There are two texture paths, chosen by the pixel format of the frame
-//! ([`Picture::from_frame`]): NV12 through [`gpu::Nv12Renderer`] (the test
-//! picture, later a decoder) and `rgb0` through [`gpu_rgb::Rgb0Renderer`]
-//! (the finished picture of the `MpvBackend`). A frame is never converted
-//! from one to the other on the CPU, and it is not copied either: the paint
-//! callback holds the pooled frame itself ([`Picture`]) and uploads from its
-//! planes.
+//! The drawing itself is `takt-gpu`: a frame is a [`GpuFrame`], and one layer
+//! ([`takt_gpu::LayerSlot`]) converts it with the shader of that crate,
+//! whatever its pixel format (NV12 of the test picture, `rgb0` of the
+//! `MpvBackend`, later the frames of a decoder). A frame is never converted
+//! on the CPU, and it is not copied either: the paint callback holds the
+//! frame itself ([`Picture`]) and the layer uploads from its planes.
 
-// The CPU reference of the shader, used by its tests.
-#[cfg(test)]
-pub mod colour;
-pub mod gpu;
-pub mod gpu_rgb;
+#[cfg(windows)]
+pub mod import;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use egui_wgpu::wgpu;
-use takt_audio::DurationSnapshot;
-
-use gpu::{LayoutError, Nv12Renderer, Nv12View};
-use gpu_rgb::{Rgb0Renderer, Rgb0View};
-use takt_core::{PixelFormat, PooledFrame};
-
-/// The texture path of a picture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Path {
-    /// Two planes, 4:2:0, converted by the shader.
-    Nv12,
-    /// Finished R'G'B' with a padding byte, shown as it is.
-    Rgb0,
-}
+use takt_audio::{DurationHistogram, DurationSnapshot};
+use takt_core::PooledFrame;
+use takt_gpu::{GpuFrame, LayerRenderer, LayerSlot, LayoutError};
 
 /// A frame on its way to a texture: the pooled frame itself, not a copy.
 ///
@@ -43,8 +29,7 @@ enum Path {
 /// one shown and the one it fills next.
 #[derive(Debug)]
 pub struct Picture {
-    frame: PooledFrame,
-    path: Path,
+    frame: Arc<GpuFrame>,
 }
 
 impl Picture {
@@ -56,52 +41,61 @@ impl Picture {
     /// for a format without a texture path (it is not converted to one that
     /// has). The frame goes back to its pool then.
     pub fn from_frame(frame: PooledFrame) -> Result<Self, LayoutError> {
-        // The layout is checked once, here; the upload reads the same planes.
-        let path = match frame.get().meta().format {
-            PixelFormat::Nv12 => Nv12View::from_frame(frame.get()).map(|_| Path::Nv12),
-            PixelFormat::Rgb0 => Rgb0View::from_frame(frame.get()).map(|_| Path::Rgb0),
-            _ => Err(LayoutError::Format),
-        }?;
-        Ok(Self { frame, path })
+        Ok(Self {
+            frame: Arc::new(GpuFrame::from_frame(frame)?),
+        })
+    }
+
+    /// A picture that is a frame for the GPU already (`--imported`).
+    #[cfg(windows)]
+    #[must_use]
+    pub fn from_gpu(frame: Arc<GpuFrame>) -> Self {
+        Self { frame }
     }
 
     /// Width and height in pixels.
     #[must_use]
     pub fn size(&self) -> (u32, u32) {
-        let meta = self.frame.get().meta();
-        (meta.width, meta.height)
+        self.frame.size()
+    }
+
+    /// Whether the picture is finished R'G'B' (the `MpvBackend`), not Y'CbCr.
+    fn is_rgb(&self) -> bool {
+        self.frame.format().is_rgb()
     }
 }
 
-/// What lives in the callback resources of egui-wgpu: a renderer per texture
-/// path and the number of the picture uploaded last.
+/// What lives in the callback resources of egui-wgpu: the layer the video is
+/// drawn with, the number of the picture shown last, and the upload times of
+/// the two kinds of picture.
 struct VideoResources {
-    nv12: Nv12Renderer,
-    rgb0: Rgb0Renderer,
+    slot: LayerSlot,
     generation: Option<u64>,
-    /// Whether the last upload went the `rgb0` path.
-    last_rgb0: bool,
+    uploads_ycc: DurationHistogram,
+    uploads_rgb: DurationHistogram,
+    /// Whether the last upload was an R'G'B' picture.
+    last_rgb: bool,
 }
 
-/// Puts the renderers into the resources of egui-wgpu; once, at start.
+/// Puts the layer into the resources of egui-wgpu; once, at start.
 pub fn install(state: &egui_wgpu::RenderState) {
-    let filter = wgpu::FilterMode::Linear;
-    let nv12 = Nv12Renderer::new(&state.device, state.target_format, filter);
-    let rgb0 = Rgb0Renderer::new(&state.device, state.target_format, filter);
+    let renderer = LayerRenderer::new(&state.device, state.target_format, wgpu::FilterMode::Linear);
     state
         .renderer
         .write()
         .callback_resources
         .insert(VideoResources {
-            nv12,
-            rgb0,
+            slot: renderer.slot(&state.device),
             generation: None,
-            last_rgb0: false,
+            uploads_ycc: DurationHistogram::default(),
+            uploads_rgb: DurationHistogram::default(),
+            last_rgb: false,
         });
 }
 
-/// The upload times of the texture path used last, `None` before
-/// [`install`].
+/// The upload times of the kind of picture shown last (CPU side: the copy
+/// into the staging memory of wgpu, not the transfer on the GPU); `None`
+/// before [`install`].
 #[must_use]
 pub fn uploads(state: &egui_wgpu::RenderState) -> Option<DurationSnapshot> {
     state
@@ -110,10 +104,10 @@ pub fn uploads(state: &egui_wgpu::RenderState) -> Option<DurationSnapshot> {
         .callback_resources
         .get::<VideoResources>()
         .map(|r| {
-            if r.last_rgb0 {
-                r.rgb0.uploads()
+            if r.last_rgb {
+                r.uploads_rgb.snapshot()
             } else {
-                r.nv12.uploads()
+                r.uploads_ycc.snapshot()
             }
         })
 }
@@ -136,29 +130,31 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if let Some(r) = resources.get_mut::<VideoResources>()
-            && r.generation != Some(self.0.generation)
-        {
-            let picture = self.0.image.as_ref();
-            // The views were built once in `Picture::from_frame`; a frame
-            // does not change after that, so they are there again.
-            match picture.path {
-                Path::Nv12 => {
-                    if let Ok(view) = Nv12View::from_frame(picture.frame.get()) {
-                        r.nv12.upload(device, queue, &view);
+        if let Some(r) = resources.get_mut::<VideoResources>() {
+            // The encoder of egui is submitted together with the pass that
+            // draws the layer: frames the layer no longer shows start their
+            // way back here.
+            r.slot.before_pass(encoder, queue);
+            if r.generation != Some(self.0.generation) {
+                let picture = self.0.image.as_ref();
+                let start = Instant::now();
+                // The layout was checked in `Picture::from_frame`; what can
+                // still fail is a format the device has no texture for, and
+                // the layer keeps the picture before then.
+                if r.slot.show(device, queue, &picture.frame).is_ok() {
+                    let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    r.last_rgb = picture.is_rgb();
+                    if r.last_rgb {
+                        r.uploads_rgb.record(nanos);
+                    } else {
+                        r.uploads_ycc.record(nanos);
                     }
                 }
-                Path::Rgb0 => {
-                    if let Ok(view) = Rgb0View::from_frame(picture.frame.get()) {
-                        r.rgb0.upload(device, queue, &view);
-                    }
-                }
+                r.generation = Some(self.0.generation);
             }
-            r.last_rgb0 = picture.path == Path::Rgb0;
-            r.generation = Some(self.0.generation);
         }
         Vec::new()
     }
@@ -170,12 +166,9 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
         resources: &egui_wgpu::CallbackResources,
     ) {
         if let Some(r) = resources.get::<VideoResources>() {
-            // The renderer of the picture this callback carries: `prepare`
-            // uploaded it there.
-            match self.0.image.path {
-                Path::Nv12 => r.nv12.draw(pass),
-                Path::Rgb0 => r.rgb0.draw(pass),
-            }
+            // The layer fills the viewport, which egui-wgpu set to the rect
+            // of this callback.
+            r.slot.draw(pass);
         }
     }
 }
@@ -223,6 +216,7 @@ pub fn video_surface(ui: &mut egui::Ui, shown: Option<&Shown>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use takt_core::PixelFormat;
 
     fn pool(format: PixelFormat, capacity: usize) -> takt_core::FramePool {
         use takt_core::{ColorPrimaries, ColorRange, FrameMeta, Timestamp, TransferFunction};
@@ -246,20 +240,33 @@ mod tests {
             .unwrap()
     }
 
+    fn planes(picture: &Picture) -> &takt_core::VideoFrame {
+        match picture.frame.as_ref() {
+            GpuFrame::Cpu(frame) => frame.get(),
+            GpuFrame::Texture(_) => unreachable!("a frame from a pool is in system memory"),
+        }
+    }
+
     #[test]
     fn a_frame_goes_the_texture_path_of_its_format() {
         let nv12 = Picture::from_frame(frame(PixelFormat::Nv12)).unwrap();
-        assert_eq!(nv12.path, Path::Nv12);
+        assert!(!nv12.is_rgb());
         let rgb0 = Picture::from_frame(frame(PixelFormat::Rgb0)).unwrap();
-        assert_eq!(rgb0.path, Path::Rgb0);
+        assert!(rgb0.is_rgb());
         assert_eq!((nv12.size(), rgb0.size()), ((8, 4), (8, 4)));
-        // A format without a path is refused, not converted.
-        for format in [PixelFormat::Yuv420P, PixelFormat::Rgba8, PixelFormat::P010] {
-            assert_eq!(
-                Picture::from_frame(frame(format)).unwrap_err(),
-                LayoutError::Format
-            );
+        // What a software decoder hands out has a path as well.
+        for format in [
+            PixelFormat::Yuv420P,
+            PixelFormat::Yuv420P10,
+            PixelFormat::P010,
+        ] {
+            assert!(Picture::from_frame(frame(format)).is_ok(), "{format:?}");
         }
+        // A format without a path is refused, not converted.
+        assert_eq!(
+            Picture::from_frame(frame(PixelFormat::Rgba16F)).unwrap_err(),
+            LayoutError::Format
+        );
     }
 
     #[test]
@@ -276,17 +283,13 @@ mod tests {
             generation: 0,
         };
         let callback = shown.clone();
-        let view = Rgb0View::from_frame(shown.image.frame.get()).unwrap();
-        assert_eq!(view.size(), (8, 4));
+        assert_eq!(shown.image.size(), (8, 4));
         assert_eq!(
-            shown.image.frame.get().plane(0).unwrap().as_ptr(),
+            planes(&shown.image).plane(0).unwrap().as_ptr(),
             rows,
             "no copy: the rows of the pooled frame"
         );
-        assert_eq!(
-            &shown.image.frame.get().plane(0).unwrap()[..4],
-            &[9, 8, 7, 0]
-        );
+        assert_eq!(&planes(&shown.image).plane(0).unwrap()[..4], &[9, 8, 7, 0]);
 
         // The source fills its next frame while this one is shown: two out.
         let next = pool.acquire(stamp(40)).unwrap();
@@ -301,7 +304,7 @@ mod tests {
         assert_eq!(pool.in_flight(), 0);
 
         // A frame that is refused goes back as well.
-        let mut other = self::pool(PixelFormat::Rgba8, 1);
+        let mut other = self::pool(PixelFormat::Rgba16F, 1);
         assert!(Picture::from_frame(other.acquire(stamp(0)).unwrap()).is_err());
         assert_eq!(other.in_flight(), 0);
     }

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "takt-gpu"
+version = "0.0.1"
+description = "Takt: the picture on the GPU. Frames as textures, colour conversion, tone mapping, compositing"
+license = "GPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+takt-core.workspace = true
+# The wgpu of eframe 0.33 (egui-wgpu re-exports this very crate): a frame of this crate is drawn on the device of
+# the window. MIT OR Apache-2.0, already in the tree. Its default features are the backends (DX12, Vulkan, Metal,
+# GL) and WGSL, the set egui-wgpu turns on as well.
+wgpu = "27"
+
+[target.'cfg(windows)'.dependencies]
+# The import of a texture another device wrote (src/interop): `texture_from_raw` of wgpu-hal takes the
+# `ID3D12Resource` of the `windows` version wgpu-hal is built against, 0.58 for wgpu-hal 27. An update of wgpu
+# moves this version with it. MIT OR Apache-2.0, already in the tree through wgpu-hal; the features only name
+# modules of that crate.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[dev-dependencies]
+# Blocks on the adapter and device of the GPU tests and of the measuring example.
+pollster = "0.4"
+# The window of `composite-bench --window`: a swapchain with vsync, so the measurement also presents. The winit
+# of the player (Apache-2.0, already in the tree), with the features eframe turns on there.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita"] }
+
+[lints]
+workspace = true
