@@ -48,7 +48,8 @@ Ein Video-Frame, das zwei Millisekunden zu spät kommt, sieht niemand. Ein Audio
 | Thread | Wer erzeugt ihn | Klasse | Deadline |
 |---|---|---|---|
 | Audio-Callback | **das Betriebssystem** — WASAPI, CoreAudio, PipeWire | hart-realtime | Puffergröße / Abtastrate |
-| Demux | wir | soft | keine, nur Durchsatz |
+| Demux | wir, **in einem eigenen Prozess** (`takt-demux-helper`, einer je Datei, [PROCESSES.md](PROCESSES.md)): dort ein Haupt-Thread, der parst und in den Ring schreibt, und einer, der nur die Steuer-Pipe liest | soft | keine, nur Durchsatz; ein Herzschlag je Lesevorgang und Paket, sonst beendet ihn der Watchdog nach 5 s |
+| Hilfsprozess-Wächter (`takt-ipc-stdout`, `takt-ipc-stderr`, `takt-ipc-watchdog`) | wir, je Hilfsprozess drei im Hauptprozess | soft | keine; sie schlafen in einem Lesevorgang bzw. wachen alle 250 ms auf |
 | Decode-Pool | FFmpeg intern, ab Phase 1 teils wir | soft | Durchsatz |
 | GPU-Submission | wir | soft, framegebunden | Bildwiederholrate |
 | mpv-Render (`takt-mpv-render`, nur mit dem `MpvBackend` der Phase 0) | wir, je Backend einer | soft, framegebunden | die Frist von mpv: 200 ms je Bild |

@@ -230,6 +230,124 @@ jobs:
         shell: bash
         run: python scripts/ci-skip-summary.py test.log --title "libmpv (Windows)"
 
+  # takt-demux with a real FFmpeg: the only job that compiles, lints and runs the bindings to libavformat
+  # (crates/takt-demux/src/ffi.rs exists only with FFMPEG_DIR) and demuxes files; every other job builds the crate
+  # without FFmpeg, where the helper answers "built without FFmpeg". The archives are the LGPL shared builds of
+  # FFmpeg 9.0 from BtbN/FFmpeg-Builds (docs/BUILD.md), a monthly release their publisher keeps, taken only with
+  # the SHA-256 below. Should an archive be gone, the job says SKIP in a warning and in the summary and counts as
+  # no evidence (TST-16); then pin a newer one here and in docs/BUILD.md. A file with another hash fails the job.
+  ffmpeg:
+    name: takt-demux mit FFmpeg 9.0 (${{ matrix.os }}, Archiv gepinnt)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive: ffmpeg-n9.0.2-39-g7adfbe40dc-linux64-lgpl-shared-9.0.tar.xz
+            sha256: 5a58e2dffad4835ee3418939f2676d6898489f8e047299f5f62ee0da3f8dd5dc
+          - os: windows-latest
+            archive: ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-shared-9.0.zip
+            sha256: e907b01fa4783913151237e37df2a10fa97d99a1598a021bf59d4ae62ffed4c0
+    env:
+      FFMPEG_TAG: autobuild-2026-10-31-12-59
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-12
+        # The tests load a library that is not ours: the token of the run does not stay in the checkout.
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, resolved 2026-11-12
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2, resolved 2026-11-12
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4, resolved 2026-11-14
+        with:
+          path: ffmpeg-archive
+          key: ffmpeg-${{ matrix.sha256 }}
+      - name: Archiv holen und gegen den SHA-256 pruefen
+        id: archive
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          SHA256: ${{ matrix.sha256 }}
+        run: |
+          file=ffmpeg-archive
+          if [ ! -f "$file" ]; then
+            url="https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$ARCHIVE"
+            status=$(curl -sSL --retry 3 --retry-delay 5 -o "$file" -w '%{http_code}' "$url")
+            if [ "$status" = 404 ]; then
+              rm -f "$file"
+              why="$ARCHIVE is gone from its publisher (HTTP 404): nothing of takt-demux was built or tested with FFmpeg on ${{ matrix.os }}. Pin a newer archive in ci.yml and docs/BUILD.md."
+              echo "::warning title=SKIP takt-demux mit FFmpeg (${{ matrix.os }})::$why"
+              {
+                echo "### takt-demux mit FFmpeg (${{ matrix.os }}): SKIP"
+                echo
+                echo "$why"
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$status" != 200 ]; then
+              rm -f "$file"
+              echo "download failed with HTTP $status"
+              exit 1
+            fi
+          fi
+          if ! echo "$SHA256  $file" | sha256sum -c -; then
+            rm -f "$file"
+            echo "the archive does not have the pinned SHA-256: not used"
+            exit 1
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+      # The recipe of docs/BUILD.md: FFMPEG_DIR is the root with include/ and lib/, and the libraries must be found
+      # when the helper starts (PATH under Windows, LD_LIBRARY_PATH under Linux).
+      - name: Entpacken und FFMPEG_DIR setzen (Rezept aus BUILD.md)
+        if: steps.archive.outputs.available == 'true'
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          # Under Windows the path gets forward slashes (D:/a/_temp): bash and Rust both take that.
+          if [ "$RUNNER_OS" = Windows ]; then
+            dest="$(cygpath -m "$RUNNER_TEMP")/ffmpeg"
+          else
+            dest="$RUNNER_TEMP/ffmpeg"
+          fi
+          mkdir -p "$dest"
+          case "$ARCHIVE" in
+            *.zip) 7z x ffmpeg-archive "-o$dest" -y > /dev/null ;;
+            *) tar -xJf ffmpeg-archive -C "$dest" ;;
+          esac
+          root="$dest/${ARCHIVE%.zip}"
+          root="${root%.tar.xz}"
+          test -d "$root/include/libavformat" && test -d "$root/lib"
+          echo "FFMPEG_DIR=$root" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cygpath -w "$root/bin" >> "$GITHUB_PATH"
+          else
+            echo "$root/bin" >> "$GITHUB_PATH"
+            echo "LD_LIBRARY_PATH=$root/lib" >> "$GITHUB_ENV"
+          fi
+      - name: Clippy und Tests von takt-demux mit FFmpeg
+        if: steps.archive.outputs.available == 'true'
+        shell: bash
+        run: |
+          # The module ffi exists only with the cfg: no other job compiles, lints or tests it.
+          cargo clippy -p takt-demux --all-targets --all-features
+          cargo test -p takt-demux -- --nocapture 2>&1 | tee test.log
+          # The cfg must have come on: files were demuxed, not the stand-in that says SKIP.
+          grep -q "test with_ffmpeg::mkv_with_picture_sound_and_subtitles_matches_ffprobe ... ok" test.log
+          grep -q "test with_ffmpeg::mp4_with_h264_matches_ffprobe ... ok" test.log
+          grep -q "test with_ffmpeg::webm_with_vp9_matches_ffprobe ... ok" test.log
+          grep -q "test with_ffmpeg::a_seek_lands_on_the_keyframe_before_the_target_and_the_file_reads_on ... ok" test.log
+          grep -q "test with_ffmpeg::damaged_files_end_in_an_answer ... ok" test.log
+          grep -q "test with_ffmpeg::the_ffmpeg_of_the_helper_is_an_lgpl_build ... ok" test.log
+      - name: SKIPs in die Zusammenfassung
+        if: always() && steps.archive.outputs.available == 'true'
+        shell: bash
+        run: python scripts/ci-skip-summary.py test.log --title "takt-demux mit FFmpeg (${{ matrix.os }})"
+
   licenses:
     name: Lizenzen und Sicherheitshinweise
     runs-on: ubuntu-latest

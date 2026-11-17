@@ -17,9 +17,12 @@ python scripts/check-action-pins.py
 ```
 
 Dazu in der CI: jede Zone-1-Crate allein (`cargo build -p takt-core --locked`, ebenso
-`takt-clock`, `takt-audio`; Lizenzen mit `deny-zone1.toml`), die Mindestversion
+`takt-clock`, `takt-audio`, `takt-ipc`; Lizenzen mit `deny-zone1.toml`), die Mindestversion
 (`cargo check --workspace --all-features` mit Rust 1.90.0) und auf Windows der Shader-Test
 (`TAKT_GPU_TESTS=1 TAKT_GPU_ADAPTER=fallback cargo test -p takt-player gpu -- --ignored`).
+`takt-demux` mit echtem FFmpeg 9.0 läuft in einem eigenen Job (Ubuntu und Windows, Archiv gepinnt); lokal
+`FFMPEG_DIR` setzen, die Bibliotheken in `PATH` bzw. `LD_LIBRARY_PATH`, dann `cargo test -p takt-demux`
+(`docs/BUILD.md`). Die CI lintet mit dem neuesten stabilen Rust: ist das lokale älter, meldet Clippy dort mehr.
 Gerätetests nur auf Anfrage: `TAKT_DEVICE_TESTS=1 cargo test -p takt-audio --features cpal --test device -- --ignored`.
 
 - Der globale Hook prüft nach jedem Edit einer `.rs`-Datei `rustfmt --check`.
@@ -35,6 +38,9 @@ Gerätetests nur auf Anfrage: `TAKT_DEVICE_TESTS=1 cargo test -p takt-audio --fe
 - Der Audio-Thread spricht nur über wartefreie Strukturen (SPSC-Ring, Seqlock-Anker).
 - `unsafe` ist verboten (`unsafe_code = "deny"`), außer in benannten FFI-Modulen mit
   `#![allow(unsafe_code)]`; jeder Block mit `// SAFETY:`.
+- Bytes aus einem Hilfsprozess (Pipe und Ring, `takt-ipc`) sind fremde Daten: jede Länge, jeder Zähler, Index
+  und Zeitstempel wird gegen ein Limit geprüft, bevor er benutzt wird; ein neuer Parser kommt in den
+  Fuzz-Harness (`takt_demux::fuzzing`, `fuzz/README.md`).
 - Lizenz-Zonen: Zone 1 (`takt-core`, `takt-clock`, `takt-audio`, …) `Apache-2.0 OR MIT`, hängt
   nie von Zone 2 ab; Zone 2 (`apps/`, Decoder, GPU) GPL-3.0-or-later; Zone 3 hinter
   Prozessgrenzen. Jede Datei beginnt mit ihrer `SPDX-License-Identifier`.

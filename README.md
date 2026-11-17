@@ -10,6 +10,8 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 
 > **Status (2026-11-14): Alpha, Phase 0.** Das Fundament steht: `takt-core`, `takt-clock`, `takt-backend`, `takt-audio` (wartefreier Ring, Ausgabe über `cpal`, die die Audio-Master-Uhr stellt) und `takt-player` mit einem Fenster (egui über wgpu: Play/Pause, Zeitleiste, Lautstärke, Playlist, Diagnose-Overlay; `--headless` für die Messschleife), CI grün auf Windows, Linux und macOS. In einem Build mit libmpv (`TAKT_LIBMPV_DIR`, [docs/BUILD.md](docs/BUILD.md)) spielt der Player Dateien mit Ton über das `MpvBackend`: Drag & Drop oder `takt-player film.mkv`, Sprünge, Untertitel- und Tonspur per Taste. Der Rolling-Build `latest` ist ohne libmpv gebaut und zeigt nur das Testbild; das bleibt vorerst so (entschieden am 2026-11-14: libmpv kommt nicht ins Zip, Dateien spielt der Build aus dem Checkout); die vier Wochen Alltagsnutzung vor Gate 0 haben noch nicht begonnen. Details: [docs/PHASE-0.md](docs/PHASE-0.md).
 
+> **Eigene Pipeline, erste Bausteine (2026-11-17, vorgezogen vor Gate 0):** `takt-ipc` ist das Muster für alle Hilfsprozesse (anonymes Shared Memory mit wartefreiem Ring für die Daten, Pipe mit versioniertem Protokoll für die Steuerung, Watchdog, Byte-Limits, Ende mit dem Elternprozess). `takt-demux` setzt darauf auf: libavformat (FFmpeg 9.0, LGPL, dynamisch gelinkt) läuft nur im Hilfsprozess `takt-demux-helper`, der Hauptprozess bekommt Stream-Tabelle und Pakete mit exakten `Timestamp`s und prüft alles, was von dort kommt. Der Player spielt noch nicht darüber; dafür fehlen `takt-decode` und `takt-gpu`.
+
 **English.** Takt is a modular media suite written in Rust: one shared core for decoding, GPU compositing and audio processing, with four modes on top (player, live studio, video editor and, as a long-term goal, a DAW). It is a personal, non-commercial project in an early stage (phase 0: foundation and timing, no usable player yet). The documentation is in German on purpose; code, comments and commit messages are in English.
 
 ## Dokumentation und Planung
@@ -19,7 +21,8 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Konzept (Zielbild, Nicht-Ziele, Architektur, Entscheidungen) | Vault [`tasks-vault/takt/KONZEPT.md`](https://github.com/WKDSteve/tasks-vault/blob/main/takt/KONZEPT.md) (privat) |
 | Threads, Uhren und Invarianten | [docs/THREADS-UND-UHREN.md](docs/THREADS-UND-UHREN.md) |
 | Phase 0 und ihr Review | [docs/PHASE-0.md](docs/PHASE-0.md), [docs/reviews/](docs/reviews/) |
-| Welche Programme takt startet (keins) | [docs/PROCESSES.md](docs/PROCESSES.md) |
+| Welche Programme takt startet (der Player keins; der Demuxer der eigenen Pipeline einen Hilfsprozess je Datei) und unter welchen Regeln | [docs/PROCESSES.md](docs/PROCESSES.md) |
+| Fuzzing der Leseseite des Hilfsprozess-Protokolls | [fuzz/README.md](fuzz/README.md) |
 | Bauen mit libmpv und FFmpeg | [docs/BUILD.md](docs/BUILD.md) |
 | Tasten und Maus des Players (`?` im Fenster, `takt-player --keys`) | [docs/KEYS.md](docs/KEYS.md) |
 | Den neuesten grünen Stand installieren (Windows, Pre-release `latest`, nicht signiert): `gh release download latest -R WKDSteve/takt -D takt-dl; Unblock-File takt-dl\takt-windows-x86_64.zip; Expand-Archive takt-dl\takt-windows-x86_64.zip takt-latest; .\takt-latest\install.ps1 [-DesktopShortcut]` (Prüfsumme in `takt-dl\SHA256SUMS`; das Zip in einen neuen, leeren Ordner entpacken; Startmenü „Takt“, Eintrag unter *Einstellungen > Apps*). **Dieses Zip spielt keine Dateien:** es ist ohne libmpv gebaut und zeigt nur das Testbild | [Releases](https://github.com/WKDSteve/takt/releases/tag/latest) |
@@ -63,7 +66,7 @@ Takt verwendet eine Lizenz-Topologie statt einer einzelnen Lizenz:
 
 | Zone | Bereich | Lizenz |
 |---|---|---|
-| 1 | Wiederverwendbare Kern-Crates | `Apache-2.0 OR MIT` |
+| 1 | Wiederverwendbare Kern-Crates, dazu `takt-ipc` (das Protokoll der Hilfsprozesse, damit auch ein Zone-3-Prozess es linken kann) | `Apache-2.0 OR MIT` |
 | 2 | Anwendungen und Medien-Pipeline | `GPL-3.0-or-later` |
 | 3 | Isolierte Hilfsprozesse (VST3-Bridge, GPL-Encoder) | eigene Lizenz je Prozess |
 

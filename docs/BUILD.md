@@ -1,6 +1,6 @@
 # Bauen
 
-Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` über `NullBackend`, und genau so baut die CI. Systemvoraussetzung ist unter Linux nur die Audio-Ausgabe (`cpal` über ALSA, die Echtzeit-Priorität über rtkit und D-Bus): `sudo apt-get install libasound2-dev libdbus-1-dev` (Fedora: `alsa-lib-devel dbus-devel`); Windows und macOS brauchen nichts. Die nativen Bibliotheken werden nur eingebunden, wenn eine Umgebungsvariable auf sie zeigt. Dieses Dokument beschreibt, wie man sie beschafft.
+Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` über `NullBackend`, der Demux-Hilfsprozess `takt-demux-helper` meldet zu jeder Datei „ohne FFmpeg gebaut“, und genau so baut die CI. Systemvoraussetzung ist unter Linux nur die Audio-Ausgabe (`cpal` über ALSA, die Echtzeit-Priorität über rtkit und D-Bus): `sudo apt-get install libasound2-dev libdbus-1-dev` (Fedora: `alsa-lib-devel dbus-devel`); Windows und macOS brauchen nichts. Die nativen Bibliotheken werden nur eingebunden, wenn eine Umgebungsvariable auf sie zeigt. Dieses Dokument beschreibt, wie man sie beschafft.
 
 ## Table of content
 
@@ -10,6 +10,7 @@ Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` ü
     - [libmpv](#libmpv)
       - [Lizenz der vorgebauten libmpv](#lizenz-der-vorgebauten-libmpv)
     - [FFmpeg](#ffmpeg)
+    - [takt-demux mit FFmpeg](#takt-demux-mit-ffmpeg)
     - [Prüfen](#prüfen)
   - [Linux](#linux)
     - [Das Fenster](#das-fenster)
@@ -31,11 +32,11 @@ Takt baut ohne Medien-Bibliothek: Ohne libmpv und FFmpeg läuft `takt-player` ü
 | Variable | Zeigt auf | Wirkung |
 |---|---|---|
 | `TAKT_LIBMPV_DIR` | absoluter Pfad zum Ordner mit der Importbibliothek (MSVC `mpv.lib`; windows-gnu `libmpv.dll.a` oder `mpv.lib`; Linux `libmpv.so`; macOS `libmpv.dylib`) | Suchpfad für den Linker, cfg `takt_libmpv` |
-| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (MSVC `avutil.lib`; windows-gnu `libavutil.dll.a` oder `avutil.lib`; Linux `libavutil.so`; macOS `libavutil.dylib`) | Suchpfad `lib/` für den Linker (vor dem libmpv-Ordner, damit eine System-FFmpeg dort ihn nicht überschattet), cfg `takt_ffmpeg` |
+| `FFMPEG_DIR` | absoluter Pfad zur FFmpeg-Wurzel mit `include/` und `lib/` (MSVC `avutil.lib`; windows-gnu `libavutil.dll.a` oder `avutil.lib`; Linux `libavutil.so`; macOS `libavutil.dylib`) | Suchpfad `lib/` für den Linker (vor dem libmpv-Ordner, damit eine System-FFmpeg dort ihn nicht überschattet), cfg `takt_ffmpeg`; in `takt-player` nur für den Link-Test, in `takt-demux` linkt damit der Hilfsprozess `takt-demux-helper` libavformat, libavcodec und libavutil (dort muss es **FFmpeg 9.0** sein, siehe [takt-demux mit FFmpeg](#takt-demux-mit-ffmpeg)) |
 
-`FFMPEG_DIR` ist bewusst derselbe Name und dasselbe Layout wie bei `ffmpeg-sys-next`, damit eine spätere FFmpeg-Anbindung dieselbe Einstellung liest. Der Name ist allgemein: Ist er auf dem Rechner schon für ein anderes Projekt gesetzt (etwa auf einen GPL-Build), läuft der takt-Smoke-Test damit und scheitert.
+`FFMPEG_DIR` ist bewusst derselbe Name und dasselbe Layout wie bei `ffmpeg-sys-next`; `takt-demux` liest dieselbe Einstellung (mit eigenen, handgeschriebenen Bindings, nicht mit `ffmpeg-sys-next`). Der Name ist allgemein: Ist er auf dem Rechner schon für ein anderes Projekt gesetzt (etwa auf einen GPL-Build), läuft der takt-Smoke-Test damit und scheitert.
 
-Ist eine Variable gesetzt, aber kein absoluter Pfad oder fehlt die Importbibliothek im Ordner, bricht der Build mit einer Meldung ab, statt still auf `NullBackend` zurückzufallen. Absolut muss der Pfad sein, weil das Build-Skript im Paketordner läuft, der Compiler aber im Workspace-Wurzelordner. Das Build-Skript liegt in [`apps/takt-player/build.rs`](../apps/takt-player/build.rs).
+Ist eine Variable gesetzt, aber kein absoluter Pfad oder fehlt die Importbibliothek im Ordner, bricht der Build mit einer Meldung ab, statt still auf `NullBackend` zurückzufallen. Absolut muss der Pfad sein, weil das Build-Skript im Paketordner läuft, der Compiler aber im Workspace-Wurzelordner. Die Build-Skripte liegen in [`apps/takt-player/build.rs`](../apps/takt-player/build.rs) und [`crates/takt-demux/build.rs`](../crates/takt-demux/build.rs).
 
 Bequem für Terminal und Editor zugleich: die Variablen in `~/.cargo/config.toml` unter `[env]` setzen; dann bauen beide mit denselben Werten und kompilieren nicht abwechselnd neu.
 
@@ -94,6 +95,33 @@ Expand-Archive ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip -DestinationPath E:\
 ```
 
 Die gängigen Windows-Pakete (winget `Gyan.FFmpeg`, scoop `ffmpeg`) liefern nur Programme ohne Entwicklungsdateien und sind GPL-Builds; sie taugen zum Abspielen, nicht zum Linken.
+
+### takt-demux mit FFmpeg
+
+`takt-demux` (der Demuxer der eigenen Pipeline, Phase 1) parst Container nie im Hauptprozess: `takt_demux::Demuxer` startet je Datei den Hilfsprozess `takt-demux-helper`, und nur der linkt FFmpeg ([PROCESSES.md](PROCESSES.md)). Ohne `FFMPEG_DIR` bauen Crate und Hilfsprozess trotzdem; der Hilfsprozess beantwortet dann jede Datei mit „built without FFmpeg“, und die Tests, die Dateien lesen, melden `SKIP`.
+
+Mit `FFMPEG_DIR` muss es **FFmpeg 9.0** sein (libavformat 63, libavcodec 63, libavutil 61): Die Bindings in `crates/takt-demux/src/ffi.rs` sind von Hand geschrieben und lesen einige Felder von FFmpeg-Strukturen direkt, weil libavformat dafür keine Zugriffsfunktionen hat. Das Build-Skript liest die Hauptversionen aus den Headern und bricht bei einer anderen mit einer Meldung ab; der Hilfsprozess prüft die geladenen Bibliotheken beim Start noch einmal. Wie die Offsets bei einer neuen Hauptversion nachgemessen werden, steht in [`crates/takt-demux/layout/README.md`](../crates/takt-demux/layout/README.md).
+
+```powershell
+$env:FFMPEG_DIR = 'E:\deps\ffmpeg-n9.0-latest-win64-lgpl-shared-9.0'
+$env:PATH = "$env:FFMPEG_DIR\bin;$env:PATH"
+cargo test -p takt-demux
+cargo run -p takt-demux --bin takt-demux-helper -- --about
+```
+
+Erwartet: die Tests `with_ffmpeg::*` laufen grün (MKV, MP4 und WebM Paket für Paket gegen `ffprobe` aus `FFMPEG_DIR\bin`, Sprünge, abgeschnittene und beschädigte Dateien, `the_ffmpeg_of_the_helper_is_an_lgpl_build`), und `--about` nennt `libavformat 63.x` und „LGPL version 3 or later“. Die DLLs müssen zur Laufzeit gefunden werden, wie bei libmpv: im `PATH` oder neben `takt-demux-helper.exe`.
+
+Unter Linux dasselbe mit dem Archiv `linux64-lgpl-shared` von BtbN:
+
+```bash
+export FFMPEG_DIR="$HOME/deps/ffmpeg-n9.0-latest-linux64-lgpl-shared-9.0"
+export LD_LIBRARY_PATH="$FFMPEG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" PATH="$FFMPEG_DIR/bin:$PATH"
+cargo test -p takt-demux
+```
+
+Mit der FFmpeg einer Distribution (`FFMPEG_DIR=/usr` unter Arch, sofern sie 9.0 ist) laufen die Demux-Tests ebenfalls, nur `the_ffmpeg_of_the_helper_is_an_lgpl_build` scheitert dann mit Absicht: Distributionen bauen mit `--enable-gpl`. In der CI läuft das im Job „takt-demux mit FFmpeg 9.0“ unter Ubuntu und Windows, mit dem Monats-Build `autobuild-2026-10-31-12-59` von BtbN (`ffmpeg-n9.0.2-39-g7adfbe40dc-…-lgpl-shared-9.0`), der nur mit seinem dort gepinnten SHA-256 angenommen wird. BtbN hält die Monats-Builds rund zwei Jahre vor; ist das Archiv fort, meldet der Job `SKIP`, und es wird dort und hier ein neueres eingetragen. macOS hat keinen Job mit FFmpeg (kein vorgebautes LGPL-Archiv, kein Testgerät).
+
+Den Protokoll-Parser der Leseseite prüft außerdem ein Fuzz-Ziel: [`fuzz/README.md`](../fuzz/README.md).
 
 ### Prüfen
 
