@@ -16,6 +16,14 @@ return {
                 env = { TAKT_AUDIO = "sim" },
                 window = "Takt",
             },
+            -- The same build with `--imported`: the test picture reaches the GPU through a texture a D3D11 device wrote
+            -- (the import path of takt-gpu, Windows on DX12), and the overlay says how it compared with the upload.
+            ["takt-imported-picture"] = {
+                build = { "python", "scripts/build-sheet-app.py", "plain" },
+                run = { "target/sheets-plain/debug/takt-player.exe", "--overlay", "--imported" },
+                env = { TAKT_AUDIO = "sim" },
+                window = "Takt",
+            },
             -- The window playing the test clip through libmpv: built by scripts/build-sheet-app.py into target/sheets-mpv
             -- with libmpv-2.dll beside the program (needs TAKT_LIBMPV_DIR, docs/BUILD.md). The clip is made a minute long
             -- into the folder of the run (scripts/sheet-prepare.py, needs ffmpeg): the three seconds of the file in the

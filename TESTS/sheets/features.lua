@@ -9,6 +9,11 @@ return {
         docs = "docs/KEYS.md",
     },
     {
+        id = "takt.window-imported-picture",
+        title = "The picture reaches the window through a texture another device wrote (the path of a hardware decoder), with the bytes of the upload",
+        docs = "docs/GPU.md",
+    },
+    {
         id = "takt.window-file",
         title = "A file plays in the window through libmpv, with its audio and subtitle tracks in the menus of the bar",
         docs = "docs/PHASE-0.md",
