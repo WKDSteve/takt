@@ -148,6 +148,11 @@ jobs:
   # releases: once this one is gone and the cache has dropped it, the job says SKIP in a warning and in the
   # summary, and counts as no evidence (TST-16); then pin a newer archive here and in docs/BUILD.md. A file with
   # another hash fails the job.
+  #
+  # The job also gets the FFmpeg of the job below (same archive, same pin): with libmpv and FFmpeg in one build the
+  # own pipeline (takt-demux, takt-decode) is compared with libmpv picture by picture (apps/takt-player/src/compare.rs)
+  # and the two backends are swapped while a file plays. Without the FFmpeg archive those tests do not exist; the
+  # job says SKIP for them then and stays what it was.
   libmpv-windows:
     name: libmpv gelinkt (Windows, Archiv gepinnt)
     runs-on: windows-latest
@@ -155,6 +160,9 @@ jobs:
       MPV_TAG: "20261111"
       MPV_ARCHIVE: mpv-dev-x86_64-20261111-git-bcde6b93cc.7z
       MPV_SHA256: 273c079b11ea5575822f972756f4c9a71149a5c10130353abeb8586738938452
+      FFMPEG_TAG: autobuild-2026-10-31-12-59
+      FFMPEG_ARCHIVE: ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-shared-9.0.zip
+      FFMPEG_SHA256: e907b01fa4783913151237e37df2a10fa97d99a1598a021bf59d4ae62ffed4c0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-12
         # The tests load a library that is not ours: the token of the run does not stay in the checkout.
@@ -222,22 +230,86 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "TAKT_LIBMPV_DIR=$dir"
           # The DLL is found through PATH when the tests start.
           Add-Content -LiteralPath $env:GITHUB_PATH -Value $dir
+      # The cache of the job "takt-demux und takt-decode mit FFmpeg 9.0" for Windows: the same file under the same key.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4, resolved 2026-11-14
+        if: steps.archive.outputs.available == 'true'
+        with:
+          path: ffmpeg-archive
+          key: ffmpeg-${{ env.FFMPEG_SHA256 }}
+      - name: FFmpeg-Archiv holen, pruefen und FFMPEG_DIR setzen (fuer den Vergleich mit der eigenen Pipeline)
+        id: ffmpeg
+        if: steps.archive.outputs.available == 'true'
+        shell: bash
+        run: |
+          file=ffmpeg-archive
+          if [ ! -f "$file" ]; then
+            url="https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$FFMPEG_ARCHIVE"
+            status=$(curl -sSL --retry 3 --retry-delay 5 -o "$file" -w '%{http_code}' "$url")
+            if [ "$status" = 404 ]; then
+              rm -f "$file"
+              why="$FFMPEG_ARCHIVE is gone from its publisher (HTTP 404): the own pipeline was not compared with libmpv. Pin a newer archive in ci.yml and docs/BUILD.md."
+              echo "::warning title=SKIP eigene Pipeline gegen libmpv (Windows)::$why"
+              {
+                echo "### Eigene Pipeline gegen libmpv (Windows): SKIP"
+                echo
+                echo "$why"
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$status" != 200 ]; then
+              rm -f "$file"
+              echo "download failed with HTTP $status"
+              exit 1
+            fi
+          fi
+          if ! echo "$FFMPEG_SHA256  $file" | sha256sum -c -; then
+            rm -f "$file"
+            echo "the archive does not have the pinned SHA-256: not used"
+            exit 1
+          fi
+          dest="$(cygpath -m "$RUNNER_TEMP")/ffmpeg"
+          mkdir -p "$dest"
+          7z x "$file" "-o$dest" -y > /dev/null
+          root="$dest/${FFMPEG_ARCHIVE%.zip}"
+          test -d "$root/include/libavcodec" && test -d "$root/lib"
+          echo "FFMPEG_DIR=$root" >> "$GITHUB_ENV"
+          cygpath -w "$root/bin" >> "$GITHUB_PATH"
+          echo "available=true" >> "$GITHUB_OUTPUT"
       - name: Link-Test, Clippy und alle Tests des Players mit libmpv
         if: steps.archive.outputs.available == 'true'
         shell: bash
+        env:
+          WITH_FFMPEG: ${{ steps.ffmpeg.outputs.available }}
         run: |
           cargo test -p takt-player --test ffi_native_link -- --nocapture 2>&1 | tee test.log
           # The cfg must have come on: both libmpv tests ran, not the stand-in that says SKIP.
           grep -q "test libmpv::client_api_is_version_2 ... ok" test.log
           grep -q "test libmpv::license_state_matches_build_md ... ok" test.log
           cargo clippy -p takt-player --all-targets --all-features
-          # Silent (ao=null), as on Ubuntu: the MpvBackend plays the test files of the repository.
-          cargo test -p takt-player -- --nocapture 2>&1 | tee -a test.log
+          # Silent (ao=null), as on Ubuntu: the MpvBackend plays the test files of the repository. The two helper
+          # programs of the own pipeline are built in the same run: the tests of the player start them.
+          cargo test -p takt-demux -p takt-decode -p takt-player -- --nocapture 2>&1 | tee -a test.log
           grep -q "test mpv::tests::a_test_pattern_is_rendered_into_memory ... ok" test.log
           grep -q "test mpv::backend::tests::a_file_plays_pauses_jumps_and_ends ... ok" test.log
           grep -q "test mpv::backend::tests::the_frames_are_bt709_whatever_primaries_the_file_names ... ok" test.log
           grep -q "test mpv::backend::tests::rounds_of_loading_jumping_and_switching_subtitles_hold_nothing_up ... ok" test.log
           grep -q "test session::tests::a_file_swaps_the_clock_and_the_test_picture_swaps_it_back ... ok" test.log
+          if [ "$WITH_FFMPEG" = true ]; then
+            # The own pipeline against libmpv: same file, same timestamp, PSNR above the threshold; and the two
+            # backends swapped while a file plays.
+            grep -q "test compare::the_own_pipeline_shows_the_picture_libmpv_shows_at_the_same_time ... ok" test.log
+            grep -q "test compare::a_picture_one_frame_off_or_of_the_wrong_matrix_fails_the_threshold ... ok" test.log
+            grep -q "test session::tests::a_file_plays_through_the_own_pipeline_on_the_clock_of_the_player ... ok" test.log
+            grep -q "test session::tests::the_pipelines_are_swapped_while_a_file_plays_and_it_goes_on_where_it_was ... ok" test.log
+            {
+              echo "### Eigene Pipeline gegen libmpv (Windows)"
+              echo
+              echo '```'
+              grep -E "pictures at the same timestamp|the picture after" test.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: SKIPs in die Zusammenfassung
         if: always() && steps.archive.outputs.available == 'true'
         shell: bash

@@ -14,6 +14,9 @@ publish = false
 takt-core.workspace = true
 takt-clock.workspace = true
 takt-backend = { path = "../../crates/takt-backend", version = "0.0.1" }
+# The own pipeline as the second backend next to libmpv: the client of the decode helper and, through it, of the
+# demux helper. Links no FFmpeg (the helpers do); zone 2.
+takt-decode = { path = "../../crates/takt-decode", version = "0.0.1" }
 takt-audio = { workspace = true, features = ["cpal"] }
 # The picture on the GPU: the layer the video surface is drawn with (src/render).
 takt-gpu = { path = "../../crates/takt-gpu", version = "0.0.1" }

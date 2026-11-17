@@ -21,6 +21,7 @@ Erzeugt aus `BINDINGS` in `apps/takt-player/src/app.rs`; der Test `docs_keys_md_
 | `?` | show / hide this list of keys |
 | `F3` | show / hide the diagnostics |
 | `F4` | save the diagnostics (clipboard and a file) |
+| `F6` | switch between libmpv and the own pipeline (picture only, no sound yet) |
 | `Escape` | quit |
 
 | Maus | Wirkung |

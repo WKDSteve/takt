@@ -579,6 +579,20 @@ impl PlayerApp {
                 }
             }
             Command::SaveDiagnostics => self.save_diagnostics(ctx),
+            Command::SwitchPipeline => {
+                let to = self.session.pipeline().other();
+                self.notice = Some(match self.session.switch_pipeline(to) {
+                    Ok(line) => {
+                        // The file that plays is opened again by the other pipeline; how
+                        // that ends is asked every pass, like any other open.
+                        if self.session.opening() {
+                            self.opening = self.session.current().map(Playlist::label);
+                        }
+                        line
+                    }
+                    Err(e) => e,
+                });
+            }
             Command::TogglePlay
             | Command::Quit
             | Command::ToggleOverlay
@@ -753,6 +767,7 @@ fn commands(ctx: &egui::Context) -> Vec<Command> {
                     egui::Key::Home => Some(command_for(Key::Home)),
                     egui::Key::F3 => Some(command_for(Key::F3)),
                     egui::Key::F4 => Some(command_for(Key::F4)),
+                    egui::Key::F6 => Some(command_for(Key::F6)),
                     egui::Key::Num9 => Some(command_for(Key::Nine)),
                     egui::Key::Num0 => Some(command_for(Key::Zero)),
                     egui::Key::M => Some(command_for(Key::M)),

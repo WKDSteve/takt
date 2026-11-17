@@ -9,6 +9,15 @@
 //! * **A file** (`MpvBackend`, in a build that links libmpv): mpv plays the
 //!   sound on its own device, and the audio master clock follows the sound
 //!   position of mpv.
+//! * **A file through the own pipeline** (`takt_decode::SoftwareBackend`):
+//!   `takt-demux` and `takt-decode` in their helper processes deliver the
+//!   picture. The pipeline decodes no sound yet, so the sound path of the
+//!   player plays silence and drives the clock, as for the test picture.
+//!
+//! Which of the two plays files is the [`Pipeline`], and it can be changed
+//! while a file plays ([`Session::switch_pipeline`]): the file is opened
+//! again by the other one at the position it was at. libmpv stays the
+//! reference the own pipeline is compared with.
 //!
 //! Invariant 3 of `docs/THREADS-UND-UHREN.md` (exactly one clock is active)
 //! is the shape of this type: the two cases are the variants of one enum, so
@@ -17,8 +26,9 @@
 //! it is dropped. Everything else in the player reads the clock through
 //! [`Session::clock`] and cannot keep the old one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use takt_audio::OutputStats;
 use takt_backend::{BackendStats, NullBackend, Pattern, SeekMode, VideoBackend};
@@ -28,9 +38,73 @@ use takt_core::{
     TransferFunction,
 };
 
+use takt_decode::{BackendOptions, Layout, SoftwareBackend};
+
 use crate::audio::{self, AudioPath};
 #[cfg(takt_libmpv)]
 use crate::mpv::{Config, Early, MpvBackend, Sound, Sources, Track};
+
+/// What plays files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pipeline {
+    /// libmpv (`MpvBackend`): picture, sound and subtitles. In a build
+    /// without libmpv no file plays through it.
+    Mpv,
+    /// The own pipeline (`takt-demux`, `takt-decode`): the picture, decoded
+    /// in software by helper processes. No sound and no subtitles yet.
+    Own,
+}
+
+impl Pipeline {
+    /// The pipeline a session starts with: libmpv, or the own one when the
+    /// environment says `TAKT_PIPELINE=own`.
+    fn from_env() -> Self {
+        match std::env::var("TAKT_PIPELINE") {
+            Ok(name) if name.eq_ignore_ascii_case("own") => Self::Own,
+            _ => Self::Mpv,
+        }
+    }
+
+    /// The other one.
+    #[must_use]
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Mpv => Self::Own,
+            Self::Own => Self::Mpv,
+        }
+    }
+}
+
+/// Where the helper programs of the own pipeline lie: `TAKT_HELPER_DIR`,
+/// else next to the player, which is where an install puts them. A program
+/// cargo built for a test lies one directory below the helpers.
+fn helper_dir() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("TAKT_HELPER_DIR").filter(|dir| !dir.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("own pipeline: {e}"))?;
+    let dir = exe.parent().unwrap_or_else(|| Path::new("."));
+    let helper = format!(
+        "{}{}",
+        takt_decode::HELPER_NAME,
+        std::env::consts::EXE_SUFFIX
+    );
+    match dir.parent() {
+        Some(above) if !dir.join(&helper).is_file() && above.join(&helper).is_file() => {
+            Ok(above.to_path_buf())
+        }
+        _ => Ok(dir.to_path_buf()),
+    }
+}
+
+/// How the own pipeline plays in this window: the helpers of
+/// [`helper_dir`], frames as NV12 and P010 (what the texture paths and a
+/// hardware decoder use).
+fn own_options() -> Result<BackendOptions, String> {
+    let mut options = BackendOptions::in_dir(&helper_dir()?);
+    options.decode.layout = Layout::SemiPlanar;
+    Ok(options)
+}
 
 /// Length of the test picture.
 const TEST_MILLIS: i64 = 3_600_000;
@@ -109,11 +183,28 @@ struct File {
     limit_told: bool,
 }
 
+/// A file played by the own pipeline, on the sound path of the player.
+struct Own {
+    clock: SeekableClock<AudioMasterClock>,
+    // Kept for its life; dropping it stops the (silent) sound.
+    audio: AudioPath,
+    audio_line: String,
+    source: SoftwareBackend,
+    info: takt_backend::MediaInfo,
+    /// [`Session::take_limit_note`] has said what there is to say.
+    limit_told: bool,
+}
+
 enum Kind {
     Test(Box<Test>),
     #[cfg(takt_libmpv)]
     File(Box<File>),
+    Own(Box<Own>),
 }
+
+/// A file the own pipeline is opening on a thread of its own: both helper
+/// processes start and the container is read before the first picture.
+type OwnOpening = Receiver<Result<(SoftwareBackend, takt_backend::MediaInfo), String>>;
 
 /// A file mpv has not opened yet.
 #[cfg(takt_libmpv)]
@@ -139,6 +230,17 @@ pub struct Session {
     /// libmpv), until [`Session::poll_open`] takes it.
     #[cfg(not(takt_libmpv))]
     finished: Option<Result<(), String>>,
+    /// What plays files.
+    pipeline: Pipeline,
+    /// The file asked for last: it plays or is being opened.
+    current: Option<PathBuf>,
+    /// The file that plays.
+    playing: Option<PathBuf>,
+    /// A file the own pipeline has not opened yet.
+    own_pending: Option<OwnOpening>,
+    /// Where the file that is being opened goes on: the position of the
+    /// file the other pipeline played ([`Session::switch_pipeline`]).
+    resume_millis: Option<i64>,
     /// No output device, neither of the player nor of mpv (tests).
     silent: bool,
     paused: bool,
@@ -171,10 +273,128 @@ impl Session {
             wanted_subtitles: Vec::new(),
             #[cfg(not(takt_libmpv))]
             finished: None,
+            pipeline: Pipeline::from_env(),
+            current: None,
+            playing: None,
+            own_pending: None,
+            resume_millis: None,
             silent,
             paused: false,
             volume: 1.0,
         }
+    }
+
+    /// What plays files.
+    #[must_use]
+    pub const fn pipeline(&self) -> Pipeline {
+        self.pipeline
+    }
+
+    /// The file that plays or is being opened.
+    #[must_use]
+    pub fn current(&self) -> Option<&Path> {
+        self.current.as_deref()
+    }
+
+    /// Files play through `to` from now on. A file that plays is opened
+    /// again by that pipeline and goes on where it was, once it is open
+    /// ([`Session::poll_open`]); until then it plays on as it did. A file
+    /// that is still being opened is opened by that pipeline instead. Says
+    /// in a line what plays files now.
+    ///
+    /// # Errors
+    ///
+    /// A text for the user when `to` cannot play here (a build without
+    /// libmpv, helpers that are not found) or the file is refused; the
+    /// pipeline stays the one it was.
+    pub fn switch_pipeline(&mut self, to: Pipeline) -> Result<String, String> {
+        if to == Pipeline::Mpv && !cfg!(takt_libmpv) {
+            return Err("this build has no libmpv: files play through the own pipeline".to_owned());
+        }
+        let line = match to {
+            Pipeline::Mpv => "pipeline: libmpv",
+            Pipeline::Own => "pipeline: own (takt-demux, takt-decode): picture only, no sound yet",
+        };
+        if to == self.pipeline {
+            return Ok(line.to_owned());
+        }
+        let before = self.pipeline;
+        self.pipeline = to;
+        // The file on its way has no position yet; the one that plays goes
+        // on where it is.
+        let again = if self.opening() {
+            self.current.clone().map(|path| (path, None))
+        } else if self.is_file() {
+            let position = self.now_millis();
+            self.playing.clone().map(|path| (path, Some(position)))
+        } else {
+            None
+        };
+        if let Some((path, position)) = again {
+            if let Err(e) = self.open_file(&path) {
+                self.pipeline = before;
+                return Err(e);
+            }
+            self.resume_millis = position;
+        }
+        Ok(line.to_owned())
+    }
+
+    /// Begins to open `path` with the own pipeline, on a thread.
+    fn open_own(&mut self, path: &Path) -> Result<(), String> {
+        if !path.is_file() {
+            return Err("no such file".to_owned());
+        }
+        let options = own_options()?;
+        let name = path.to_string_lossy().into_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("takt-open".to_owned())
+            .spawn(move || {
+                let mut backend = SoftwareBackend::new(options);
+                let opened = backend
+                    .open(&name)
+                    .map(|info| (backend, info))
+                    .map_err(|e| e.to_string());
+                // Nobody waits any more: the backend ends here, and its helpers with it.
+                let _ = tx.send(opened);
+            })
+            .map_err(|e| format!("own pipeline: {e}"))?;
+        self.own_pending = Some(rx);
+        // A file libmpv was opening is given up for this one.
+        #[cfg(takt_libmpv)]
+        {
+            self.pending = None;
+            self.wanted_subtitles.clear();
+        }
+        Ok(())
+    }
+
+    /// How the open of the own pipeline ended, if it has.
+    fn poll_own(&mut self) -> Option<Result<(), String>> {
+        let opened = match self.own_pending.as_ref()?.try_recv() {
+            Ok(opened) => opened,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err("own pipeline: the open ended".to_owned()),
+        };
+        self.own_pending = None;
+        Some(opened.map(|(source, info)| {
+            // The picture plays on the sound path of the player, which plays
+            // silence: the pipeline decodes no sound yet.
+            let (clock, audio) = if self.silent {
+                audio::simulated(&self.time, "no device asked for")
+            } else {
+                audio::start(&self.time)
+            };
+            self.kind = Kind::Own(Box::new(Own {
+                clock: SeekableClock::new(clock),
+                audio_line: audio.describe(),
+                audio,
+                source,
+                info,
+                limit_told: false,
+            }));
+        }))
     }
 
     fn test_kind(time: &Arc<SystemMonotonic>, silent: bool) -> Kind {
@@ -211,6 +431,15 @@ impl Session {
     /// A text for the user when the file is refused before mpv is asked
     /// (it does not exist); what played or was being opened goes on then.
     pub fn open_file(&mut self, path: &Path) -> Result<(), String> {
+        if self.pipeline == Pipeline::Own {
+            self.open_own(path)?;
+            self.current = Some(path.to_path_buf());
+            self.resume_millis = None;
+            return Ok(());
+        }
+        // A file the own pipeline was opening is given up for this one.
+        self.own_pending = None;
+        self.resume_millis = None;
         #[cfg(takt_libmpv)]
         {
             let name = path.to_string_lossy();
@@ -227,10 +456,10 @@ impl Session {
                 }
                 // The backend that is opening already takes the new file: it
                 // is not dropped while mpv may still be busy with the old one.
-                (Kind::Test(_), Some(Pending::Fresh(source))) => {
+                (Kind::Test(_) | Kind::Own(_), Some(Pending::Fresh(source))) => {
                     source.begin_open(&name).map_err(|e| e.to_string())?;
                 }
-                (Kind::Test(_), _) => {
+                (Kind::Test(_) | Kind::Own(_), _) => {
                     let config = Config {
                         sources: Sources::Files,
                         sound: if self.silent {
@@ -246,11 +475,21 @@ impl Session {
                     self.pending = Some(Pending::Fresh(Box::new(source)));
                 }
             }
+            self.current = Some(path.to_path_buf());
             Ok(())
         }
         #[cfg(not(takt_libmpv))]
         {
-            let Kind::Test(test) = &mut self.kind;
+            // Without libmpv this pipeline plays no file: the test picture
+            // starts again in its place.
+            if matches!(self.kind, Kind::Own(_)) {
+                self.kind = Self::test_kind(&self.time, self.silent);
+                self.apply();
+            }
+            self.current = None;
+            let Kind::Test(test) = &mut self.kind else {
+                return Err("no test picture".to_owned());
+            };
             test.source
                 .open(&path.to_string_lossy())
                 .map_err(|e| e.to_string())?;
@@ -270,6 +509,36 @@ impl Session {
     /// is the one. On an error the test picture plays on; a file that
     /// played before is gone (mpv let it go when it was asked).
     pub fn poll_open(&mut self) -> Option<Result<(), String>> {
+        let ended = self.poll_opened()?;
+        match (&ended, self.resume_millis.take()) {
+            // The file the other pipeline played goes on where it was, to the
+            // frame: a jump to the keyframe before would set a long GOP back
+            // by seconds.
+            (Ok(()), Some(position)) => self.seek_with(position, SeekMode::Exact),
+            (Ok(()), None) => {}
+            (Err(_), _) => {}
+        }
+        if ended.is_ok() {
+            self.playing.clone_from(&self.current);
+        } else {
+            // What was asked for does not play: the file is the one that
+            // plays on, if one does.
+            if !self.is_file() {
+                self.playing = None;
+            }
+            self.current.clone_from(&self.playing);
+        }
+        Some(ended)
+    }
+
+    fn poll_opened(&mut self) -> Option<Result<(), String>> {
+        if self.own_pending.is_some() {
+            let ended = self.poll_own()?;
+            if ended.is_ok() {
+                self.apply();
+            }
+            return Some(ended);
+        }
         #[cfg(takt_libmpv)]
         {
             let ended = match (self.pending.take()?, &mut self.kind) {
@@ -305,7 +574,7 @@ impl Session {
                     Some(Err(e)) => Err(e.to_string()),
                 },
                 // Nothing of a file is left to wait for.
-                (Pending::Same, Kind::Test(_)) => return None,
+                (Pending::Same, Kind::Test(_) | Kind::Own(_)) => return None,
             };
             let wanted = std::mem::take(&mut self.wanted_subtitles);
             if ended.is_ok() {
@@ -327,6 +596,9 @@ impl Session {
     /// Whether a file is being opened.
     #[must_use]
     pub const fn opening(&self) -> bool {
+        if self.own_pending.is_some() {
+            return true;
+        }
         #[cfg(takt_libmpv)]
         {
             self.pending.is_some()
@@ -346,6 +618,10 @@ impl Session {
             self.pending = None;
             self.wanted_subtitles.clear();
         }
+        self.own_pending = None;
+        self.resume_millis = None;
+        self.current = None;
+        self.playing = None;
         if self.is_file() {
             self.kind = Self::test_kind(&self.time, self.silent);
             self.apply();
@@ -366,6 +642,7 @@ impl Session {
             Kind::Test(test) => &test.clock,
             #[cfg(takt_libmpv)]
             Kind::File(file) => file.clock.as_ref(),
+            Kind::Own(own) => &own.clock,
         }
     }
 
@@ -376,6 +653,7 @@ impl Session {
             Kind::Test(test) => test.clock.inner(),
             #[cfg(takt_libmpv)]
             Kind::File(file) => file.clock.as_ref(),
+            Kind::Own(own) => own.clock.inner(),
         }
     }
 
@@ -384,6 +662,7 @@ impl Session {
             Kind::Test(test) => &test.source,
             #[cfg(takt_libmpv)]
             Kind::File(file) => &file.source,
+            Kind::Own(own) => &own.source,
         }
     }
 
@@ -405,6 +684,7 @@ impl Session {
                 }
                 Ok(frame)
             }
+            Kind::Own(own) => own.source.next_frame(&own.clock),
         }
     }
 
@@ -426,6 +706,7 @@ impl Session {
             Kind::Test(test) => test.source.set_display_period(nanos),
             #[cfg(takt_libmpv)]
             Kind::File(file) => file.source.set_display_period(nanos),
+            Kind::Own(own) => own.source.set_display_period(nanos),
         }
     }
 
@@ -441,6 +722,15 @@ impl Session {
 
     /// Jumps to `millis`.
     pub fn seek_to(&mut self, millis: i64) {
+        self.seek_with(millis, SeekMode::Keyframe);
+    }
+
+    /// Jumps to `millis`; `mode` is how libmpv gets there (the test picture
+    /// and the own pipeline are exact in either).
+    fn seek_with(&mut self, millis: i64, mode: SeekMode) {
+        // Only libmpv has two ways to get there.
+        #[cfg(not(takt_libmpv))]
+        let _ = mode;
         let to = Timestamp::from_millis(millis.clamp(0, self.seek_limit()));
         let done = match &mut self.kind {
             Kind::Test(test) => {
@@ -449,7 +739,13 @@ impl Session {
             }
             // The clock follows mpv to the new position by itself.
             #[cfg(takt_libmpv)]
-            Kind::File(file) => file.source.seek(to, SeekMode::Keyframe),
+            Kind::File(file) => file.source.seek(to, mode),
+            // The clock stands at the target, and the pipeline hands out
+            // no picture from before it.
+            Kind::Own(own) => {
+                own.clock.seek(to);
+                own.source.seek(to, SeekMode::Exact)
+            }
         };
         if let Err(e) = done {
             eprintln!("takt-player: seek: {e}");
@@ -468,7 +764,7 @@ impl Session {
     /// picture of the jump came before).
     pub fn seek_landed(&mut self, shown_millis: Option<i64>) -> Option<i64> {
         match &mut self.kind {
-            Kind::Test(_) => shown_millis,
+            Kind::Test(_) | Kind::Own(_) => shown_millis,
             #[cfg(takt_libmpv)]
             Kind::File(file) => {
                 if file.source.seeking() {
@@ -491,6 +787,7 @@ impl Session {
                     eprintln!("takt-player: pause: {e}");
                 }
             }
+            Kind::Own(own) => own.clock.set_paused(paused),
         }
     }
 
@@ -505,6 +802,7 @@ impl Session {
                     eprintln!("takt-player: volume: {e}");
                 }
             }
+            Kind::Own(own) => own.audio.set_volume(volume),
         }
     }
 
@@ -516,6 +814,7 @@ impl Session {
                 let _ = kind;
                 None
             }
+            Kind::Own(_) => Some(NO_TRACKS.to_owned()),
             #[cfg(takt_libmpv)]
             Kind::File(file) => Some(
                 file.source
@@ -528,7 +827,7 @@ impl Session {
     /// The tracks of `kind` to choose from; empty for the test picture.
     pub fn tracks(&mut self, kind: TrackKind) -> Vec<TrackChoice> {
         match &mut self.kind {
-            Kind::Test(_) => {
+            Kind::Test(_) | Kind::Own(_) => {
                 let _ = kind;
                 Vec::new()
             }
@@ -555,6 +854,7 @@ impl Session {
                 let _ = (kind, id);
                 None
             }
+            Kind::Own(_) => Some(NO_TRACKS.to_owned()),
             #[cfg(takt_libmpv)]
             Kind::File(file) => Some(
                 file.source
@@ -587,6 +887,7 @@ impl Session {
                 let _ = path;
                 Err("no file plays".to_owned())
             }
+            Kind::Own(_) => Err(NO_TRACKS.to_owned()),
             #[cfg(takt_libmpv)]
             Kind::File(file) => file
                 .source
@@ -604,6 +905,7 @@ impl Session {
                 let _ = by_millis;
                 None
             }
+            Kind::Own(_) => Some(NO_TRACKS.to_owned()),
             #[cfg(takt_libmpv)]
             Kind::File(file) => Some(match file.source.shift_subtitles(by_millis) {
                 Ok(0) => "subtitles: as the file says".to_owned(),
@@ -621,6 +923,11 @@ impl Session {
             Kind::Test(_) => TEST_MILLIS,
             #[cfg(takt_libmpv)]
             Kind::File(file) => file.duration_millis,
+            Kind::Own(own) => own
+                .info
+                .duration
+                .and_then(|d| d.rescale(Rational::MILLIS))
+                .map_or(0, Timestamp::ticks),
         }
     }
 
@@ -647,6 +954,10 @@ impl Session {
                 };
                 format!("{} ({follows})", file.source.sound_line())
             }
+            Kind::Own(own) => format!(
+                "{} (silence: the own pipeline decodes no sound yet)",
+                own.audio_line
+            ),
         }
     }
 
@@ -665,6 +976,12 @@ impl Session {
                 let note = note?;
                 let news = !file.limit_told;
                 file.limit_told = true;
+                news.then_some(note)
+            }
+            Kind::Own(own) => {
+                let note = note?;
+                let news = !own.limit_told;
+                own.limit_told = true;
                 news.then_some(note)
             }
         }
@@ -686,6 +1003,7 @@ impl Session {
                 .color
                 .is_some_and(|color| color.is_hdr())
                 .then_some("HDR is shown as SDR for now: bright parts are cut off at white"),
+            Kind::Own(_) => Some(OWN_LIMIT),
         }
     }
 
@@ -717,6 +1035,24 @@ impl Session {
                     bound(99, 100)
                 )
             }
+            Kind::Own(own) => {
+                let stats = own.source.pipeline_stats();
+                let size = own.info.video.map_or("no picture".to_owned(), |video| {
+                    format!("{}x{} {:?}", video.width, video.height, video.format)
+                });
+                // The two copies of a picture in this process: out of the
+                // shared memory, and into its frame.
+                let copy = (stats.decode.read_nanos + stats.decode.copy_nanos)
+                    .checked_div(stats.decode.frames)
+                    .map_or("-".to_owned(), |nanos| format!("{} us", nanos / 1_000));
+                format!(
+                    "{} ({}), {size}, copy {copy}, pool empty {}x, decode errors {}",
+                    own.source.name(),
+                    stats.decoder,
+                    stats.decode.pool_exhausted,
+                    stats.decode.errors
+                )
+            }
         }
     }
 
@@ -734,6 +1070,7 @@ impl Session {
             Kind::Test(test) => test.audio.device_stats(),
             #[cfg(takt_libmpv)]
             Kind::File(_) => None,
+            Kind::Own(own) => own.audio.device_stats(),
         }
     }
 
@@ -745,6 +1082,7 @@ impl Session {
             Kind::Test(test) => test.audio.feeder_stats(),
             #[cfg(takt_libmpv)]
             Kind::File(_) => None,
+            Kind::Own(own) => own.audio.feeder_stats(),
         }
     }
 
@@ -755,10 +1093,23 @@ impl Session {
             Kind::Test(_) => TEST_POOL_FRAMES,
             #[cfg(takt_libmpv)]
             Kind::File(file) => file.source.pool_frames(),
+            Kind::Own(own) => own.source.pool().1,
         };
         (self.stats().queued, size)
     }
 }
+
+/// What the person should know about a file the own pipeline plays.
+const OWN_LIMIT: &str = "own pipeline: picture only, no sound and no subtitles yet";
+
+/// Held by every test that plays through the own pipeline: one at a time. Each starts two helper
+/// processes with a decoder thread per core, and the tests of the `MpvBackend` next to them
+/// measure real time.
+#[cfg(all(test, takt_ffmpeg))]
+pub static OWN_PIPELINE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// What the own pipeline says to a wish for a track or for subtitles.
+const NO_TRACKS: &str = "own pipeline: picture only, no tracks to choose yet";
 
 #[cfg(takt_libmpv)]
 const fn track_of(kind: TrackKind) -> Track {
@@ -816,7 +1167,6 @@ mod tests {
     }
 
     /// Passes of 4 ms, as the window makes them, until the open has ended.
-    #[cfg(takt_libmpv)]
     fn opened(session: &mut Session) -> Result<(), String> {
         let asked = std::time::Instant::now();
         loop {
@@ -844,6 +1194,300 @@ mod tests {
         assert!(!session.opening() && session.poll_open().is_none());
         assert!(!session.is_file());
         assert!(session.now_millis() < 1_000, "from the start");
+    }
+
+    /// The own pipeline, whatever the environment of the test run says.
+    fn own(session: &mut Session) {
+        if session.pipeline() != Pipeline::Own {
+            session.switch_pipeline(Pipeline::Own).unwrap();
+        }
+    }
+
+    /// Passes of 4 ms until a frame comes, at most five seconds.
+    #[cfg(takt_ffmpeg)]
+    fn frame(session: &mut Session) -> PooledFrame {
+        let asked = std::time::Instant::now();
+        loop {
+            if let Some(frame) = session.next_frame().unwrap() {
+                return frame;
+            }
+            assert!(
+                asked.elapsed() < std::time::Duration::from_secs(5),
+                "no frame"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+    }
+
+    #[test]
+    fn the_pipeline_is_chosen_while_nothing_plays_and_says_what_it_is() {
+        let mut session = session();
+        let line = session.switch_pipeline(Pipeline::Own).unwrap();
+        assert!(line.contains("own") && line.contains("no sound"), "{line}");
+        assert_eq!(session.pipeline(), Pipeline::Own);
+        assert!(!session.opening(), "nothing plays, nothing is opened again");
+        assert_eq!(session.current(), None);
+        assert_eq!(Pipeline::Own.other(), Pipeline::Mpv);
+        assert_eq!(Pipeline::Mpv.other(), Pipeline::Own);
+        let back = session.switch_pipeline(Pipeline::Mpv);
+        if cfg!(takt_libmpv) {
+            assert_eq!(back, Ok("pipeline: libmpv".to_owned()));
+            assert_eq!(session.pipeline(), Pipeline::Mpv);
+        } else {
+            assert!(back.unwrap_err().contains("no libmpv"));
+            assert_eq!(session.pipeline(), Pipeline::Own, "it stays the one it was");
+        }
+        // What is no file is refused before a helper starts.
+        own(&mut session);
+        assert_eq!(
+            session.open_file(Path::new("takt-no-such-file.mkv")),
+            Err("no such file".to_owned())
+        );
+        assert!(!session.opening() && !session.is_file());
+    }
+
+    /// In a build without FFmpeg the helpers decode nothing (or are not there at all, when only
+    /// this package was built): the open ends with the reason, and the test picture plays on.
+    #[cfg(not(takt_ffmpeg))]
+    #[test]
+    fn the_own_pipeline_without_ffmpeg_says_why_and_the_test_picture_plays_on() {
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/decode-h264.mp4");
+        let mut session = session();
+        own(&mut session);
+        let clock = std::ptr::from_ref(session.master());
+        session.open_file(Path::new(clip)).unwrap();
+        assert!(session.opening());
+        let why = opened(&mut session).unwrap_err();
+        assert!(!why.is_empty());
+        println!("own pipeline without FFmpeg: {why}");
+        assert!(!session.opening() && !session.is_file());
+        assert_eq!(session.backend_name(), "null");
+        assert_eq!(std::ptr::from_ref(session.master()), clock);
+        assert_eq!(session.current(), None);
+        assert_eq!(session.pipeline(), Pipeline::Own);
+    }
+
+    /// The second backend behind `VideoBackend`: a file plays through `takt-demux` and
+    /// `takt-decode`, on the clock of the player.
+    #[cfg(takt_ffmpeg)]
+    #[test]
+    fn a_file_plays_through_the_own_pipeline_on_the_clock_of_the_player() {
+        let _one_at_a_time = OWN_PIPELINE_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/decode-hevc.mp4");
+        let mut session = session();
+        own(&mut session);
+        session.set_paused(true);
+        session.open_file(Path::new(clip)).unwrap();
+        assert!(session.opening() && !session.is_file());
+        assert_eq!(session.backend_name(), "null", "the test picture plays on");
+        assert_eq!(opened(&mut session), Ok(()));
+        assert!(session.is_file() && !session.opening());
+        assert_eq!(session.backend_name(), "takt-sw");
+        assert_eq!(session.current(), Some(Path::new(clip)));
+        assert_eq!(session.duration_millis(), 2_000);
+        let held = session.now_millis();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(session.now_millis(), held, "the pause went along");
+        assert!(session.audio_line().contains("no sound yet"));
+        assert_eq!(session.take_limit_note(), Some(OWN_LIMIT));
+        assert_eq!(session.take_limit_note(), None, "said once");
+        assert!(session.tracks(TrackKind::Audio).is_empty());
+        assert_eq!(
+            session.cycle_track(TrackKind::Subtitle),
+            Some(NO_TRACKS.to_owned())
+        );
+        assert_eq!(
+            session.add_subtitles(Path::new("film.srt")),
+            Err(NO_TRACKS.to_owned())
+        );
+
+        // The first picture comes although the clock stands, as NV12 for the texture path.
+        let first = frame(&mut session);
+        assert_eq!(first.get().meta().format, PixelFormat::Nv12);
+        assert_eq!(first.get().meta().pts, Timestamp::from_millis(0));
+        assert_eq!(
+            (first.get().meta().width, first.get().meta().height),
+            (160, 90)
+        );
+        assert!(crate::render::Picture::from_frame(first).is_ok());
+
+        // A jump shows the picture of the target, exactly, and the clock stands there.
+        session.seek_to(1_210);
+        assert_eq!(session.now_millis(), 1_210);
+        let jumped = frame(&mut session);
+        assert_eq!(jumped.get().meta().pts, Timestamp::from_millis(1_240));
+        assert_eq!(session.seek_landed(Some(1_240)), Some(1_240));
+        drop(jumped);
+
+        // Released, the file plays to its end on the clock.
+        session.set_paused(false);
+        let started = std::time::Instant::now();
+        let mut frames = 0;
+        while !session.is_eof() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            if session.next_frame().unwrap().is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+        assert!(frames >= 10, "{frames} frames from 1.24 s to the end");
+        let line = session.source_line();
+        assert!(line.starts_with("takt-sw (hevc), 160x90 Nv12"), "{line}");
+        assert!(line.contains("pool empty 0x"), "{line}");
+        assert_eq!(session.pool().1, 8);
+
+        // A file the pipeline cannot play is refused with the reason, and the file that
+        // plays is still the one F6 would open again.
+        let vp9 = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/format-vp9.webm");
+        session.open_file(Path::new(vp9)).unwrap();
+        assert_eq!(session.current(), Some(Path::new(vp9)));
+        let why = opened(&mut session).unwrap_err();
+        assert!(why.contains("vp9"), "{why}");
+        assert!(session.is_file());
+        assert_eq!(session.backend_name(), "takt-sw");
+        assert_eq!(session.current(), Some(Path::new(clip)));
+
+        // Back to the test picture: the helpers end with the file.
+        session.show_test_picture();
+        assert!(!session.is_file());
+        assert_eq!(session.backend_name(), "null");
+        assert_eq!(session.current(), None);
+    }
+
+    /// 10-bit material comes as P010, which the layer of `takt-gpu` takes.
+    #[cfg(takt_ffmpeg)]
+    #[test]
+    fn ten_bits_come_as_p010_frames_the_window_takes() {
+        let _one_at_a_time = OWN_PIPELINE_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clip = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/decode-av1-10bit.mkv"
+        );
+        let mut session = session();
+        own(&mut session);
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.limit_note(), Some(OWN_LIMIT));
+        let first = frame(&mut session);
+        assert_eq!(first.get().meta().format, PixelFormat::P010);
+        assert_eq!(
+            (first.get().meta().width, first.get().meta().height),
+            (130, 74)
+        );
+        assert!(session.source_line().contains("(libdav1d)"));
+        assert!(crate::render::Picture::from_frame(first).is_ok());
+    }
+
+    /// A file that is still being opened when the pipeline changes is opened by the other one.
+    #[cfg(all(takt_libmpv, takt_ffmpeg))]
+    #[test]
+    fn a_switch_while_a_file_is_being_opened_opens_it_with_the_other_pipeline() {
+        let _one_at_a_time = OWN_PIPELINE_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/decode-h264.mp4");
+        let mut session = session();
+        if session.pipeline() != Pipeline::Mpv {
+            session.switch_pipeline(Pipeline::Mpv).unwrap();
+        }
+        session.open_file(Path::new(clip)).unwrap();
+        assert!(session.opening());
+        session.switch_pipeline(Pipeline::Own).unwrap();
+        assert!(session.opening());
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.backend_name(), "takt-sw");
+        assert_eq!(session.current(), Some(Path::new(clip)));
+        assert!(session.now_millis() < 1_000, "from its start");
+        // And the other way round.
+        session.show_test_picture();
+        session.open_file(Path::new(clip)).unwrap();
+        session.switch_pipeline(Pipeline::Mpv).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.backend_name(), "mpv-sw");
+    }
+
+    /// The acceptance point of `takt-decode`: the two backends are swapped while a file plays,
+    /// and it goes on where it was.
+    #[cfg(all(takt_libmpv, takt_ffmpeg))]
+    #[test]
+    fn the_pipelines_are_swapped_while_a_file_plays_and_it_goes_on_where_it_was() {
+        let _one_at_a_time = OWN_PIPELINE_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clip = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/long-gop-12s.mkv");
+        let mut session = session();
+        if session.pipeline() != Pipeline::Mpv {
+            session.switch_pipeline(Pipeline::Mpv).unwrap();
+        }
+        session.set_paused(true);
+        session.open_file(Path::new(clip)).unwrap();
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.backend_name(), "mpv-sw");
+        session.seek_to(7_000);
+        let arrived = std::time::Instant::now();
+        while session.seek_landed(None).is_none() {
+            assert!(arrived.elapsed() < std::time::Duration::from_secs(10));
+            let _ = session.next_frame();
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+
+        // A jump of libmpv goes to a keyframe: the file has one at 4 s and at 8 s.
+        let before = session.now_millis();
+        assert!((3_900..=8_100).contains(&before), "libmpv at {before} ms");
+
+        // To the own pipeline: libmpv plays on until the other one has the file open.
+        let line = session.switch_pipeline(Pipeline::Own).unwrap();
+        assert!(line.starts_with("pipeline: own"), "{line}");
+        assert!(session.opening());
+        assert_eq!(session.backend_name(), "mpv-sw");
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.backend_name(), "takt-sw");
+        assert_eq!(session.pipeline(), Pipeline::Own);
+        let position = session.now_millis();
+        assert_eq!(position, before, "where libmpv was");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(session.now_millis(), position, "the pause went along");
+        let shown = frame(&mut session);
+        let pts = shown.get().meta().pts.rescale(Rational::MILLIS).unwrap();
+        assert!(
+            (before..before + 40).contains(&pts.ticks()),
+            "the picture of {before} ms has {pts:?}"
+        );
+        assert_eq!(shown.get().meta().format, PixelFormat::Nv12);
+        drop(shown);
+
+        // And back to libmpv, at the same place: between two keyframes, where a jump to a
+        // keyframe would land seconds away.
+        session.seek_to(3_000);
+        assert_eq!(
+            session.switch_pipeline(Pipeline::Mpv),
+            Ok("pipeline: libmpv".to_owned())
+        );
+        assert_eq!(
+            session.backend_name(),
+            "takt-sw",
+            "until libmpv has it open"
+        );
+        assert_eq!(opened(&mut session), Ok(()));
+        assert_eq!(session.backend_name(), "mpv-sw");
+        let arrived = std::time::Instant::now();
+        let landed = loop {
+            assert!(arrived.elapsed() < std::time::Duration::from_secs(10));
+            let _ = session.next_frame();
+            if let Some(landed) = session.seek_landed(None) {
+                break landed;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        };
+        assert!(
+            (3_000..3_040).contains(&landed),
+            "libmpv went on at {landed} ms"
+        );
+        assert_eq!(session.current(), Some(Path::new(clip)));
     }
 
     #[test]
@@ -1059,7 +1703,7 @@ mod tests {
                 file.color = None;
                 file.limit_told = false;
             }
-            Kind::Test(_) => panic!("a file plays"),
+            Kind::Test(_) | Kind::Own(_) => panic!("libmpv plays a file"),
         }
         assert_eq!(session.take_limit_note(), None, "not known yet");
         // Held at its first picture, the file shows another one for a jump.
@@ -1150,7 +1794,7 @@ mod tests {
         .unwrap();
         let shows = |session: &mut Session| match &mut session.kind {
             Kind::File(file) => file.source.shows_subtitles_of_a_file(),
-            Kind::Test(_) => false,
+            Kind::Test(_) | Kind::Own(_) => false,
         };
 
         let mut session = session();

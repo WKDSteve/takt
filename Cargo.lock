@@ -3057,6 +3057,7 @@ dependencies = [
  "takt-backend",
  "takt-clock",
  "takt-core",
+ "takt-decode",
  "takt-gpu",
  "winit",
 ]

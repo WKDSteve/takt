@@ -40,6 +40,9 @@ pub enum Command {
     CycleAudio,
     /// Show the subtitles this many milliseconds later (negative: earlier).
     ShiftSubtitles(i32),
+    /// Play files through the other pipeline (libmpv or the own one); the
+    /// file that plays goes on there.
+    SwitchPipeline,
 }
 
 /// How far a subtitle key moves the subtitles against the picture, as in
@@ -69,6 +72,8 @@ pub enum Key {
     F3,
     /// F4.
     F4,
+    /// F6, the other pipeline.
+    F6,
     /// `9`, quieter (as in mpv).
     Nine,
     /// `0`, louder (as in mpv).
@@ -95,7 +100,7 @@ pub enum Key {
 
 /// Every key with its label and what it does: the one table the help overlay
 /// and `docs/KEYS.md` are made from (a test holds the file to it).
-pub const BINDINGS: [(Key, &str, &str); 18] = [
+pub const BINDINGS: [(Key, &str, &str); 19] = [
     (Key::Space, "Space", "play / pause"),
     (Key::Left, "Left", "jump back 5 s"),
     (Key::Right, "Right", "jump forward 5 s"),
@@ -113,6 +118,11 @@ pub const BINDINGS: [(Key, &str, &str); 18] = [
     (Key::Question, "?", "show / hide this list of keys"),
     (Key::F3, "F3", "show / hide the diagnostics"),
     (Key::F4, "F4", "save the diagnostics (clipboard and a file)"),
+    (
+        Key::F6,
+        "F6",
+        "switch between libmpv and the own pipeline (picture only, no sound yet)",
+    ),
     (Key::Escape, "Escape", "quit"),
 ];
 
@@ -162,6 +172,7 @@ pub fn command_for(key: Key) -> Command {
         Key::Home => Command::SeekStart,
         Key::F3 => Command::ToggleOverlay,
         Key::F4 => Command::SaveDiagnostics,
+        Key::F6 => Command::SwitchPipeline,
         Key::Nine => Command::VolumeDown,
         Key::Zero => Command::VolumeUp,
         Key::M => Command::ToggleMute,
@@ -305,6 +316,7 @@ impl PlayerState {
             | Command::CycleSubtitles
             | Command::CycleAudio
             | Command::ShiftSubtitles(_)
+            | Command::SwitchPipeline
             | Command::SaveDiagnostics => false,
         }
     }
@@ -418,6 +430,7 @@ mod tests {
             | Key::Home
             | Key::F3
             | Key::F4
+            | Key::F6
             | Key::Nine
             | Key::Zero
             | Key::M
@@ -438,7 +451,14 @@ mod tests {
                 "{key:?}"
             );
         }
-        assert_eq!(BINDINGS.len(), 18, "every variant of Key, once");
+        assert_eq!(BINDINGS.len(), 19, "every variant of Key, once");
+    }
+
+    #[test]
+    fn f6_switches_the_pipeline_and_changes_no_state() {
+        assert_eq!(command_for(Key::F6), Command::SwitchPipeline);
+        let mut state = PlayerState::default();
+        assert!(!state.apply(command_for(Key::F6)) && state.playing());
     }
 
     #[test]

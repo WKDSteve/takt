@@ -25,6 +25,9 @@
 
 mod app;
 mod audio;
+// The own pipeline against libmpv, picture by picture: only in a build that has both.
+#[cfg(all(test, takt_libmpv, takt_ffmpeg))]
+mod compare;
 mod console;
 mod diagnostics;
 mod headless;
