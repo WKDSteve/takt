@@ -34,6 +34,17 @@ fn quick() -> Limits {
     }
 }
 
+/// Limits for a probe that blocks on a slow system call (starting a process, waiting for the hello of
+/// a helper of its own) and cannot beat meanwhile: under heavy load that takes far longer than the short
+/// heartbeat of [`quick`], and the parent would end it before it got to answer.
+fn patient() -> Limits {
+    Limits {
+        heartbeat: Duration::from_secs(60),
+        handshake: Duration::from_secs(60),
+        ..Limits::default()
+    }
+}
+
 /// Whether a process with this id exists.
 fn alive(pid: u32) -> bool {
     if cfg!(windows) {
@@ -308,15 +319,15 @@ fn the_memory_limit_refuses_a_large_allocation() {}
 #[cfg(windows)]
 #[test]
 fn a_helper_cannot_start_a_process_of_its_own() {
-    let (mut helper, _reader) = probe("spawn").spawn_reading().unwrap();
-    let reply = helper.recv(Duration::from_secs(20)).unwrap();
+    let (mut helper, _reader) = probe("spawn").limits(patient()).spawn_reading().unwrap();
+    let reply = helper.recv(Duration::from_secs(60)).unwrap();
     assert_eq!(reply.payload, [0]);
     let limits = Limits {
         child_processes: true,
-        ..quick()
+        ..patient()
     };
     let (mut helper, _reader) = probe("spawn").limits(limits).spawn_reading().unwrap();
-    let reply = helper.recv(Duration::from_secs(20)).unwrap();
+    let reply = helper.recv(Duration::from_secs(60)).unwrap();
     assert_eq!(reply.payload, [1]);
 }
 
@@ -331,10 +342,10 @@ fn a_helper_does_not_outlive_its_parent() {
     // ended without any chance to clean up.
     let limits = Limits {
         child_processes: true,
-        ..quick()
+        ..patient()
     };
     let (mut middle, _reader) = probe("nest").limits(limits).spawn_reading().unwrap();
-    let reply = middle.recv(Duration::from_secs(30)).unwrap();
+    let reply = middle.recv(Duration::from_secs(60)).unwrap();
     let inner = u32::from_le_bytes(reply.payload.try_into().unwrap());
     assert!(alive(inner));
     let middle_pid = middle.pid();

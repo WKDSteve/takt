@@ -122,7 +122,10 @@ fn main() -> ExitCode {
             };
             let inner = HelperCommand::new(me, APP)
                 .arg("deaf")
-                .limits(Limits::default())
+                .limits(Limits {
+                    handshake: Duration::from_secs(60),
+                    ..Limits::default()
+                })
                 .spawn_reading();
             let Ok((inner, _reader)) = inner else {
                 return ExitCode::from(5);
