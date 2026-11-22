@@ -54,3 +54,4 @@ Gerätetests nur auf Anfrage: `TAKT_DEVICE_TESTS=1 cargo test -p takt-audio --fe
 - Commit-Stil `bereich: was` (etwa `audio: ...`, `player: ...`), DCO: `git commit -s`, signiert.
 - Regelwerk für native Apps: `$RULES_VAULT/rulesets/native` (u. a. RS-01, NREL-03, NREL-14).
 - Nichts lokal bauen oder starten auf der Workstation (`NVIM_MACHINE_ROLE=workstation`).
+- Git: In einer Cloud-Sitzung (`CLAUDE_CODE_REMOTE` gesetzt) nie auf `main` pushen, nur auf den eigenen Branch `claude/…`; gelandet wird lokal per Rebase, der Geräteschlüssel signiert dabei (`GIT-09`). Das „auf main pushen“ (`GIT-01`) gilt nur lokal.
