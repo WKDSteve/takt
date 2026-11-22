@@ -93,3 +93,10 @@ Beiträge unter [Developer Certificate of Origin](LICENSES/DCO.txt) — siehe [C
 
 - [hub-desktop](https://github.com/WKDSteve/hub-desktop): hub-desktop lists takt as a tile. ([picture](assets/graphs/pair/hub-desktop--takt.png))
 <!-- connections:end -->
+
+## Kanäle
+
+Der rollende Build hat einen Kanal, `latest`: der neueste Commit von `main` mit grüner CI, nach jedem grünen
+CI-Lauf neu gebaut und nur vorwärts. Releases (`vX.Y.Z`) sind getrennt. Die eingeschalteten Kanäle stehen in der
+Zeile `channels:` des `prepare`-Schritts in `.github/workflows/rolling.yml`; `nightly` (die Spitze von `main`) und
+`stable` (ein `latest`, das 14 Tage oben stand) sind nicht eingeschaltet.
