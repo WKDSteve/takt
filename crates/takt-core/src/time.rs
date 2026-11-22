@@ -130,11 +130,25 @@ const fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
+/// Greatest common divisor for the reduction in `rescale`; `1` for `(0, 0)`.
+fn gcd128(mut a: u128, mut b: u128) -> i128 {
+    if a == 0 && b == 0 {
+        return 1;
+    }
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    // Inputs are at most 2^63 in magnitude, so the result fits.
+    a as i128
+}
+
 /// Ein exakter Zeitpunkt: ganzzahlige Ticks in einer rationalen Zeitbasis.
 ///
 /// Zwei Zeitstempel mit unterschiedlicher Basis sind vergleichbar und
-/// verrechenbar; die Umrechnung geschieht intern in `i128`, damit sie auch
-/// bei grossen Nennern nicht ueberlaeuft.
+/// verrechenbar. Der Vergleich ([`Ord`]) ist fuer jedes Paar von Zeitstempeln
+/// exakt und ueberlaeuft nie (192-Bit-Zwischenwerte). [`Timestamp::rescale`]
+/// und [`Timestamp::diff`] rechnen in `i128` und liefern `None`, wo ein
+/// Zwischenwert oder das Ergebnis nicht darstellbar ist.
 #[derive(Clone, Copy, Eq)]
 pub struct Timestamp {
     ticks: i64,
@@ -192,9 +206,9 @@ impl Timestamp {
 
     /// Rechnet in eine andere Zeitbasis um, kaufmaennisch gerundet.
     ///
-    /// Gibt `None` zurueck, wenn das Ergebnis nicht in `i64` passt. Der
-    /// Zwischenschritt laeuft in `i128`, ein Ueberlauf ist damit praktisch
-    /// nur bei absurden Zeitbasen erreichbar.
+    /// Gibt `None` zurueck, wenn das Ergebnis nicht in `i64` passt oder ein
+    /// Zwischenwert `i128` sprengt (nur bei Zeitbasen nahe `i64::MAX`). Vor der
+    /// Multiplikation werden gemeinsame Teiler gekuerzt, der Wert bleibt exakt.
     #[must_use]
     pub fn rescale(self, to: Rational) -> Option<Self> {
         if self.base == to {
@@ -202,8 +216,21 @@ impl Timestamp {
         }
         // ticks * (base.num/base.den) / (to.num/to.den)
         //   = ticks * base.num * to.den / (base.den * to.num)
-        let numer = i128::from(self.ticks) * i128::from(self.base.num()) * i128::from(to.den());
-        let denom = i128::from(self.base.den()) * i128::from(to.num());
+        let mut n = [
+            i128::from(self.ticks),
+            i128::from(self.base.num()),
+            i128::from(to.den()),
+        ];
+        let mut d = [i128::from(self.base.den()), i128::from(to.num())];
+        for x in &mut n {
+            for y in &mut d {
+                let g = gcd128(x.unsigned_abs(), y.unsigned_abs());
+                *x /= g;
+                *y /= g;
+            }
+        }
+        let numer = n[0].checked_mul(n[1])?.checked_mul(n[2])?;
+        let denom = d[0].checked_mul(d[1])?;
         let rounded = div_round_nearest(numer, denom)?;
         let ticks = i64::try_from(rounded).ok()?;
         Some(Self::new(ticks, to))
@@ -269,14 +296,36 @@ impl PartialEq for Timestamp {
 
 impl Ord for Timestamp {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Kreuzweise multiplizieren statt umrechnen: exakt, ohne Rundung.
+        // Cross-multiply instead of converting: exact, no rounding.
         // self.ticks * self.base  <=>  other.ticks * other.base
-        let lhs =
-            i128::from(self.ticks) * i128::from(self.base.num()) * i128::from(other.base.den());
-        let rhs =
-            i128::from(other.ticks) * i128::from(other.base.num()) * i128::from(self.base.den());
-        lhs.cmp(&rhs)
+        // Denominators are positive, so only ticks and numerators carry sign.
+        let sl = self.ticks.signum() * self.base.num().signum();
+        let sr = other.ticks.signum() * other.base.num().signum();
+        if sl != sr {
+            return sl.cmp(&sr);
+        }
+        if sl == 0 {
+            return Ordering::Equal;
+        }
+        let lhs = mul_wide(
+            u128::from(self.ticks.unsigned_abs()) * u128::from(self.base.num().unsigned_abs()),
+            other.base.den().unsigned_abs(),
+        );
+        let rhs = mul_wide(
+            u128::from(other.ticks.unsigned_abs()) * u128::from(other.base.num().unsigned_abs()),
+            self.base.den().unsigned_abs(),
+        );
+        if sl > 0 { lhs.cmp(&rhs) } else { rhs.cmp(&lhs) }
     }
+}
+
+#[allow(clippy::cast_possible_truncation)] // keeping the low 64 bits is the point
+/// `a * b` as a 192-bit value `(high, low)`; tuple order is numeric order.
+fn mul_wide(a: u128, b: u64) -> (u128, u64) {
+    let b = u128::from(b);
+    let p0 = (a & u128::from(u64::MAX)) * b;
+    let p1 = (a >> 64) * b;
+    ((p0 >> 64) + p1, p0 as u64)
 }
 
 impl PartialOrd for Timestamp {
@@ -393,5 +442,150 @@ mod tests {
             "1:02:03.456"
         );
         assert_eq!(Timestamp::from_millis(-1_500).format_hms(), "-0:00:01.500");
+    }
+
+    fn big(ticks: i64, num: i64, den: i64) -> Timestamp {
+        Timestamp::new(ticks, Rational::new(num, den).unwrap())
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // splitting into 32-bit limbs
+    /// Reference: schoolbook product on 32-bit limbs, little endian.
+    fn limbs_mul(factors: &[u64]) -> Vec<u32> {
+        let mut acc: Vec<u32> = vec![1];
+        for &f in factors {
+            let f = [f as u32, (f >> 32) as u32];
+            let mut out = vec![0u32; acc.len() + 2];
+            for (i, &a) in acc.iter().enumerate() {
+                let mut carry = 0u64;
+                for (j, &b) in f.iter().enumerate() {
+                    let t = u64::from(out[i + j]) + u64::from(a) * u64::from(b) + carry;
+                    out[i + j] = t as u32;
+                    carry = t >> 32;
+                }
+                let mut k = i + 2;
+                while carry != 0 {
+                    let t = u64::from(out[k]) + carry;
+                    out[k] = t as u32;
+                    carry = t >> 32;
+                    k += 1;
+                }
+            }
+            acc = out;
+        }
+        while acc.len() > 1 && acc.last() == Some(&0) {
+            acc.pop();
+        }
+        acc
+    }
+
+    fn reference_cmp(a: Timestamp, b: Timestamp) -> Ordering {
+        let sign = |t: Timestamp| t.ticks().signum() * t.base().num().signum();
+        let (sa, sb) = (sign(a), sign(b));
+        if sa != sb {
+            return sa.cmp(&sb);
+        }
+        let la = limbs_mul(&[
+            a.ticks().unsigned_abs(),
+            a.base().num().unsigned_abs(),
+            b.base().den().unsigned_abs(),
+        ]);
+        let lb = limbs_mul(&[
+            b.ticks().unsigned_abs(),
+            b.base().num().unsigned_abs(),
+            a.base().den().unsigned_abs(),
+        ]);
+        let mag = la
+            .len()
+            .cmp(&lb.len())
+            .then_with(|| la.iter().rev().cmp(lb.iter().rev()));
+        if sa < 0 { mag.reverse() } else { mag }
+    }
+
+    #[test]
+    fn cmp_does_not_overflow_at_i64_limits() {
+        // 2^63 * 2^63 * 2^63 does not fit i128; the old code panicked in debug.
+        let max = i64::MAX;
+        let a = big(max, max, max - 1);
+        let b = big(max, max - 1, max);
+        assert_eq!(a.cmp(&b), Ordering::Greater);
+        assert_eq!(b.cmp(&a), Ordering::Less);
+        assert_eq!(a.cmp(&a), Ordering::Equal);
+        let n = big(-max, max, max - 1);
+        assert_eq!(n.cmp(&a), Ordering::Less);
+        assert_eq!(big(i64::MIN, 1, 1).cmp(&n), Ordering::Greater);
+    }
+
+    #[test]
+    fn cmp_is_exact_where_i128_would_wrap() {
+        let max = i64::MAX;
+        let a = big(max, max, max - 1);
+        let b = big(max - 1, max, max - 1);
+        assert_eq!(a.cmp(&b), Ordering::Greater);
+    }
+
+    #[test]
+    fn rescale_and_diff_return_none_instead_of_overflowing() {
+        let max = i64::MAX;
+        let t = big(max, max, max - 1);
+        let to = Rational::new(1, max).unwrap();
+        assert_eq!(t.rescale(to), None);
+        let u = big(-max, max, max - 1);
+        assert_eq!(t.diff(u), None);
+        // Intermediate 2^189 without reduction, representable result with it.
+        let v = big(max - 1, max, max - 1);
+        assert_eq!(
+            v.rescale(Rational::new(max, 1).unwrap())
+                .map(Timestamp::ticks),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn cmp_matches_reference_on_random_and_edge_values() {
+        let edges = [
+            0,
+            1,
+            -1,
+            2,
+            3,
+            i64::MAX,
+            i64::MAX - 1,
+            -i64::MAX,
+            i64::MIN,
+            1 << 62,
+            1 << 31,
+        ];
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut pick = |allow_zero: bool, allow_min: bool| loop {
+            let r = next();
+            let v = if r % 3 == 0 {
+                edges[(r >> 8) as usize % edges.len()]
+            } else {
+                (next() as i64) >> (r % 64)
+            };
+            if (v == 0 && !allow_zero) || (v == i64::MIN && !allow_min) {
+                continue;
+            }
+            return v;
+        };
+        let mut stamps = Vec::new();
+        for _ in 0..400 {
+            let (n, d) = (pick(true, false), pick(false, false));
+            stamps.push(Timestamp::new(
+                pick(true, true),
+                Rational::new(n, d).unwrap(),
+            ));
+        }
+        for &a in &stamps {
+            for &b in &stamps {
+                assert_eq!(a.cmp(&b), reference_cmp(a, b), "{a:?} vs {b:?}");
+            }
+        }
     }
 }
