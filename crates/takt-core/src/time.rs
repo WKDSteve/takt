@@ -532,11 +532,12 @@ mod tests {
         let u = big(-max, max, max - 1);
         assert_eq!(t.diff(u), None);
         // Intermediate 2^189 without reduction, representable result with it.
-        let v = big(max - 1, max, max - 1);
+        let k = 1_i64 << 50;
+        let v = big(k, k + 1, k);
         assert_eq!(
-            v.rescale(Rational::new(max, 1).unwrap())
+            v.rescale(Rational::new(k + 1, k + 3).unwrap())
                 .map(Timestamp::ticks),
-            Some(1)
+            Some(k + 3)
         );
     }
 
