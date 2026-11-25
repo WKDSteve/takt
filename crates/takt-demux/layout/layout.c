@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Prints the offsets src/bin/takt-demux-helper/ffi.rs asserts, from the headers of the FFmpeg at hand. How to run it: see README.md here.
+
 #include <stddef.h>
 #include <stdio.h>
 #include <libavcodec/codec_par.h>

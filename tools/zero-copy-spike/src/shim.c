@@ -6,6 +6,7 @@
 //            shared texture that the D3D12 device opened by handle (one GPU copy, no CPU copy).
 // C, because the layouts of AVCodecContext and AVFrame belong to the headers and not to a hand-written
 // Rust mirror.
+
 #define COBJMACROS
 #include <initguid.h>
 
