@@ -125,6 +125,8 @@ cp "$work/x1/install.sh" "$work/notarchive/install.sh"
 refused "a folder that is no archive is refused" env TAKT_BIN_DIR="$work/nb" TAKT_DATA_DIR="$work/nd" TAKT_APPLICATIONS_DIR="$work/na" sh "$work/notarchive/install.sh" --allow-root
 check "the refused install wrote nothing" test ! -e "$work/nb"
 refused "a relative place is refused" env TAKT_BIN_DIR="relative/bin" TAKT_DATA_DIR="$home/data/takt" TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/install.sh" --allow-root
+refused "no HOME and a place not named is refused" env -u HOME -u XDG_DATA_HOME -u XDG_BIN_HOME TAKT_BIN_DIR="$work/hb" TAKT_DATA_DIR="$work/hd" sh "$work/x1/install.sh" --allow-root
+check "that refusal wrote nothing" test ! -e "$work/hb"
 
 # Remove: the installed copy, twice.
 check "the installed uninstall.sh removes it" sh "$home/data/takt/uninstall.sh"
@@ -134,6 +136,19 @@ install_here >/dev/null 2>&1
 check "uninstall.sh of the archive removes what the install wrote" env TAKT_BIN_DIR="$home/bin" TAKT_DATA_DIR="$home/data/takt" TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/uninstall.sh"
 check "that removed the program too" test ! -e "$home/bin/takt-player"
 check "removing twice is no error" env TAKT_BIN_DIR="$home/bin" TAKT_DATA_DIR="$home/data/takt" TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/uninstall.sh"
+
+# A damaged `paths` file of an install must remove nothing: an empty bin_dir would name /takt-player, a menu entry
+# that is not <folder>/takt.desktop would delete any file.
+install_here >/dev/null 2>&1
+printf 'victim\n' >"$work/victim.txt"
+printf 'bin_dir=\ndesktop_entry=\n' >"$home/data/takt/paths"
+refused "an empty program folder in paths is refused" sh "$home/data/takt/uninstall.sh"
+printf 'bin_dir=%s\ndesktop_entry=%s\n' "$home/bin" "$work/victim.txt" >"$home/data/takt/paths"
+refused "a menu entry that is not takt.desktop in paths is refused" sh "$home/data/takt/uninstall.sh"
+check "the file named in paths is still there" test -f "$work/victim.txt"
+check "nothing was removed by the refused uninstalls" test -x "$home/bin/takt-player"
+install_here >/dev/null 2>&1
+check "a fresh install writes paths again and removes cleanly" sh "$home/data/takt/uninstall.sh"
 
 # The archive of a real build, made by the workflow.
 if [ -n "$real_archive" ]; then

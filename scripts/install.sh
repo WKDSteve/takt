@@ -62,8 +62,11 @@ absolute() {
         *) fail "$1 must be an absolute path (got '$2')" ;;
     esac
 }
-if [ -z "${TAKT_BIN_DIR:-}${XDG_BIN_HOME:-}${TAKT_DATA_DIR:-}${XDG_DATA_HOME:-}" ]; then
-    [ -n "${HOME:-}" ] || fail "HOME is not set"
+# Without HOME a default place would be a path at the root of the disk, and a partial install would be written before
+# the first mkdir fails: every place must then be named, and nothing is written before this is settled.
+if [ -z "${HOME:-}" ]; then
+    { [ -n "${TAKT_BIN_DIR:-}" ] && [ -n "${TAKT_DATA_DIR:-}" ] && [ -n "${TAKT_APPLICATIONS_DIR:-}" ]; } ||
+        fail "HOME is not set (name TAKT_BIN_DIR, TAKT_DATA_DIR and TAKT_APPLICATIONS_DIR instead)"
 fi
 data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}"
 bin_dir="${TAKT_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}"

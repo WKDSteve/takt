@@ -23,13 +23,21 @@ if [ -f "$here/paths" ] && [ -f "$here/VERSION" ]; then
     bin_dir="$(sed -n 's/^bin_dir=//p' "$here/paths" | head -n 1)"
     desktop_entry="$(sed -n 's/^desktop_entry=//p' "$here/paths" | head -n 1)"
 else
+    if [ -z "${HOME:-}" ]; then
+        { [ -n "${TAKT_BIN_DIR:-}" ] && [ -n "${TAKT_DATA_DIR:-}" ] && [ -n "${TAKT_APPLICATIONS_DIR:-}" ]; } ||
+            fail "HOME is not set (name TAKT_BIN_DIR, TAKT_DATA_DIR and TAKT_APPLICATIONS_DIR instead)"
+    fi
     data_dir="${TAKT_DATA_DIR:-$data_home/takt}"
     bin_dir="${TAKT_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}"
     desktop_entry="${TAKT_APPLICATIONS_DIR:-$data_home/applications}/takt.desktop"
 fi
-case "$bin_dir$data_dir" in
-    /*/*) ;;
-    *) fail "no absolute places to remove from (HOME is not set?)" ;;
+# Each place on its own: the `paths` file of an install is read back here, and a damaged one (an empty bin_dir would
+# turn "$bin_dir/takt-player" into /takt-player) must remove nothing.
+case "$bin_dir" in /?*) ;; *) fail "the program folder is not an absolute path ('$bin_dir')" ;; esac
+case "$data_dir" in /?*) ;; *) fail "the data folder is not an absolute path ('$data_dir')" ;; esac
+case "$desktop_entry" in
+    "" | /?*/takt.desktop) ;;
+    *) fail "the menu entry is not <absolute folder>/takt.desktop ('$desktop_entry')" ;;
 esac
 
 removed=0
