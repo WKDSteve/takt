@@ -82,7 +82,8 @@ pack "$work/out1" >/dev/null 2>&1
 check "package-release.py packs the archive" test -f "$work/out1/takt-linux-x86_64.tar.gz"
 mkdir "$work/x1"
 tar -xzf "$work/out1/takt-linux-x86_64.tar.gz" -C "$work/x1"
-names="$(cd "$work/x1" && ls -A | sort | tr '\n' ' ')"
+# LC_ALL=C: the order of `sort` follows the locale (macOS puts install.sh before LICENSE).
+names="$(cd "$work/x1" && ls -A | LC_ALL=C sort | tr '\n' ' ')"
 check "the archive holds exactly the six files" test "$names" = "LICENSE README.md VERSION install.sh takt-player uninstall.sh "
 check "VERSION says <version>+<short commit>" test "$(cat "$work/x1/VERSION")" = "$label"
 check "the program is the stand-in" cmp "$work/x1/takt-player" "$work/build/takt-player"
