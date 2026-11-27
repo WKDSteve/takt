@@ -28,6 +28,7 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Bauen mit libmpv und FFmpeg | [docs/BUILD.md](docs/BUILD.md) |
 | Tasten und Maus des Players (`?` im Fenster, `takt-player --keys`) | [docs/KEYS.md](docs/KEYS.md) |
 | Den neuesten grünen Stand installieren (Windows, Pre-release `latest`, nicht signiert): `gh release download latest -R WKDSteve/takt -D takt-dl; Unblock-File takt-dl\takt-windows-x86_64.zip; Expand-Archive takt-dl\takt-windows-x86_64.zip takt-latest; .\takt-latest\install.ps1 [-DesktopShortcut]` (Prüfsumme in `takt-dl\SHA256SUMS`; das Zip in einen neuen, leeren Ordner entpacken; Startmenü „Takt“, Eintrag unter *Einstellungen > Apps*). **Dieses Zip spielt keine Dateien:** es ist ohne libmpv gebaut und zeigt nur das Testbild | [Releases](https://github.com/WKDSteve/takt/releases/tag/latest) |
+| Den neuesten grünen Stand installieren (Linux x86_64 und macOS Apple silicon, Pre-release `latest`, nicht signiert): `gh release download latest -R WKDSteve/takt -D takt-dl -p 'takt-linux-x86_64.tar.gz' -p SHA256SUMS` (macOS: `takt-macos-aarch64.tar.gz`); Prüfsumme gegen `SHA256SUMS`; `mkdir takt-latest && tar -xzf takt-dl/takt-linux-x86_64.tar.gz -C takt-latest && takt-latest/install.sh` (installiert nach `~/.local/bin/takt-player`, unter Linux mit Menüeintrag; entfernen mit `~/.local/share/takt/uninstall.sh`). Auch dieses Archiv spielt keine Dateien (ohne libmpv gebaut). Das macOS-Archiv wird gebaut, aber nie auf einem echten Mac gestartet und fehlt, wenn dessen Build fehlschlägt | [Releases](https://github.com/WKDSteve/takt/releases/tag/latest), [scripts/install.sh](scripts/install.sh) |
 | Bauen und für den eigenen Benutzer installieren (Windows, ohne Setup, nach `%LOCALAPPDATA%\takt\bin`): `scripts\build-install.ps1 [-BuildOnly] [-DesktopShortcut]` (derselbe Installer wie im Zip); entfernen: *Einstellungen > Apps > Takt* (der Player entfernt seine Installation selbst, `takt-player.exe --uninstall`, mit Rückfrage in einem Fenster, ohne PowerShell und ohne Konsolenfenster) oder im Terminal `scripts\uninstall.ps1`. **So spielt der Player Dateien:** vorher `TAKT_LIBMPV_DIR` auf ein libmpv-Entwicklerarchiv setzen ([docs/BUILD.md](docs/BUILD.md)); `build-install.ps1` legt dann `libmpv-2.dll` neben die installierte `takt-player.exe` (ein Update ersetzt sie, die Deinstallation entfernt sie), der `PATH` ist dafür nicht nötig. Startet der Player nicht, steht der Grund in `%TEMP%\takt-player.log` | [scripts/](scripts/) |
 | Planung: Plan mit Etappen und Gates, Tasks, offene Entscheidungen | Vault [`tasks-vault/takt/`](https://github.com/WKDSteve/tasks-vault/tree/main/takt) (privat) |
 
@@ -36,8 +37,8 @@ Eine modulare Medien-Suite in Rust: ein gemeinsamer Kern aus Dekodierung, GPU-Co
 | Plattform | Stand |
 |---|---|
 | Windows | Hauptentwicklung, getestet |
-| Linux | CI baut und testet, der Link-Test gegen die libmpv aus `apt` läuft dort (Ubuntu); nativer Test auf echter Hardware geplant |
-| macOS | **ungetestet** — CI baut und testet, aber es gibt kein Testgerät und keine macOS-spezifischen Backends |
+| Linux | CI baut und testet, der Link-Test gegen die libmpv aus `apt` läuft dort (Ubuntu); der Rolling-Build liefert `takt-linux-x86_64.tar.gz` mit `install.sh`; nativer Test auf echter Hardware geplant |
+| macOS | **ungetestet** — CI baut und testet, aber es gibt kein Testgerät und keine macOS-spezifischen Backends; der Rolling-Build liefert `takt-macos-aarch64.tar.gz` (nur gebaut, nie gestartet; hält den Rolling-Build nicht auf) |
 
 ---
 

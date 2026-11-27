@@ -6,10 +6,16 @@
 #
 #   takt-windows-x86_64.zip   takt-player.exe, install.ps1, uninstall.ps1, LICENSE, README.md, VERSION;
 #                             VERSION says <version>+<short commit>, which the install shows in Settings > Apps
-#   SHA256SUMS                the checksum of the zip
+#   takt-linux-x86_64.tar.gz  takt-player, install.sh, uninstall.sh, LICENSE, README.md, VERSION
+#   takt-macos-aarch64.tar.gz the same for macOS (Apple silicon); built, never started on a real Mac
+#   SHA256SUMS                the checksums of the files
 #
-# Runs on the hosted Windows runners (takt is public and has no runner of its own, unlike pult); only
-# Windows is built, the install scripts are Windows ones. appkit is public and read without credentials.
+# Runs on the hosted runners (takt is public and has no runner of its own, unlike pult). Windows and Linux must
+# build for the pre-release to move; macOS is built too but does not hold it back (`experimental` in the matrix:
+# there is no test device, the build is only known to compile and to answer `--keys`). Make it required once it
+# has been green for a while. The Linux and macOS archives are scripts/package-release.py, their install
+# scripts scripts/install.sh and uninstall.sh (appkit's own install.sh is for a single program or an AppImage,
+# takt is a payload of several files, like its Windows zip). appkit is public and read without credentials.
 #
 # Deciding (the newest green commit of main is built) and publishing (SHA256SUMS first, the words of the page last) are
 # the actions prepare and publish of appkit's release-kit, pinned by commit, as in pult. The build is ours:
@@ -68,13 +74,24 @@ jobs:
           token: ${{ github.token }}
 
   build:
+    name: build (${{ matrix.name }})
     needs: prepare
     if: ${{ needs.prepare.outputs.current == 'true' }}
+    # Per leg: one group for the whole matrix would let the legs cancel each other.
     concurrency:
-      group: rolling-build-${{ needs.prepare.outputs.current }}
+      group: rolling-build-${{ needs.prepare.outputs.current }}-${{ matrix.name }}
       cancel-in-progress: true
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
+    # A leg that is `experimental` may fail without the run failing: the pre-release moves without its file.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows, os: windows-latest, experimental: false }
+          - { name: linux, os: ubuntu-latest, experimental: false }
+          - { name: macos, os: macos-latest, experimental: true }
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0 (node24)
         with:
@@ -83,31 +100,52 @@ jobs:
       # Installs the toolchain of rust-toolchain.toml when it is missing.
       - name: Toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      - name: ALSA- und D-Bus-Header (cpal unter Linux, rtkit)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libdbus-1-dev
       - name: Build the player
         run: cargo build --release --locked -p takt-player
       - name: Pack
         id: pack
         env:
           SHA: ${{ needs.prepare.outputs.sha }}
+          LEG: ${{ matrix.name }}
         run: |
           set -eu
           rm -rf dist
-          pwsh -NoProfile -File scripts/package-release.ps1 -BuildDir target/release -OutDir dist -Sha "$SHA"
-          test -f dist/takt-windows-x86_64.zip
-          echo "file=dist/takt-windows-x86_64.zip" >> "$GITHUB_OUTPUT"
-      # The version label of the zip must name the commit of this build: <version>+<short commit>.
+          case "$LEG" in
+            windows)
+              pwsh -NoProfile -File scripts/package-release.ps1 -BuildDir target/release -OutDir dist -Sha "$SHA"
+              file=dist/takt-windows-x86_64.zip
+              ;;
+            linux) platform=linux-x86_64 ;;
+            macos) platform=macos-aarch64 ;;
+          esac
+          if [ "$LEG" != windows ]; then
+            python3 scripts/package-release.py --platform "$platform" --build-dir target/release --out-dir dist --sha "$SHA"
+            file="dist/takt-$platform.tar.gz"
+          fi
+          test -f "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      # The version label of the archive must name the commit of this build: <version>+<short commit>.
       - name: Check the archive
         env:
           FILE: ${{ steps.pack.outputs.file }}
           SHORT: ${{ needs.prepare.outputs.short }}
+          LEG: ${{ matrix.name }}
         run: |
           set -eu
           crate="$(sed -n 's/^version *= *"\(.*\)"/\1/p' apps/takt-player/Cargo.toml | head -n 1)"
-          pwsh -NoProfile -File scripts/test-release.ps1 -BuildDir target/release -Zip "$FILE" -Label "${crate}+${SHORT}"
-      # Only the zip goes on: the SHA256SUMS next to it is made again by the publish action.
+          if [ "$LEG" = windows ]; then
+            pwsh -NoProfile -File scripts/test-release.ps1 -BuildDir target/release -Zip "$FILE" -Label "${crate}+${SHORT}"
+          else
+            test "$(tar -xzOf "$FILE" VERSION)" = "${crate}+${SHORT}"
+            sh scripts/test-release.sh --archive "$FILE" --program target/release/takt-player
+          fi
+      # Only the archive goes on: the SHA256SUMS next to it is made again by the publish action.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rolling-windows
+          name: rolling-${{ matrix.name }}
           path: ${{ steps.pack.outputs.file }}
           if-no-files-found: error
           retention-days: 1
@@ -162,6 +200,18 @@ jobs:
           pattern: rolling-*
           path: dist
           merge-multiple: true
+      # Windows and Linux are required; the macOS archive is there when its (experimental) leg succeeded.
+      - name: Which files are there
+        id: files
+        if: ${{ steps.tip.outputs.current == 'true' }}
+        run: |
+          set -eu
+          ls -la dist
+          test -f dist/takt-windows-x86_64.zip
+          test -f dist/takt-linux-x86_64.tar.gz
+          count=2
+          if [ -f dist/takt-macos-aarch64.tar.gz ]; then count=3; else echo "no macOS archive in this run (experimental leg)"; fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
       - if: ${{ steps.tip.outputs.current == 'true' }}
         uses: WKDSteve/appkit/release-kit/publish@70df3786e91757f71666cfda1b254847c247c3fe # v0.75.0
         with:
@@ -169,6 +219,6 @@ jobs:
           tag: latest
           sha: ${{ needs.prepare.outputs.sha }}
           files: dist
-          expect: 1
+          expect: ${{ steps.files.outputs.count }}
           app: takt
           notes-file: .github/rolling-notes.md
