@@ -150,6 +150,52 @@ check "nothing was removed by the refused uninstalls" test -x "$home/bin/takt-pl
 install_here >/dev/null 2>&1
 check "a fresh install writes paths again and removes cleanly" sh "$home/data/takt/uninstall.sh"
 
+# `//` and a `..` segment name another folder than they seem to: refused like an empty one.
+install_here >/dev/null 2>&1
+printf 'bin_dir=//\ndesktop_entry=\n' >"$home/data/takt/paths"
+refused "a program folder of // in paths is refused" sh "$home/data/takt/uninstall.sh"
+install_here >/dev/null 2>&1
+printf 'bin_dir=%s/bin/..\ndesktop_entry=\n' "$home" >"$home/data/takt/paths"
+refused "a .. segment in paths is refused" sh "$home/data/takt/uninstall.sh"
+check "the refused uninstalls left the program" test -x "$home/bin/takt-player"
+install_here >/dev/null 2>&1
+sh "$home/data/takt/uninstall.sh" >/dev/null
+
+# The install refuses the same places, so it never writes a `paths` that its uninstall.sh refuses.
+refused "a .. segment in a place is refused" env TAKT_BIN_DIR="$home/bin/../bin" TAKT_DATA_DIR="$home/data/takt" TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/install.sh" --allow-root
+refused "a newline in a place is refused" env TAKT_BIN_DIR="$home/bin
+x" TAKT_DATA_DIR="$home/data/takt" TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/install.sh" --allow-root
+check "those refusals wrote nothing" test ! -e "$home/data/takt"
+if [ "$(uname -s)" = "Linux" ]; then
+    refused "a program folder with \$ and a menu entry is refused" env TAKT_BIN_DIR="$home/b\$x" TAKT_DATA_DIR="$home/data/takt" TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/install.sh" --allow-root
+fi
+
+# An update that moves the program or drops the menu entry removes the old ones: uninstall.sh only knows the new
+# `paths` and would never find them again.
+install_in() {
+    bin="$1"
+    shift
+    env -u XDG_BIN_HOME -u XDG_DATA_HOME HOME="$home" TAKT_BIN_DIR="$bin" TAKT_DATA_DIR="$home/data/takt" \
+        TAKT_APPLICATIONS_DIR="$home/data/applications" sh "$work/x1/install.sh" --allow-root "$@"
+}
+install_in "$home/bin" >/dev/null
+check "an update into another folder works" install_in "$home/bin2"
+check "the program of the earlier folder is gone" test ! -e "$home/bin/takt-player"
+check "the program is in the new folder" test -x "$home/bin2/takt-player"
+check "an update under another spelling of the same folder works" install_in "$home/bin2/"
+check "that kept the program" test -x "$home/bin2/takt-player"
+if [ "$(uname -s)" = "Linux" ]; then
+    check "the menu entry is there before" test -f "$home/data/applications/takt.desktop"
+    check "an update with --no-desktop-entry works" install_in "$home/bin2" --no-desktop-entry
+    check "the earlier menu entry is gone" test ! -e "$home/data/applications/takt.desktop"
+fi
+
+# uninstall.sh of the archive reads the `paths` of an install it finds, not the variables of the shell it runs in.
+check "uninstall.sh of the archive removes the program where the install put it" \
+    env -u XDG_BIN_HOME -u XDG_DATA_HOME -u TAKT_BIN_DIR -u TAKT_APPLICATIONS_DIR HOME="$home" TAKT_DATA_DIR="$home/data/takt" sh "$work/x1/uninstall.sh"
+check "the program of the other folder is gone" test ! -e "$home/bin2/takt-player"
+check "its record is gone" test ! -e "$home/data/takt"
+
 # The archive of a real build, made by the workflow.
 if [ -n "$real_archive" ]; then
     check "the real archive exists" test -f "$real_archive"

@@ -3,7 +3,8 @@
 #
 # Remove the takt that install.sh installed for the current user (Linux, macOS). The counterpart of
 # uninstall.ps1. Run from the installed copy (<data folder>/uninstall.sh) it removes the places the install
-# wrote down (the file `paths` beside it); run from the unpacked archive it removes the default places.
+# wrote down (the file `paths` beside it); run from the unpacked archive it reads the `paths` of an install in the
+# data folder (TAKT_DATA_DIR or the default), and only without one does it remove the default places.
 # It removes only what install.sh put there: the program, the menu entry, VERSION, uninstall.sh and paths, and
 # the data folder when that is empty then. Nothing is an error when it is already gone.
 
@@ -28,15 +29,28 @@ else
             fail "HOME is not set (name TAKT_BIN_DIR, TAKT_DATA_DIR and TAKT_APPLICATIONS_DIR instead)"
     fi
     data_dir="${TAKT_DATA_DIR:-$data_home/takt}"
-    bin_dir="${TAKT_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}"
-    desktop_entry="${TAKT_APPLICATIONS_DIR:-$data_home/applications}/takt.desktop"
+    if [ -f "$data_dir/paths" ]; then
+        # An install is there: what it wrote down wins over the defaults and the variables of this shell, or a
+        # program installed under another XDG_BIN_HOME or TAKT_BIN_DIR would stay while its record is removed.
+        bin_dir="$(sed -n 's/^bin_dir=//p' "$data_dir/paths" | head -n 1)"
+        desktop_entry="$(sed -n 's/^desktop_entry=//p' "$data_dir/paths" | head -n 1)"
+    else
+        bin_dir="${TAKT_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}"
+        desktop_entry="${TAKT_APPLICATIONS_DIR:-$data_home/applications}/takt.desktop"
+    fi
 fi
 # Each place on its own: the `paths` file of an install is read back here, and a damaged one (an empty bin_dir would
-# turn "$bin_dir/takt-player" into /takt-player) must remove nothing.
-case "$bin_dir" in /?*) ;; *) fail "the program folder is not an absolute path ('$bin_dir')" ;; esac
-case "$data_dir" in /?*) ;; *) fail "the data folder is not an absolute path ('$data_dir')" ;; esac
+# turn "$bin_dir/takt-player" into /takt-player, `//` or a `..` segment would name another folder) must remove
+# nothing. The same rule as install.sh.
+place() {
+    case "$2" in /?*) ;; *) fail "$1 is not an absolute path ('$2')" ;; esac
+    case "$2" in //* | */. | */./* | */.. | */../*) fail "$1 holds '//', '.' or '..' ('$2')" ;; esac
+}
+place "the program folder" "$bin_dir"
+place "the data folder" "$data_dir"
 case "$desktop_entry" in
-    "" | /?*/takt.desktop) ;;
+    "") ;;
+    /?*/takt.desktop) place "the menu entry" "$desktop_entry" ;;
     *) fail "the menu entry is not <absolute folder>/takt.desktop ('$desktop_entry')" ;;
 esac
 

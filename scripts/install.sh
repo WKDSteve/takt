@@ -56,11 +56,26 @@ case "$version" in
     *) fail "VERSION says '$version', not <version>+<short commit>: this folder is no takt archive" ;;
 esac
 
+# A place is written to `paths` and read back by uninstall.sh, which applies the same rule: absolute, no `.` or `..`
+# segment, no `//`, no control character (a newline would add a line to `paths`).
 absolute() {
     case "$2" in
-        /*) ;;
+        /?*) ;;
         *) fail "$1 must be an absolute path (got '$2')" ;;
     esac
+    case "$2" in
+        //* | */. | */./* | */.. | */../*) fail "$1 must not hold '//', '.' or '..' (got '$2')" ;;
+    esac
+    # The x keeps a newline: command substitution would strip it as trailing.
+    [ "$(printf '%s' "$2" | LC_ALL=C tr -d '[:print:]'; printf x)" = x ] || fail "$1 holds a control character"
+}
+# The rule above as a test, for the places an earlier install wrote down.
+is_place() {
+    case "$1" in //* | */. | */./* | */.. | */../*) return 1 ;; /?*) return 0 ;; *) return 1 ;; esac
+}
+# Two spellings of one folder (a trailing slash, a symbolic link) are the same folder.
+same_folder() {
+    [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$(cd "$2" 2>/dev/null && pwd -P)" ]
 }
 # Without HOME a default place would be a path at the root of the disk, and a partial install would be written before
 # the first mkdir fails: every place must then be named, and nothing is written before this is settled.
@@ -75,6 +90,24 @@ apps_dir="${TAKT_APPLICATIONS_DIR:-$data_home/applications}"
 absolute "the program folder" "$bin_dir"
 absolute "the data folder" "$data_dir"
 absolute "the applications folder" "$apps_dir"
+# The Exec line of a menu entry quotes the program; these characters would need the escapes of the desktop entry
+# spec, so such a folder is refused before anything is written instead of getting a broken entry.
+if [ "$want_desktop_entry" = 1 ] && [ "$(uname -s)" = "Linux" ]; then
+    case "$bin_dir" in
+        *'"'* | *'`'* | *'$'* | *'\'* | *'%'*)
+            fail "the program folder holds one of \" \` \$ \\ % ('$bin_dir'): use another folder or --no-desktop-entry"
+            ;;
+    esac
+fi
+
+# What an earlier install wrote down: an update that puts the program or the menu entry elsewhere (another
+# TAKT_BIN_DIR, --no-desktop-entry) removes the old ones below, or uninstall.sh would never find them again.
+old_bin_dir=""
+old_desktop_entry=""
+if [ -f "$data_dir/paths" ]; then
+    old_bin_dir="$(sed -n 's/^bin_dir=//p' "$data_dir/paths" | head -n 1)"
+    old_desktop_entry="$(sed -n 's/^desktop_entry=//p' "$data_dir/paths" | head -n 1)"
+fi
 
 mkdir -p "$bin_dir" "$data_dir"
 # Copied beside the target and moved over it: an update over a running player replaces the file, it does not
@@ -102,6 +135,20 @@ if [ "$want_desktop_entry" = 1 ] && [ "$(uname -s)" = "Linux" ]; then
         printf 'Terminal=false\n'
         printf 'Categories=AudioVideo;Video;Player;\n'
     } >"$desktop_entry"
+fi
+# Only what passes the rule of uninstall.sh is removed (a damaged old `paths` removes nothing), and never the file
+# this run just wrote under another spelling of its folder.
+if [ -n "$old_desktop_entry" ] && is_place "$old_desktop_entry"; then
+    case "$old_desktop_entry" in
+        /?*/takt.desktop)
+            if [ -z "$desktop_entry" ] || ! same_folder "${old_desktop_entry%/takt.desktop}" "$apps_dir"; then
+                rm -f "$old_desktop_entry"
+            fi
+            ;;
+    esac
+fi
+if [ -n "$old_bin_dir" ] && is_place "$old_bin_dir" && ! same_folder "$old_bin_dir" "$bin_dir"; then
+    rm -f "$old_bin_dir/takt-player"
 fi
 {
     printf 'bin_dir=%s\n' "$bin_dir"
