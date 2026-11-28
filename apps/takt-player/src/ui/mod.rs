@@ -1066,8 +1066,14 @@ pub fn run(
         "Takt",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(PlayerApp::new(
-                cc, seconds, overlay, imported, &files,
+            // A lost device ends the window with its reason (`render::loss`).
+            let loss = cc
+                .wgpu_render_state
+                .as_ref()
+                .map(|state| render::loss::DeviceLoss::watch(&state.device));
+            Ok(Box::new(render::loss::EndsOnLoss::new(
+                PlayerApp::new(cc, seconds, overlay, imported, &files),
+                loss,
             )))
         }),
     )

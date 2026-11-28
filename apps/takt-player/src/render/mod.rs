@@ -12,6 +12,7 @@
 
 #[cfg(windows)]
 pub mod import;
+pub mod loss;
 
 use std::sync::Arc;
 use std::time::Instant;

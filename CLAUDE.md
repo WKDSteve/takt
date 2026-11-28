@@ -20,7 +20,8 @@ Dazu in der CI: jede Zone-1-Crate allein (`cargo build -p takt-core --locked`, e
 `takt-clock`, `takt-audio`, `takt-ipc`; Lizenzen mit `deny-zone1.toml`), die Mindestversion
 (`cargo check --workspace --all-features` mit Rust 1.90.0) und auf Windows die GPU-Tests
 (`TAKT_GPU_TESTS=1 TAKT_GPU_ADAPTER=fallback cargo test -p takt-gpu gpu -- --ignored`: Referenzbilder, Compositing und
-der Import einer fremden Textur auf WARP).
+der Import einer fremden Textur auf WARP; dazu `cargo test -p takt-player a_lost_device -- --ignored`, ein verlorenes
+Gerät).
 `takt-demux` und `takt-decode` mit echtem FFmpeg 9.0 laufen in einem eigenen Job (Ubuntu und Windows, Archiv
 gepinnt); lokal `FFMPEG_DIR` setzen, die Bibliotheken in `PATH` bzw. `LD_LIBRARY_PATH`, dann
 `cargo test -p takt-demux -p takt-decode` (beide Pakete in einem Lauf: die Decoder-Tests starten auch den

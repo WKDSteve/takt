@@ -121,6 +121,8 @@ fn main() -> ExitCode {
     // another device wrote (Windows; a check of that path, the overlay says how it went).
     let imported = args.iter().any(|arg| arg == "--imported");
     match ui::run(seconds, overlay, imported, files(&args[1..])) {
+        // The window closed because its GPU device was lost; it said why (`render::loss`).
+        Ok(()) if render::loss::recorded().is_some() => ExitCode::FAILURE,
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let message = format!("no window: {e} (--headless runs without one)");

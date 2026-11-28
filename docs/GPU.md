@@ -14,6 +14,7 @@ Dieses Dokument beschreibt die Naht zu `takt-decode`, den Farbweg, das Compositi
   - [Der Farbweg](#der-farbweg)
   - [Tonemapping](#tonemapping)
   - [Compositing](#compositing)
+  - [Ein verlorenes Gerät](#ein-verlorenes-gerät)
   - [Tests](#tests)
   - [Messen](#messen)
   - [Was fehlt](#was-fehlt)
@@ -131,6 +132,17 @@ Gemischt wird auf den Werten des Ziels (vormultipliziert, „source over“): be
 gamma-kodierten Werten, bei einem Zielformat, das selbst nach sRGB kodiert, im linearen Licht. Einen Zwischenraum in
 `Rgba16F` für HDR-Ausgabe gibt es noch nicht.
 
+## Ein verlorenes Gerät
+
+wgpu gibt ein Gerät für immer auf, sobald ein Aufruf des Treibers mit „zu wenig Speicher“, „Gerät verloren“ (ein
+Reset der GPU) oder einem unbekannten Fehler scheitert. Danach verweigert es jeden Puffer still, und egui-wgpu endet
+im nächsten Bild, das etwas zu zeichnen hat, mit einer Panik („Failed to create staging buffer for index data“). Das
+war unter starker GPU-Last zu sehen. eframe kann für sein Fenster kein neues Gerät anlegen; also endet der Player
+geordnet: er hört den Rückruf von wgpu für ein verlorenes Gerät, zeichnet ab dem nächsten Bild nichts mehr, nennt den
+Grund auf stderr, in `%TEMP%\takt-player.log` (und ohne Konsole in einem Meldungsfenster), schließt das Fenster und
+endet mit Exit-Code 1 (`apps/takt-player/src/render/loss.rs`). Geht das Gerät genau zwischen der App und dem Zeichnen
+desselben Bildes verloren, bleibt es bei der Panik; deren Zeile im Log nennt dann den Verlust mit.
+
 ## Tests
 
 | Was | Wo | Läuft |
@@ -142,6 +154,7 @@ gamma-kodierten Werten, bei einem Zielformat, das selbst nach sRGB kodiert, im l
 | Vier Lagen gegen eine von Hand gerechnete Mischung | `tests/gpu.rs`, `gpu_four_layers_*` | auf einem Adapter |
 | Import einer fremden Textur gegen den Upload ihrer Ebenen: gleiche Prüfsumme, NV12 und P010 | `tests/gpu.rs`, `import::gpu_*` | Windows, auf einem Adapter |
 | Rückgabe erst, wenn die GPU fertig ist; Zuschnitt; abgelehnte Handles und Größen | `tests/gpu.rs`, `import::gpu_*` | Windows, auf einem Adapter |
+| Ein verlorenes Gerät: egui-wgpu endet mit einem Mesh in der Panik, der Player zeichnet keins | `apps/takt-player/src/render/loss.rs`, `a_lost_device_*` | auf einem Adapter |
 | Der Importweg im echten Fenster | `TESTS/sheets/imported-picture-window.sheet.lua` | privater Rechner, `testing sheets run --all` |
 
 Die Tests auf einem Adapter sind `#[ignore]` und laufen so:

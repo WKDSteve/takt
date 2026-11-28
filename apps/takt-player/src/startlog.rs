@@ -96,7 +96,15 @@ pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default(info);
-        let text = panic_text(info);
+        // A panic after the GPU device was lost (egui-wgpu draws on it once more) is that loss.
+        let text = match crate::render::loss::recorded() {
+            Some(reason) => format!(
+                "{}; {}",
+                crate::render::loss::ending_text(reason),
+                panic_text(info)
+            ),
+            None => panic_text(info),
+        };
         if let Some(log) = path() {
             record_at(&log, &text);
         }

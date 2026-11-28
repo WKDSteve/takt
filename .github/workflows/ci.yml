@@ -69,6 +69,9 @@ jobs:
           grep -q "test gpu_four_layers_are_blended_bottom_to_top_in_their_rectangles ... ok" gpu.log
           grep -q "test import::gpu_an_imported_texture_draws_the_bytes_the_upload_of_its_planes_draws ... ok" gpu.log
           grep -q "test import::gpu_a_frame_is_given_back_only_after_the_gpu_is_done_with_it ... ok" gpu.log
+          # A lost device: egui-wgpu panics on a frame with a mesh, the player draws none (src/render/loss.rs).
+          cargo test -p takt-player a_lost_device -- --ignored --nocapture --test-threads=2 2>&1 | tee lost.log
+          grep -q "test render::loss::tests::a_lost_device_panics_egui_wgpu_with_a_mesh_and_not_without_one ... ok" lost.log
         env:
           TAKT_GPU_TESTS: "1"
           TAKT_GPU_ADAPTER: fallback
