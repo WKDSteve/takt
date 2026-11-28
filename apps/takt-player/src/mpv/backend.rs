@@ -173,6 +173,10 @@ pub const MAX_EARLY_MICROS: u32 = 100_000;
 const EARLY_STEP_MICROS: u32 = 200;
 /// The drop counters of mpv are read every this many passes.
 const COUNTER_PASSES: u64 = 16;
+
+/// How often [`MpvBackend::refresh_stats`] reads again when a reading of the
+/// probe thread came in between (it reads only every [`COUNTER_PASSES`]).
+const REFRESH_TRIES: usize = 3;
 /// The longest label of a track shown to the user, in characters.
 const LABEL_CHARS: usize = 60;
 /// The most tracks of one kind a list names, and the most entries of the
@@ -428,9 +432,13 @@ struct Asks {
     /// A pass waited in vain for a reading, and none is done since: the
     /// core holds it up.
     held: bool,
-    /// Files opened: a reading of the drop counters that began before an
-    /// open counts those of the file before and is not stored.
-    opens: u64,
+    /// Stores of the drop counters and opens: a reading that began before
+    /// one of them is older than what is there now and is not stored.
+    generation: u64,
+    /// A file is being opened: mpv drops the file before only after
+    /// `loadfile` returned, so a reading until the new file is loaded may
+    /// count the frames of the one before and is not stored.
+    loading: bool,
 }
 
 /// What the thread that steers and the probe thread share.
@@ -529,27 +537,53 @@ impl Probe {
         !asked.stop
     }
 
-    /// A file is opened: its drop counters start at zero, and a reading that
-    /// began before stores nothing ([`Probe::read_dropped`]).
+    /// A file is to be opened: its drop counters start at zero, and no
+    /// reading is stored until it is loaded ([`Probe::loaded`]), nor one that
+    /// began before ([`Probe::read_dropped`]).
     fn reset_dropped(&self) {
         let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
-        asked.opens += 1;
+        asked.generation += 1;
+        asked.loading = true;
         self.dropped.store(0, Ordering::Relaxed);
     }
 
+    /// The open of [`Probe::reset_dropped`] ended (the file is loaded, or it
+    /// failed): readings from now on are of the new file; one that began
+    /// while it loaded stores nothing.
+    fn loaded(&self) {
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.generation += 1;
+        asked.loading = false;
+    }
+
     /// Reads the drop counters with `read` (a question to mpv, without the
-    /// lock) and stores them, unless a file was opened meanwhile: then they
-    /// may be those of the file before.
-    fn read_dropped(&self, read: impl FnOnce() -> u64) {
-        let opens = self
+    /// lock) and stores them, unless another store or an open came meanwhile
+    /// (then what is there is newer, or the counters may be those of the file
+    /// before) or a file is loading. Whether it was stored.
+    fn read_dropped(&self, read: impl FnOnce() -> u64) -> bool {
+        let generation = self
             .asked
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .opens;
+            .generation;
         let dropped = read();
-        let asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
-        if asked.opens == opens {
-            self.dropped.store(dropped, Ordering::Relaxed);
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        if asked.generation != generation || asked.loading {
+            return false;
+        }
+        asked.generation += 1;
+        self.dropped.store(dropped, Ordering::Relaxed);
+        true
+    }
+
+    /// Reads the drop counters now through [`Probe::read_dropped`], again
+    /// when a reading of the probe thread was stored meanwhile, so that the
+    /// value is this reading's, and no older reading stores over it.
+    fn refresh_dropped(&self, mut read: impl FnMut() -> u64) {
+        for _ in 0..REFRESH_TRIES {
+            if self.read_dropped(&mut read) {
+                return;
+            }
         }
     }
 
@@ -1423,7 +1457,11 @@ impl MpvBackend {
         self.probe.reset_dropped();
         self.loading = None;
         self.opened = None;
-        self.mpv.load(&source).map_err(backend_error)?;
+        if let Err(error) = self.mpv.load(&source) {
+            // Nothing loads: the readings go on.
+            self.probe.loaded();
+            return Err(backend_error(error));
+        }
         self.loading = Some(Loading {
             asked: Instant::now(),
             // `loadfile` replaces the playlist: its one entry is this load.
@@ -1454,6 +1492,7 @@ impl MpvBackend {
     /// The load failed: mpv is told to stop, and the reason is kept.
     fn fail_open(&mut self, error: Error) {
         self.loading = None;
+        self.probe.loaded();
         // What did not open must not go on behind the back of the player: a
         // playlist file "ends" by handing its entries to mpv, which would
         // play them without a picture here.
@@ -1464,6 +1503,7 @@ impl MpvBackend {
     /// mpv has opened the file: the description of what plays now.
     fn finish_open(&mut self) {
         self.loading = None;
+        self.probe.loaded();
         self.loaded = true;
         self.eof = false;
         if let Err(error) = self.fit() {
@@ -1597,8 +1637,9 @@ impl MpvBackend {
     /// thread reads them every few passes otherwise): for the last line of
     /// a measuring run.
     pub fn refresh_stats(&mut self) -> BackendStats {
-        let dropped = dropped_frames(|name| self.mpv.int(name));
-        self.probe.dropped.store(dropped, Ordering::Relaxed);
+        let mpv = &mut self.mpv;
+        self.probe
+            .refresh_dropped(|| dropped_frames(|name| mpv.int(name)));
         self.counted()
     }
 }
@@ -1822,9 +1863,63 @@ mod tests {
             0,
             "the counters of the file before came back after the open"
         );
-        // The next reading is one of the new file.
+        // The next reading after the file is loaded is one of the new file.
+        probe.loaded();
         probe.read_dropped(|| 2);
         assert_eq!(probe.dropped.load(Ordering::Relaxed), 2);
+    }
+
+    /// The read of `refresh_stats` (the last line of a measuring run) is the
+    /// newest: a reading of the probe thread that began before it does not
+    /// store its older, smaller value over it.
+    #[test]
+    fn a_reading_from_before_a_refresh_stores_nothing_over_it() {
+        let probe = Probe::default();
+        probe.read_dropped(|| {
+            // The probe thread asks mpv; meanwhile the window refreshes.
+            probe.refresh_dropped(|| 9);
+            4
+        });
+        assert_eq!(
+            probe.dropped.load(Ordering::Relaxed),
+            9,
+            "an older reading stored over the refresh"
+        );
+        // A reading of the probe thread in the middle of a refresh makes it
+        // read again: the value is the refresh's own.
+        let mut reads = 0;
+        probe.refresh_dropped(|| {
+            reads += 1;
+            if reads == 1 {
+                assert!(probe.read_dropped(|| 10));
+            }
+            11 + reads
+        });
+        assert_eq!(probe.dropped.load(Ordering::Relaxed), 13);
+    }
+
+    /// `loadfile` returns before mpv drops the file before: a reading until
+    /// the new file is loaded may count its frames and is not stored, nor
+    /// one that began while it loaded.
+    #[test]
+    fn a_reading_while_a_file_loads_stores_nothing() {
+        let probe = Probe::default();
+        probe.read_dropped(|| 5);
+        probe.reset_dropped();
+        assert!(!probe.read_dropped(|| 7), "the counters of the file before");
+        probe.refresh_dropped(|| 7);
+        assert_eq!(probe.dropped.load(Ordering::Relaxed), 0);
+        probe.read_dropped(|| {
+            probe.loaded();
+            7
+        });
+        assert_eq!(
+            probe.dropped.load(Ordering::Relaxed),
+            0,
+            "a reading that began while the file loaded was stored"
+        );
+        assert!(probe.read_dropped(|| 1));
+        assert_eq!(probe.dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]
