@@ -392,6 +392,27 @@ pub struct Mpv {
     core: Arc<Core>,
 }
 
+/// Reads properties of a core from another thread than the one that steers
+/// ([`Mpv::asker`]): a question waits for the core, and with it only the
+/// thread that asks.
+pub struct Asker {
+    core: Arc<Core>,
+}
+
+impl Asker {
+    /// A property as a floating point number, `None` while mpv has none.
+    #[must_use]
+    pub fn double(&self, name: &CStr) -> Option<f64> {
+        self.core.double(name)
+    }
+
+    /// A property as an integer, `None` while mpv has none.
+    #[must_use]
+    pub fn int(&self, name: &CStr) -> Option<i64> {
+        self.core.int(name)
+    }
+}
+
 impl Mpv {
     /// A core with `options` set before it starts (`mpv_set_option_string`,
     /// the names of the mpv manual without `--`), and the software renderer.
@@ -646,6 +667,14 @@ impl Mpv {
     /// A property as an integer, `None` while mpv has none.
     pub fn int(&mut self, name: &CStr) -> Option<i64> {
         self.core.int(name)
+    }
+
+    /// What asks this core for properties from a thread of its own.
+    #[must_use]
+    pub fn asker(&self) -> Asker {
+        Asker {
+            core: Arc::clone(&self.core),
+        }
     }
 }
 

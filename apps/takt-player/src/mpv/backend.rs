@@ -70,6 +70,26 @@
 //! its target time says ([`super::stamp`]); only the first frame after a
 //! start, a jump or a pause has nothing to be held against.
 //!
+//! # A third thread asks where mpv is
+//!
+//! The window may wait for the core, but not on every pass: the core of mpv
+//! does not answer while the render thread draws the subtitles, and a
+//! costly subtitle file (libass at 150 ms a frame, measured 2026-11-15)
+//! held every pass that long, only for `audio-pts`. So what is asked once a
+//! pass, the position for the clock and every few passes the drop counters,
+//! is asked by a thread of its own (`probe_loop`): [`VideoBackend::next_frame`]
+//! asks it and waits at most [`PASS_READING`] for the reading. That takes
+//! microseconds, so the anchor is as fresh as when the pass asked itself;
+//! it has to be, because without sound the anchor is `time-pos`, which
+//! moves in steps of a frame: an anchor of the pass before put the clock a
+//! frame behind the frame it hands out (measured: 23 ms at 25 fps, test
+//! `a_test_pattern_is_rendered_into_memory`). The anchor is stamped right
+//! after the core answered, as before. While the core keeps the question
+//! waiting, the pass goes on after [`PASS_READING`], the clock runs on from
+//! the last anchor (at most [`MAX_EXTRAPOLATION_NANOS`]) and the window goes
+//! on drawing. Test
+//! `subtitles_that_are_costly_to_draw_do_not_hold_up_the_window`.
+//!
 //! Commands that answer later (`mpv_command_async`) are not used: reading
 //! subtitle files that way froze the core of mpv 0.41 for good while one
 //! thread rendered and asked. `sub-add` waits for mpv (a local file:
@@ -109,7 +129,7 @@
 
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -121,7 +141,7 @@ use takt_core::{
     PooledFrame, Rational, Timestamp, TransferFunction,
 };
 
-use super::ffi::{self, Event, Mpv, Renderer, Target, Waiting, Waker};
+use super::ffi::{self, Asker, Event, Mpv, Renderer, Target, Waiting, Waker};
 use super::micros;
 use super::stamp::{Reading, Stamper};
 
@@ -139,6 +159,13 @@ const POOL_FRAMES: usize = 4;
 const MAX_SUBTITLE_SHIFT_MILLIS: i32 = 60_000;
 /// How long a source may take to open.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a pass waits for the reading of the probe thread: it takes
+/// microseconds, unless the core keeps the question waiting (module
+/// documentation).
+const PASS_READING: Duration = Duration::from_millis(3);
+/// How long the end of an open waits for the first reading of the probe
+/// thread: the core answers a local file in milliseconds.
+const OPEN_READING: Duration = Duration::from_millis(500);
 /// The longest lead mpv is asked for: a tenth of a second.
 pub const MAX_EARLY_MICROS: u32 = 100_000;
 /// A lead is set again only when it moved by more than this: the measured
@@ -387,6 +414,142 @@ fn render_loop(mut renderer: Renderer, shared: &Shared, clock: &AudioMasterClock
 /// The pool of the render thread, and the size of its frames.
 type Sized = Option<((u32, u32), FramePool)>;
 
+/// What the probe thread was asked for and has done.
+#[derive(Default)]
+struct Asks {
+    /// A pass asked for a reading.
+    reading: bool,
+    /// The thread ends.
+    stop: bool,
+    /// A reading is on its way.
+    in_flight: bool,
+    /// Readings done.
+    done: u64,
+}
+
+/// What the thread that steers and the probe thread share.
+#[derive(Default)]
+struct Probe {
+    asked: Mutex<Asks>,
+    changed: Condvar,
+    /// The open file has a sound track that plays.
+    has_sound: AtomicBool,
+    /// The frames mpv dropped, as last read.
+    dropped: AtomicU64,
+    /// `Asks::done`, for a pass that spins without taking the lock.
+    finished: AtomicU64,
+}
+
+impl Probe {
+    /// Asks for one reading and waits until it is done, at most `limit`: a
+    /// pass, for an anchor of this moment, and the end of an open, so that
+    /// the clock and [`MpvBackend::has_sound`] are those of the new file.
+    /// The lock is only ever held to look at the flags, never across a
+    /// question to mpv.
+    ///
+    /// `spin`: wait by looking again and again, giving up the processor in
+    /// between, not on the condition variable. A pass waits that way: a
+    /// timed wait under Windows lasts at least a tick of the system timer
+    /// (15.6 ms), and with the processors busy it lasted 20 to 40 ms
+    /// (measured with the costly subtitles), while the reading itself takes
+    /// microseconds.
+    fn ask_and_wait(&self, limit: Duration, spin: bool) {
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.reading = true;
+        self.changed.notify_all();
+        // A reading on its way began before this ask and may be from before
+        // it: wait for the one after it.
+        let wanted = asked.done + 1 + u64::from(asked.in_flight);
+        let until = Instant::now() + limit;
+        if spin {
+            // Without the lock: a lock taken again and again would keep the
+            // probe thread from telling that it is done (a lock of Windows is
+            // not fair).
+            drop(asked);
+            while self.finished.load(Ordering::Acquire) < wanted && Instant::now() < until {
+                std::hint::spin_loop();
+            }
+            return;
+        }
+        while asked.done < wanted && !asked.stop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            asked = self
+                .changed
+                .wait_timeout(asked, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Ends the probe thread.
+    fn stop(&self) {
+        self.asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stop = true;
+        self.changed.notify_all();
+    }
+
+    /// Waits for the next ask; `false` when the thread is to end. Asks that
+    /// came meanwhile are one reading.
+    fn next(&self) -> bool {
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        while !asked.reading && !asked.stop {
+            asked = self
+                .changed
+                .wait(asked)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        asked.reading = false;
+        asked.in_flight = !asked.stop;
+        !asked.stop
+    }
+
+    /// A reading is done.
+    fn done(&self) {
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.in_flight = false;
+        asked.done += 1;
+        self.finished.store(asked.done, Ordering::Release);
+        drop(asked);
+        self.changed.notify_all();
+    }
+}
+
+/// The drop counters of mpv, both kinds together.
+fn dropped_frames(mut int: impl FnMut(&CStr) -> Option<i64>) -> u64 {
+    let output = int(c"frame-drop-count").unwrap_or(0);
+    let decoder = int(c"decoder-frame-drop-count").unwrap_or(0);
+    u64::try_from(output.saturating_add(decoder)).unwrap_or(0)
+}
+
+/// The probe thread (module documentation): once per ask, the position of
+/// mpv as the anchor of the clock (the sound position, or the video
+/// position for a file without sound); every [`COUNTER_PASSES`] asks the
+/// drop counters.
+fn probe_loop(asker: &Asker, probe: &Probe, writer: &AudioClockWriter, time: &dyn MonotonicSource) {
+    let mut readings: u64 = 0;
+    while probe.next() {
+        let sound = asker.double(c"audio-pts").and_then(micros);
+        probe.has_sound.store(sound.is_some(), Ordering::Relaxed);
+        let position = sound.or_else(|| asker.double(c"time-pos").and_then(micros));
+        if let Some(position) = position {
+            let position = u64::try_from(position).unwrap_or(0);
+            writer.report(position, time.now_nanos());
+        }
+        readings += 1;
+        if readings.is_multiple_of(COUNTER_PASSES) {
+            probe
+                .dropped
+                .store(dropped_frames(|name| asker.int(name)), Ordering::Relaxed);
+        }
+        probe.done();
+    }
+}
+
 /// Renders the frame mpv has ready into a pooled frame and puts it into the
 /// slot.
 ///
@@ -523,6 +686,10 @@ pub struct MpvBackend {
     waker: Waker,
     /// The render thread, until this backend is dropped.
     thread: Option<JoinHandle<()>>,
+    /// What the probe thread reads.
+    probe: Arc<Probe>,
+    /// The probe thread, until this backend is dropped.
+    prober: Option<JoinHandle<()>>,
     /// The core was made for files: whatever mpv opens is checked
     /// ([`MpvBackend::on_hook`]).
     guard: bool,
@@ -535,8 +702,6 @@ pub struct MpvBackend {
     subtitle_shift: i32,
     sound_line: String,
     clock: Arc<AudioMasterClock>,
-    writer: AudioClockWriter,
-    time: Arc<dyn MonotonicSource>,
     /// Width and height of the picture as the open file was described,
     /// `None` without video. The frames carry their own size.
     size: Option<(u32, u32)>,
@@ -552,10 +717,7 @@ pub struct MpvBackend {
     opened: Option<takt_core::Result<MediaInfo>>,
     loaded: bool,
     eof: bool,
-    /// The file has a sound track that plays (the clock follows it).
-    has_sound: bool,
     stats: BackendStats,
-    passes: u64,
 }
 
 fn backend_error(error: super::ffi::MpvError) -> Error {
@@ -818,11 +980,32 @@ impl MpvBackend {
                 .spawn(move || render_loop(renderer, &shared, &clock))
                 .map_err(|e| Error::Backend(format!("the render thread did not start: {e}")))?
         };
+        let probe = Arc::new(Probe::default());
+        let prober = {
+            let (asker, probe) = (mpv.asker(), Arc::clone(&probe));
+            std::thread::Builder::new()
+                .name("takt-mpv-probe".to_owned())
+                .spawn(move || probe_loop(&asker, &probe, &writer, time.as_ref()))
+        };
+        let prober = match prober {
+            Ok(prober) => prober,
+            Err(e) => {
+                // The render thread is running: end it before the core goes.
+                shared.stop.store(true, Ordering::Release);
+                waker.wake();
+                let _ = thread.join();
+                return Err(Error::Backend(format!(
+                    "the probe thread did not start: {e}"
+                )));
+            }
+        };
         Ok(Self {
             mpv,
             shared,
             waker,
             thread: Some(thread),
+            probe,
+            prober: Some(prober),
             guard,
             sources: config.sources,
             early: config.early,
@@ -830,8 +1013,6 @@ impl MpvBackend {
             subtitle_shift: 0,
             sound_line,
             clock,
-            writer,
-            time,
             size: None,
             refit: false,
             jump: Jump::Done,
@@ -840,9 +1021,7 @@ impl MpvBackend {
             opened: None,
             loaded: false,
             eof: false,
-            has_sound: false,
             stats: BackendStats::default(),
-            passes: 0,
         })
     }
 
@@ -866,10 +1045,11 @@ impl MpvBackend {
         self.early_micros
     }
 
-    /// Whether the open file has a sound track the clock follows.
+    /// Whether the open file has a sound track the clock follows, as of the
+    /// last reading of the probe thread.
     #[must_use]
-    pub const fn has_sound(&self) -> bool {
-        self.has_sound
+    pub fn has_sound(&self) -> bool {
+        self.probe.has_sound.load(Ordering::Relaxed)
     }
 
     /// What rendering a frame into its pooled frame took so far.
@@ -1196,6 +1376,7 @@ impl MpvBackend {
         self.eof = true;
         self.jump = Jump::Done;
         self.stats = BackendStats::default();
+        self.probe.dropped.store(0, Ordering::Relaxed);
         self.loading = None;
         self.opened = None;
         self.mpv.load(&source).map_err(backend_error)?;
@@ -1247,7 +1428,7 @@ impl MpvBackend {
             self.fail_open(error);
             return;
         }
-        self.publish_position();
+        self.probe.ask_and_wait(OPEN_READING, false);
         let duration = self
             .mpv
             .double(c"duration")
@@ -1357,50 +1538,42 @@ impl MpvBackend {
         }
     }
 
-    /// Publishes the position of mpv as the anchor of the clock: the sound
-    /// position, or the video position for a file without sound.
-    fn publish_position(&mut self) {
-        let sound = self.mpv.double(c"audio-pts").and_then(micros);
-        self.has_sound = sound.is_some();
-        let position = sound.or_else(|| self.mpv.double(c"time-pos").and_then(micros));
-        if let Some(position) = position {
-            let position = u64::try_from(position).unwrap_or(0);
-            self.writer.report(position, self.time.now_nanos());
-        }
-    }
-
-    fn read_counters(&mut self) {
-        let output = self.mpv.int(c"frame-drop-count").unwrap_or(0);
-        let decoder = self.mpv.int(c"decoder-frame-drop-count").unwrap_or(0);
-        self.stats.dropped = u64::try_from(output.saturating_add(decoder)).unwrap_or(0);
-    }
-
-    /// The counters, with what the render thread counted.
+    /// The counters, with what the render thread and the probe thread
+    /// counted.
     fn counted(&self) -> BackendStats {
         BackendStats {
             decoded: self.shared.decoded.load(Ordering::Relaxed),
             queued: self.shared.in_flight.load(Ordering::Relaxed),
+            dropped: self.probe.dropped.load(Ordering::Relaxed),
             ..self.stats
         }
     }
 
-    /// Reads the drop counters of mpv now (they are read every few passes
-    /// otherwise): for the last line of a measuring run.
+    /// Reads the drop counters of mpv now, waiting for the core (the probe
+    /// thread reads them every few passes otherwise): for the last line of
+    /// a measuring run.
     pub fn refresh_stats(&mut self) -> BackendStats {
-        self.read_counters();
+        let dropped = dropped_frames(|name| self.mpv.int(name));
+        self.probe.dropped.store(dropped, Ordering::Relaxed);
         self.counted()
     }
 }
 
 impl Drop for MpvBackend {
     /// Ends the render thread before the core goes: the thread frees the
-    /// render context, which has to happen first (`render.h`).
+    /// render context, which has to happen first (`render.h`). The probe
+    /// thread ends as well, so that the core goes on this thread.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
         self.waker.wake();
+        self.probe.stop();
         if let Some(thread) = self.thread.take() {
             // A render thread that panicked has nothing left to hand over.
             let _ = thread.join();
+        }
+        if let Some(prober) = self.prober.take() {
+            // Neither has a probe thread that panicked.
+            let _ = prober.join();
         }
     }
 }
@@ -1442,8 +1615,10 @@ impl VideoBackend for MpvBackend {
     }
 
     /// The clock is not asked: mpv decides when a frame is due (module
-    /// documentation). Each call is one pass of the display: it publishes the
-    /// position of mpv to [`MpvBackend::clock`].
+    /// documentation). Each call is one pass of the display: it asks the
+    /// probe thread to publish the position of mpv to
+    /// [`MpvBackend::clock`], and waits for that at most [`PASS_READING`]
+    /// (module documentation).
     ///
     /// The frame is the newest one the render thread has put down (module
     /// documentation); one that was not taken in time is gone.
@@ -1458,11 +1633,7 @@ impl VideoBackend for MpvBackend {
     /// is read from [`MpvBackend::position_millis`] once mpv has arrived.
     fn next_frame(&mut self, _clock: &dyn Clock) -> takt_core::Result<Option<PooledFrame>> {
         self.pump();
-        self.publish_position();
-        self.passes += 1;
-        if self.passes.is_multiple_of(COUNTER_PASSES) {
-            self.read_counters();
-        }
+        self.probe.ask_and_wait(PASS_READING, true);
         if self.refit {
             self.fit()?;
         }
@@ -2110,14 +2281,12 @@ mod tests {
     /// render thread only, not the window: the passes of the window stay
     /// short while the frames take long to come.
     ///
-    /// Known red (measured 2026-11-15, mpv 0.41): a pass waits as long as a
-    /// frame takes to draw (about 150 ms with this file), because every
-    /// question to the core (`audio-pts` in `publish_position`) waits while
-    /// the render thread draws the subtitles. Bug
-    /// `takt/mpv-backend-teure-untertitel-halten-das-fenster-an`; the test
-    /// runs with `--ignored`.
+    /// Every question to the core waits while the render thread draws the
+    /// subtitles (measured 2026-11-15, mpv 0.41: `audio-pts` alone 153 ms):
+    /// a pass that asked the core itself waited as long as a frame takes to
+    /// draw. The questions of a pass go to the probe thread (module
+    /// documentation).
     #[test]
-    #[ignore = "known red: a pass waits for the core while libass draws (takt/mpv-backend-teure-untertitel-halten-das-fenster-an)"]
     fn subtitles_that_are_costly_to_draw_do_not_hold_up_the_window() {
         let folder = Folder::new("costly-ass");
         let subtitles = folder.write("film.ass", &costly_ass(60));

@@ -55,6 +55,7 @@ Ein Video-Frame, das zwei Millisekunden zu spät kommt, sieht niemand. Ein Audio
 | Öffnen der eigenen Pipeline (`takt-open`) | wir, je Öffnen einer, kurzlebig: startet die zwei Hilfsprozesse und liest die Stream-Tabelle, damit das Fenster nicht wartet | soft | keine |
 | GPU-Submission | wir | soft, framegebunden | Bildwiederholrate |
 | mpv-Render (`takt-mpv-render`, nur mit dem `MpvBackend` der Phase 0) | wir, je Backend einer | soft, framegebunden | die Frist von mpv: 200 ms je Bild |
+| mpv-Probe (`takt-mpv-probe`, nur mit dem `MpvBackend`) | wir, je Backend einer: fragt mpv einmal je Durchlauf des Fensters nach der Position (Anker der Uhr) und alle paar Durchläufe nach den Zählern; das Fenster stößt es nur an und wartet nicht | soft | keine: wartet der Kern (er antwortet nicht, solange libass Untertitel zeichnet), läuft die Uhr vom letzten Anker weiter |
 | UI | die Fensterbibliothek, meist der Haupt-Thread | soft | Bildwiederholrate |
 | Offline-Render-Pool | wir, ab Phase 3 | Batch | keine |
 | Encoder | wir, ab Phase 2 | Batch bis soft | bei Live-Streams die Ausgaberate |
@@ -128,7 +129,7 @@ Im Player hat die `AudioMasterClock` zwei mögliche Ankerquellen, je nachdem, wa
 | Testbild (`NullBackend`) | `takt-audio` über cpal | abgespielte Samples aus dem Audio-Callback, in einer `SeekableClock` für Sprünge und Pause |
 | Datei (`MpvBackend`) | mpv auf seinem eigenen Gerät | mpvs Tonposition (`audio-pts`) in Mikrosekunden, einmal je Durchlauf der Anzeige veröffentlicht; Sprung und Pause macht mpv, die Uhr folgt |
 
-Beides ist dieselbe Uhr mit demselben Seqlock-Anker, nur der Schreiber ist ein anderer: der Audio-Callback oder der Thread des Fensters, der mpv einmal je Durchlauf nach der Tonposition fragt (nicht der Thread `takt-mpv-render`, der die Bilder rendert). Die beiden Fälle sind die Varianten eines Enums. Eine `Session` hält also genau eine Uhr und einen Tonpfad; eine Datei zu öffnen ersetzt die Variante, und die alte Uhr samt Gerät endet mit ihr (Invariante 3). Dass der Anker im zweiten Fall nicht aus dem Audio-Callback kommt, ist die Grenze von Phase 0: mpv ist hier der Tonpfad, und zwischen zwei Durchläufen rechnet die Uhr mit der Systemuhr weiter, höchstens 100 ms.
+Beides ist dieselbe Uhr mit demselben Seqlock-Anker, nur der Schreiber ist ein anderer: der Audio-Callback oder der Thread `takt-mpv-probe`, den das Fenster einmal je Durchlauf anstößt, mpv nach der Tonposition zu fragen (nicht der Thread `takt-mpv-render`, der die Bilder rendert, und nicht das Fenster selbst: eine Frage an den Kern wartet, solange libass zeichnet, bei einer teuren Untertiteldatei bis 150 ms). Die beiden Fälle sind die Varianten eines Enums. Eine `Session` hält also genau eine Uhr und einen Tonpfad; eine Datei zu öffnen ersetzt die Variante, und die alte Uhr samt Gerät endet mit ihr (Invariante 3). Dass der Anker im zweiten Fall nicht aus dem Audio-Callback kommt, ist die Grenze von Phase 0: mpv ist hier der Tonpfad, und zwischen zwei Durchläufen rechnet die Uhr mit der Systemuhr weiter, höchstens 100 ms.
 
 `may_drop` ist die eigentliche Trennlinie. Sie unterscheidet nicht Taktquellen, sondern **Datenflussrichtungen**:
 
