@@ -425,6 +425,12 @@ struct Asks {
     in_flight: bool,
     /// Readings done.
     done: u64,
+    /// A pass waited in vain for a reading, and none is done since: the
+    /// core holds it up.
+    held: bool,
+    /// Files opened: a reading of the drop counters that began before an
+    /// open counts those of the file before and is not stored.
+    opens: u64,
 }
 
 /// What the thread that steers and the probe thread share.
@@ -447,12 +453,16 @@ impl Probe {
     /// The lock is only ever held to look at the flags, never across a
     /// question to mpv.
     ///
-    /// `spin`: wait by looking again and again, giving up the processor in
-    /// between, not on the condition variable. A pass waits that way: a
+    /// `spin`: wait by looking again and again, not on the condition
+    /// variable, and not at all while the core holds up a reading a pass
+    /// already waited for in vain (`Asks::held`). A pass waits that way: a
     /// timed wait under Windows lasts at least a tick of the system timer
     /// (15.6 ms), and with the processors busy it lasted 20 to 40 ms
     /// (measured with the costly subtitles), while the reading itself takes
-    /// microseconds.
+    /// microseconds. Giving up the processor in between (`yield_now`) made
+    /// the passes longer on a busy machine: the window got it back only
+    /// after a slice of the scheduler (half the passes, measured with
+    /// `what_the_window_leaves_a_busy_machine`).
     fn ask_and_wait(&self, limit: Duration, spin: bool) {
         let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
         asked.reading = true;
@@ -462,12 +472,23 @@ impl Probe {
         let wanted = asked.done + 1 + u64::from(asked.in_flight);
         let until = Instant::now() + limit;
         if spin {
+            // The core held up the reading a pass waited for, and none is done
+            // since: it holds up this one too (a costly subtitle, 150 ms a
+            // frame), and spinning for nothing on every pass took the
+            // processor from the render and the probe thread.
+            if asked.held {
+                return;
+            }
             // Without the lock: a lock taken again and again would keep the
             // probe thread from telling that it is done (a lock of Windows is
             // not fair).
             drop(asked);
             while self.finished.load(Ordering::Acquire) < wanted && Instant::now() < until {
                 std::hint::spin_loop();
+            }
+            let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+            if asked.done < wanted {
+                asked.held = true;
             }
             return;
         }
@@ -508,10 +529,35 @@ impl Probe {
         !asked.stop
     }
 
+    /// A file is opened: its drop counters start at zero, and a reading that
+    /// began before stores nothing ([`Probe::read_dropped`]).
+    fn reset_dropped(&self) {
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.opens += 1;
+        self.dropped.store(0, Ordering::Relaxed);
+    }
+
+    /// Reads the drop counters with `read` (a question to mpv, without the
+    /// lock) and stores them, unless a file was opened meanwhile: then they
+    /// may be those of the file before.
+    fn read_dropped(&self, read: impl FnOnce() -> u64) {
+        let opens = self
+            .asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .opens;
+        let dropped = read();
+        let asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        if asked.opens == opens {
+            self.dropped.store(dropped, Ordering::Relaxed);
+        }
+    }
+
     /// A reading is done.
     fn done(&self) {
         let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
         asked.in_flight = false;
+        asked.held = false;
         asked.done += 1;
         self.finished.store(asked.done, Ordering::Release);
         drop(asked);
@@ -542,9 +588,7 @@ fn probe_loop(asker: &Asker, probe: &Probe, writer: &AudioClockWriter, time: &dy
         }
         readings += 1;
         if readings.is_multiple_of(COUNTER_PASSES) {
-            probe
-                .dropped
-                .store(dropped_frames(|name| asker.int(name)), Ordering::Relaxed);
+            probe.read_dropped(|| dropped_frames(|name| asker.int(name)));
         }
         probe.done();
     }
@@ -1376,7 +1420,7 @@ impl MpvBackend {
         self.eof = true;
         self.jump = Jump::Done;
         self.stats = BackendStats::default();
-        self.probe.dropped.store(0, Ordering::Relaxed);
+        self.probe.reset_dropped();
         self.loading = None;
         self.opened = None;
         self.mpv.load(&source).map_err(backend_error)?;
@@ -1737,6 +1781,50 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(4));
         }
+    }
+
+    #[test]
+    fn a_pass_does_not_wait_again_while_the_core_holds_up_the_reading() {
+        // No probe thread: every reading is held up.
+        let probe = Probe::default();
+        let limit = Duration::from_millis(50);
+        let waited = |probe: &Probe| {
+            let started = Instant::now();
+            probe.ask_and_wait(limit, true);
+            started.elapsed()
+        };
+        assert!(waited(&probe) >= limit, "the first pass waits");
+        assert!(
+            waited(&probe) < limit,
+            "a pass waited again for a reading the core holds up"
+        );
+        // Once a reading is done, a pass waits for the next one again.
+        probe.done();
+        assert!(waited(&probe) >= limit, "the pass after a reading waits");
+        // The end of an open waits whatever a pass found.
+        let started = Instant::now();
+        probe.ask_and_wait(limit, false);
+        assert!(started.elapsed() >= limit, "the end of an open waits");
+    }
+
+    #[test]
+    fn a_reading_of_the_drop_counters_from_before_an_open_stores_nothing() {
+        let probe = Probe::default();
+        probe.read_dropped(|| 5);
+        assert_eq!(probe.dropped.load(Ordering::Relaxed), 5);
+        // The probe thread asks mpv; meanwhile the window opens a file.
+        probe.read_dropped(|| {
+            probe.reset_dropped();
+            7
+        });
+        assert_eq!(
+            probe.dropped.load(Ordering::Relaxed),
+            0,
+            "the counters of the file before came back after the open"
+        );
+        // The next reading is one of the new file.
+        probe.read_dropped(|| 2);
+        assert_eq!(probe.dropped.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -2311,6 +2399,59 @@ mod tests {
         assert!(
             longest < Duration::from_millis(50),
             "a pass took {longest:?} while drawing took up to {drawing:?}"
+        );
+    }
+
+    /// A measurement, not a check (`cargo test -p takt-player
+    /// what_the_window_leaves_a_busy_machine -- --ignored --nocapture`): the
+    /// passes of the costly subtitle file while one thread a processor
+    /// counts as fast as it can. What the waiting of the passes leaves to
+    /// the others shows in the count of those threads and in the frames
+    /// the render thread drew, and what the window got in the count of its
+    /// passes. Measured for the waiting of `Probe::ask_and_wait` (task
+    /// `takt/probe-warten-im-fensterpass-spinnt-ohne-den-prozessor`).
+    #[test]
+    #[ignore = "a measurement for a person to read"]
+    fn what_the_window_leaves_a_busy_machine() {
+        let folder = Folder::new("costly-ass-busy");
+        let subtitles = folder.write("film.ass", &costly_ass(60));
+        let mut backend = backend(Sources::Files);
+        backend.open(&folder.film()).unwrap();
+        backend.add_subtitles(&subtitles).unwrap();
+        let clock = backend.clock();
+        let stop = Arc::new(AtomicBool::new(false));
+        let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let hogs: Vec<_> = (0..threads)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut counted: u64 = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        counted = std::hint::black_box(counted + 1);
+                    }
+                    counted
+                })
+            })
+            .collect();
+        let started = Instant::now();
+        let mut longest = Duration::ZERO;
+        let mut passes: u32 = 0;
+        while started.elapsed() < Duration::from_secs(3) && !backend.is_eof() {
+            let pass = Instant::now();
+            let _ = backend.next_frame(clock.as_ref()).unwrap();
+            longest = longest.max(pass.elapsed());
+            passes += 1;
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let counted: u64 = hogs.into_iter().map(|hog| hog.join().unwrap()).sum();
+        let drawn = backend.render_times();
+        println!(
+            "passes {passes}, longest pass {longest:?}, frames drawn {}, longest drawing {:?}, \
+             counted by {threads} threads {} million",
+            drawn.total(),
+            Duration::from_nanos(drawn.max_nanos()),
+            counted / 1_000_000
         );
     }
 
